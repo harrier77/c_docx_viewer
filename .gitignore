@@ -1,0 +1,31 @@
+# Binary files - compiled artifacts
+*.dll
+*.a
+*.exe
+*.obj
+*.lib
+*.o
+
+# Build artifacts
+obj/
+build_*.bak
+
+# Windows-specific
+Thumbs.db
+Desktop.ini
+
+# IDE files
+.DS_Store
+.vscode/
+.idea/
+
+# Precompiled headers
+*.gch
+
+# Coverage data
+*.gcno
+*.gcda
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
