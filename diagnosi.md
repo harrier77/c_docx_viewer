@@ -45,7 +45,7 @@ F2 — Costruzione/layout incrementale a pagine (la vera soluzione)
 F3 — Ridurre il costo per elemento (3-5x CPU)
 - CSS inline → classi/cache; style object riusato  ✅ COMPLETATO (F3.1)
 - XML DOM: string_view / prefix compare, no std::map per nodo  ✅ COMPLETATO (F3.3)
-- append_text: evitare substr + nbsp temporanei, riservare  ⚠️ PARZIALE (F3.4: reserve ok, substr ancora presente)
+- append_text: evitare substr + nbsp temporanei, riservare  ✅ COMPLETATO (F3.4)
 - u8↔w16 cache per misura  ✅ COMPLETATO (F3.5)
 F4 — Tabelle (correttezza)  ⬜ DA FARE
 F5 — Pulizie viewer (SelectObject restore, DPI, errori) — fuori scope freeze
@@ -101,12 +101,13 @@ Piano:
    - m_map.emplace(std::move(key), cls) sposta key → find(cls) cercava valore come chiave
    - Fix: usa iterator restituito da emplace (result.first->second)
 
-⚠️ F3.4 (parziale) — append_text reserve + nbsp (docx_builder.cpp)
-   - std::string nbsp_buf con reserve(text.size() * 3) riutilizzato nel loop ✅
+✅ F3.4 — append_text reserve + nbsp + no substr (docx_builder.cpp)
+   - m_nbsp_buf: buffer membro riutilizzato per NBSP (reserve condizionale) ✅
+   - m_word_buf: buffer membro riutilizzato per parole (assign + reserve condizionale) ✅
    - NBSP: costruito in-place nel buffer (no string temporanea per run spazi) ✅
-   - Parole: substr() ANCORA PRESENTE (docx_builder.cpp:1142) → il fix
-     "evitato substr()" dichiarato non è applicato.
-   - Impatto residuo: una string temporanea per parola su 200k+ text nodes.
+   - Parole: substr() ELIMINATO → m_word_buf.assign(text.data() + start, len) ✅
+   - Zero allocazioni temporanee per parola (riuso capacity dopo prima parola lunga)
+   - Impatto stimato: −0.1÷0.3 s CPU, −1–3 MB churn su 229 pagine
 
 ✅ F3.5 — Cache UTF-8↔UTF-16 per misura testo GDI (litedocx_c.cpp)
    - Utf8ToUtf16Cache LRU (256 entry) per u8_to_w16 → evita MultiByteToWideChar ripetuti
@@ -208,6 +209,6 @@ Contro: Riscrittura significativa docx_builder
 | F3.1 — StyleCache CSS classi | ✅ Sì | Implementato e usato |
 | Crash fix `StyleCache::get_*_class` | ✅ Sì | `emplace(...).first->second` in tutti e 3 i metodi |
 | F3.3 — XML DOM string_view | ✅ Sì | name/attr keys = string_view (zero alloc), parser zero-copy, compatibile chiamanti |
-| F3.4 — append_text reserve/no substr | ⚠️ Parziale | Buffer NBSP presente, ma `substr()` è ancora lì (`docx_builder.cpp:1142`) |
+| F3.4 — append_text reserve/no substr | ✅ Sì | m_nbsp_buf/m_word_buf membri riutilizzati, zero substr, zero alloc temporanee |
 | F3.5 — Cache UTF-8↔UTF-16 e text width | ✅ Sì | TextWidthCache per documento; Utf8ToUtf16Cache ora `thread_local` (race risolta) |
 | Fix margini pagina | ✅ Sì | Applicato nei 3 punti dichiarati |

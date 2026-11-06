@@ -1097,52 +1097,58 @@ namespace litedocx
         (void)row_index;
     }
 
-    void DocxBuilder::append_text(const litehtml::element::ptr& parent, const std::string& text)
-    {
-        if (text.empty()) return;
-        
-        // Reserve capacity for nbsp building (max 3 bytes per char for UTF-8 NBSP)
-        std::string nbsp_buf;
-        nbsp_buf.reserve(text.size() * 3);
-        
-        size_t i = 0;
-        while(i < text.size())
-        {
-            bool space = text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n';
-            size_t start = i;
-            if(space)
-            {
-                while(i < text.size() && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n'))
-                {
-                    ++i;
-                }
-                size_t len = i - start;
-                bool edge = start == 0 || i == text.size();
-                if(len > 1 || edge)
-                {
-                    nbsp_buf.clear();
-                    // Build NBSP string: \xC2\xA0 repeated len times
-                    nbsp_buf.resize(len * 2);
-                    for (size_t k = 0; k < len; ++k) {
-                        nbsp_buf[k * 2] = '\xC2';
-                        nbsp_buf[k * 2 + 1] = '\xA0';
-                    }
-                    parent->appendChild(std::make_shared<litehtml::el_text>(nbsp_buf.c_str(), m_doc));
-                } else
-                {
-                    parent->appendChild(std::make_shared<litehtml::el_space>(" ", m_doc));
-                }
-            } else
-            {
-                while(i < text.size() && !(text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n'))
-                {
-                    ++i;
-                }
-                // Must use substr to get null-terminated string; el_text copies into std::string
-                parent->appendChild(std::make_shared<litehtml::el_text>(text.substr(start, i - start).c_str(), m_doc));
-            }
-        }
-    }
+     void DocxBuilder::append_text(const litehtml::element::ptr& parent, const std::string& text)
+       {
+           if (text.empty()) return;
+
+           // Reserve capacity for nbsp building (max 2 bytes per char for UTF-8 NBSP)
+           // and for word segments (worst case: one long word = text.size())
+           if (m_nbsp_buf.capacity() < text.size() * 2) {
+               m_nbsp_buf.reserve(text.size() * 2);
+           }
+           if (m_word_buf.capacity() < text.size()) {
+               m_word_buf.reserve(text.size());
+           }
+
+           size_t i = 0;
+           while(i < text.size())
+           {
+               bool space = text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n';
+               size_t start = i;
+               if(space)
+               {
+                   while(i < text.size() && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n'))
+                   {
+                       ++i;
+                   }
+                   size_t len = i - start;
+                   bool edge = start == 0 || i == text.size();
+                   if(len > 1 || edge)
+                   {
+                       m_nbsp_buf.clear();
+                       // Build NBSP string: \xC2\xA0 repeated len times
+                       m_nbsp_buf.resize(len * 2);
+                       for (size_t k = 0; k < len; ++k) {
+                           m_nbsp_buf[k * 2] = '\xC2';
+                           m_nbsp_buf[k * 2 + 1] = '\xA0';
+                       }
+                       parent->appendChild(std::make_shared<litehtml::el_text>(m_nbsp_buf.c_str(), m_doc));
+                   } else
+                   {
+                       parent->appendChild(std::make_shared<litehtml::el_space>(" ", m_doc));
+                   }
+               } else
+               {
+                   while(i < text.size() && !(text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n'))
+                   {
+                       ++i;
+                   }
+                   // Use reusable buffer instead of substr() to avoid temporary allocation
+                   m_word_buf.assign(text.data() + start, i - start);
+                   parent->appendChild(std::make_shared<litehtml::el_text>(m_word_buf.c_str(), m_doc));
+               }
+           }
+       }
 
     void DocxBuilder::append_nbsp(const litehtml::element::ptr& parent)
     {

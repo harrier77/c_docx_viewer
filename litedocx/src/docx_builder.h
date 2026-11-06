@@ -271,6 +271,9 @@ namespace litedocx
         int                     m_page_w_px = 0;
         int                     m_page_h_px = 0;
         StyleCache              m_style_cache;
+        // Reusable buffers for append_text (avoid substr allocations)
+        std::string             m_nbsp_buf;
+        std::string             m_word_buf;
 
         void parse_section();
         void build_body();
