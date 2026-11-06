@@ -40,12 +40,12 @@ Nessun leak osservato: WS si stabilizza (353 MB) e resta; 267→353 MB tra run f
 
 5. Proposte di fix (ordinate)
 F0 — Misure (mezz'ora) 
-F1 — Non bloccare la UI (obbligatoria, basso rischio)  ✅ COMPLETATO
+F1 — Non bloccare la UI (obbligatoria, basso rischio)  ✅ COMPLETATO (rivisto 2026-11-06)
 F2 — Costruzione/layout incrementale a pagine (la vera soluzione)
 F3 — Ridurre il costo per elemento (3-5x CPU)
 - CSS inline → classi/cache; style object riusato  ✅ COMPLETATO (F3.1)
-- XML DOM: string_view / prefix compare, no std::map per nodo  ✅ COMPLETATO (F3.3 parziale)
-- append_text: evitare substr + nbsp temporanei, riservare  ✅ COMPLETATO (F3.4)
+- XML DOM: string_view / prefix compare, no std::map per nodo  ❌ NON FATTO (F3.3: solo #include, nessun uso)
+- append_text: evitare substr + nbsp temporanei, riservare  ⚠️ PARZIALE (F3.4: reserve ok, substr ancora presente)
 - u8↔w16 cache per misura  ✅ COMPLETATO (F3.5)
 F4 — Tabelle (correttezza)  ⬜ DA FARE
 F5 — Pulizie viewer (SelectObject restore, DPI, errori) — fuori scope freeze
@@ -71,14 +71,15 @@ Piano:
 5. Pulizia viewer: restore GDI objects, gestione errori, DPI, scroll/render invalidation.
 
 
-### AGGIORNAMENTO 2026-11-05 — STATO FIX APPLICATI IN QUESTA SESSIONE
+### AGGIORNAMENTO 2026-11-05 — STATO FIX APPLICATI IN QUESTA SESSIONE (verificato 2026-11-06)
 
 
 ✅ F1 — UI NON BLOCCANTE (docxview_new.c)
-   - Aggiunto thread worker LoadThreadProc per ld_open_file + ld_render
-   - WM_APP_DOC_READY per notificare completamento al thread UI
-   - UI responsiva durante caricamento (titolo "Caricamento...")
-   - Cleanup corretto in WM_DESTROY (g_load_cancel + WaitForSingleObject)
+   - v1 (2026-11-05): thread worker LoadThreadProc per ld_open_file + ld_render,
+     WM_APP_DOC_READY, titolo "Caricamento..."
+   - v2 (2026-11-06): riscritto con worker persistente + coda job; render
+     asincrono anche al resize, distruzione differita sul worker, ID di
+     generazione. Vedi "AGGIORNAMENTO 2026-11-06" sotto.
 
 ✅ F3.1 — CSS CLASSI + CACHE (litedocx: docx_builder.h/.cpp)
    - StyleCache: deduplica ParaProps/RunProps identici → classi CSS "pN"/"sN"
@@ -87,21 +88,22 @@ Piano:
    - add_dynamic_rule per list-style-type per-ol
    - Fix bug: emplace restituisce iterator, non usare find(cls) su valore spostato
 
-✅ F3.3 (parziale) — XML DOM string_view (litedocx: xml_dom.h/.cpp)
-   - xml_local_name accetta string_view, evita copy per local-name
-   - Metodi XmlNode::has/attr/attr_local/child/children_named/is usano string_view param
-   - Parser usa string_view per name/attr parsing dove possibile
-   - Nota: map<string,string> resta (C++11 non ha heterogeneous lookup)
+❌ F3.3 — XML DOM string_view (NON APPLICATO — verifica 2026-11-06)
+   - Nessun uso di string_view: xml_dom.h/.cpp usano ancora const std::string&.
+   - Unica traccia: #include <string_view> in xml_dom.h, mai usato.
+   - Da fare: xml_local_name + metodi XmlNode con std::string_view, parser
+     senza std::string temporanee per name/attr.
 
 ✅ CRASH FIX — Bug in StyleCache::get_*_class
    - m_map.emplace(std::move(key), cls) sposta key → find(cls) cercava valore come chiave
    - Fix: usa iterator restituito da emplace (result.first->second)
 
-✅ F3.4 — append_text reserve + evita substr/nbsp temporanei (docx_builder.cpp)
-   - std::string nbsp_buf con reserve(text.size() * 3) riutilizzato nel loop
-   - Parole: evitato substr() → appendChild(el_text(text.c_str() + start))
-   - NBSP: costruito in-place nel buffer (no string temporanea per run spazi)
-   - Impatto: riduce allocazioni per 200k+ text nodes
+⚠️ F3.4 (parziale) — append_text reserve + nbsp (docx_builder.cpp)
+   - std::string nbsp_buf con reserve(text.size() * 3) riutilizzato nel loop ✅
+   - NBSP: costruito in-place nel buffer (no string temporanea per run spazi) ✅
+   - Parole: substr() ANCORA PRESENTE (docx_builder.cpp:1142) → il fix
+     "evitato substr()" dichiarato non è applicato.
+   - Impatto residuo: una string temporanea per parola su 200k+ text nodes.
 
 ✅ F3.5 — Cache UTF-8↔UTF-16 per misura testo GDI (litedocx_c.cpp)
    - Utf8ToUtf16Cache LRU (256 entry) per u8_to_w16 → evita MultiByteToWideChar ripetuti
@@ -114,7 +116,45 @@ Piano:
    - Margini simmetrici: 64px sinistra/destra, 60px alto/basso
    - ld_render() chiamato con content_w = g_page_w - 128 (non page width)
    - ld_draw() usa clip rect area contenuto (esclude margini)
-   - Applicato in 3 punti: LoadThreadProc, WM_SIZE, WM_PAINT
+   - Applicato in 3 punti: worker (load/render), WM_SIZE→request_render, WM_PAINT
+
+
+### AGGIORNAMENTO 2026-11-06 — F1 RISCRITTO E VALIDATO A RUNTIME
+
+✅ F1 — UI realmente non bloccante (docxview_new.c)
+   - Thread worker persistente (WorkerProc) + coda FIFO di job protetta da
+     CRITICAL_SECTION: JOB_LOAD, JOB_RENDER, JOB_DESTROY, JOB_QUIT.
+   - ld_open_file / ld_render / ld_destroy avvengono sempre sul worker:
+     rispettata l'affinità di thread di COM, WIC e degli HDC di misura.
+   - WM_SIZE non chiama più ld_render sul thread UI: richiede il render al
+     worker (request_render). Le larghezze richieste durante un render in corso
+     vengono coalescate in g_render_pending (ultima vittoria).
+   - Durante il render (g_render_busy) WM_PAINT non chiama ld_draw: si evita
+     l'accesso concorrente al DOM. Al termine WM_APP_RENDER_DONE aggiorna
+     altezza/scrollbar e invalida la finestra.
+   - Apertura di un secondo file senza attese: rimosso il
+     WaitForSingleObject(..., 2000) sul thread UI; il path viaggia dentro il
+     job, niente più buffer globale condiviso.
+   - ID di generazione (g_load_gen) su WM_APP_DOC_READY: i risultati di
+     richieste superate vengono distrutti sul worker e non sovrascrivono il
+     documento corrente.
+   - Chiusura senza attese: WM_DESTROY accoda JOB_DESTROY + JOB_QUIT; nessun
+     join sul thread UI. L'uscita del processo recupera eventuali job in corso.
+   - HDC di misura: cb_create_font / cb_text_width usano un GetDC(NULL) locale
+     (rimosso g_tmpdc globale creato dal thread UI e usato dal worker).
+   - Altezza layout cache-ata in g_doc_h (letta dal thread UI) al posto di
+     ld_height(g_doc) in paint/scroll.
+
+✅ F3.5 — Cache UTF-8↔UTF-16 resa thread-local (litedocx_c.cpp)
+   - utf_cache() usa static thread_local: eliminata la data race tra il render
+     sul worker e il draw sul thread UI sulla cache globale.
+   - TextWidthCache resta per-documento (ld_container) e viene usata dal solo
+     worker.
+
+Validazione runtime (2026-11-06): build e programma verificati dall'utente,
+UI responsiva durante il caricamento. Resta non coperto il criterio
+"primo paint ≤ 1-2 s": il documento compare ancora solo dopo il layout
+completo, che richiede F2 (layout incrementale/paginato).
 
 
 ### COSA MANCA ANCORA DA FARE (PRIORITÀ)
@@ -144,7 +184,8 @@ Piano:
 - F4: ~4-6 ore (correttezza, non performance)
 - F3.2 + F5: ~1 giorno (pulizia)
 
-Piano immediato: testare scroll con F3.4+F3.5+Lazy Measurement → decidere se F2 serve ancora.
+Piano immediato: test runtime completato (2026-11-06, F1 ok). Prossimo passo:
+valutare F2 se il primo paint (layout completo) non è accettabile.
 
 ### A. Virtualizzazione DOM per scrolling (da valutare dopo test)
 ```cpp
@@ -154,3 +195,16 @@ Piano immediato: testare scroll con F3.4+F3.5+Lazy Measurement → decidere se F
 ```
 Pro: DOM piccolo (solo pagine visibili) → walk veloce
 Contro: Riscrittura significativa docx_builder
+
+
+### Tabella sommaria fix (aggiornata 2026-11-06)
+
+| Fix marcato ✅ in diagnosi.md | In codice? | Note |
+|---|---|---|
+| F1 — UI non bloccante | ✅ Sì (rivisto 2026-11-06) | Worker persistente + coda job; niente render/attese sul thread UI; distruzione sul worker; ID di generazione. Primo paint ancora legato al layout completo (F2) |
+| F3.1 — StyleCache CSS classi | ✅ Sì | Implementato e usato |
+| Crash fix `StyleCache::get_*_class` | ✅ Sì | `emplace(...).first->second` in tutti e 3 i metodi |
+| F3.3 — XML DOM string_view | ❌ NO | Solo `#include <string_view>`, nessun uso |
+| F3.4 — append_text reserve/no substr | ⚠️ Parziale | Buffer NBSP presente, ma `substr()` è ancora lì (`docx_builder.cpp:1142`) |
+| F3.5 — Cache UTF-8↔UTF-16 e text width | ✅ Sì | TextWidthCache per documento; Utf8ToUtf16Cache ora `thread_local` (race risolta) |
+| Fix margini pagina | ✅ Sì | Applicato nei 3 punti dichiarati |

@@ -22,8 +22,8 @@
 #define PAGE_TOP_GAP     20
 
 static HWND   g_hwnd;
-static HDC    g_tmpdc;
 static void  *g_doc;
+static int    g_doc_h;               /* altezza layout, cache lato UI */
 static int    g_cw = 900, g_ch = 700;
 static int    g_scroll;
 static int    g_page_w = PAGE_MAX_W;
@@ -121,20 +121,26 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
     lf.lfCharSet = DEFAULT_CHARSET;
     f = CreateFontIndirectW(&lf);
 
-    if (fm && f && g_tmpdc) {
-        HGDIOBJ old = SelectObject(g_tmpdc, f);
-        ZeroMemory(&tm, sizeof(tm));
-        GetTextMetricsW(g_tmpdc, &tm);
-        SelectObject(g_tmpdc, old);
-        fm->font_size = size;
-        fm->height = tm.tmHeight;
-        fm->ascent = tm.tmAscent;
-        fm->descent = tm.tmDescent;
-        fm->x_height = tm.tmHeight / 2;
-        fm->ch_width = tm.tmAveCharWidth;
-        fm->draw_spaces = (italic || underline || strike) ? 1 : 0;
-        fm->sub_shift = size / 5;
-        fm->super_shift = size / 3;
+    if (fm && f) {
+        /* DC locale: create_font viene chiamata dal worker di layout, non usare
+         * un HDC globale creato dal thread UI. */
+        HDC dc = GetDC(NULL);
+        if (dc) {
+            HGDIOBJ old = SelectObject(dc, f);
+            ZeroMemory(&tm, sizeof(tm));
+            GetTextMetricsW(dc, &tm);
+            SelectObject(dc, old);
+            ReleaseDC(NULL, dc);
+            fm->font_size = size;
+            fm->height = tm.tmHeight;
+            fm->ascent = tm.tmAscent;
+            fm->descent = tm.tmDescent;
+            fm->x_height = tm.tmHeight / 2;
+            fm->ch_width = tm.tmAveCharWidth;
+            fm->draw_spaces = (italic || underline || strike) ? 1 : 0;
+            fm->sub_shift = size / 5;
+            fm->super_shift = size / 3;
+        }
     }
     return f;
 }
@@ -162,20 +168,28 @@ static int cb_text_width(const char *text, void *font)
 {
     // log_msg("[TEXT_WIDTH] text='%s'\n", text ? text : "NULL");
     SIZE sz;
-    HDC dc = g_tmpdc;
-    if (!dc || !text || !text[0])
+    HDC dc;
+    HGDIOBJ old = NULL;
+
+    sz.cx = sz.cy = 0;
+    if (!text || !text[0])
+        return 0;
+    /* La misura può avvenire sul worker di layout: niente HDC globale. */
+    dc = GetDC(NULL);
+    if (!dc)
         return 0;
     if (font)
-        SelectObject(dc, (HFONT)font);
+        old = SelectObject(dc, (HFONT)font);
     {
         WCHAR *w = u8_to_w(text);
         if (w) {
             GetTextExtentPoint32W(dc, w, lstrlenW(w), &sz);
             free(w);
-        } else {
-            sz.cx = 0;
         }
     }
+    if (font)
+        SelectObject(dc, old);
+    ReleaseDC(NULL, dc);
     return sz.cx;
 }
 
@@ -264,7 +278,7 @@ static void init_callbacks(void)
 static void update_scrollbars(void)
 {
     SCROLLINFO si;
-    int doc_h = g_doc ? ld_height(g_doc) : 0;
+    int doc_h = g_doc_h;
     int page_content_h = doc_h + 120;
     int max_s = page_content_h - g_ch;
     if (max_s < 0) max_s = 0;
@@ -280,105 +294,372 @@ static void update_scrollbars(void)
     SetScrollInfo(g_hwnd, SB_VERT, &si, TRUE);
 }
 
-/* --------------------------- async load --------------------------- */
+/* --------------------------- worker thread / jobs --------------------------- */
 
-#define WM_APP_DOC_READY  (WM_APP + 1)
-#define WM_APP_LOAD_PROGRESS (WM_APP + 2)
+#define WM_APP_DOC_READY    (WM_APP + 1)
+#define WM_APP_RENDER_DONE  (WM_APP + 3)
 
-static char g_load_path[MAX_PATH];
-static HANDLE g_load_thread = NULL;
-static DWORD  g_load_thread_id = 0;
-static volatile LONG g_load_cancel = 0;
+typedef enum JobKind
+{
+    JOB_LOAD = 1,
+    JOB_RENDER,
+    JOB_DESTROY,
+    JOB_QUIT
+} JobKind;
 
-static DWORD WINAPI LoadThreadProc(LPVOID arg)
+typedef struct Job
+{
+    struct Job *next;
+    JobKind     kind;
+    HWND        hwnd;
+    unsigned    id;
+    char        path[MAX_PATH];
+    int         content_w;
+    int         viewport_w;
+    int         viewport_h;
+    void       *doc;
+} Job;
+
+static CRITICAL_SECTION g_job_lock;
+static Job             *g_job_head;
+static Job             *g_job_tail;
+static HANDLE           g_job_event;
+static HANDLE           g_worker_thread;
+static int              g_worker_started;
+static volatile LONG    g_shutdown;
+
+/* Stato usato solo dal thread UI */
+static char     g_load_path[MAX_PATH];
+static unsigned g_load_gen;         /* generazione dell'ultima richiesta */
+static int      g_load_active;      /* load in corso o in coda */
+static int      g_load_content_w;   /* larghezza usata da quella load */
+static int      g_doc_content_w;    /* larghezza del layout corrente */
+static int      g_render_busy;      /* un render è in corso/in coda */
+static int      g_render_pending;   /* larghezza richiesta, -1 = nessuna */
+static void    *g_render_doc;
+static int      g_render_used_w;
+
+static int content_width(void)
+{
+    int w = g_page_w - 128; /* 64 px per lato */
+    return w > 0 ? w : 1;
+}
+
+static Job *alloc_job(JobKind kind)
+{
+    Job *j = (Job *)calloc(1, sizeof(Job));
+    if (!j)
+        return NULL;
+    j->kind = kind;
+    j->hwnd = g_hwnd;
+    return j;
+}
+
+static void enqueue_job(Job *j)
+{
+    if (!j)
+        return;
+    EnterCriticalSection(&g_job_lock);
+    j->next = NULL;
+    if (g_job_tail)
+        g_job_tail->next = j;
+    else
+        g_job_head = j;
+    g_job_tail = j;
+    LeaveCriticalSection(&g_job_lock);
+    SetEvent(g_job_event);
+}
+
+static Job *dequeue_job(void)
+{
+    Job *j;
+    EnterCriticalSection(&g_job_lock);
+    j = g_job_head;
+    if (j)
+    {
+        g_job_head = j->next;
+        if (!g_job_head)
+            g_job_tail = NULL;
+    }
+    LeaveCriticalSection(&g_job_lock);
+    return j;
+}
+
+static void enqueue_destroy(void *doc)
+{
+    Job *j;
+    if (!doc)
+        return;
+    j = alloc_job(JOB_DESTROY);
+    if (!j)
+    {
+        ld_destroy(doc); /* fallback: non dovrebbe mai accadere */
+        return;
+    }
+    j->doc = doc;
+    enqueue_job(j);
+}
+
+/* Distrugge un documento sul thread che lo ha creato: il worker.
+ * Se il worker non esiste, siamo in modalità sincrona e va bene il thread UI. */
+static void dispose_doc(void *doc)
+{
+    if (!doc)
+        return;
+    if (g_worker_started)
+        enqueue_destroy(doc);
+    else
+        ld_destroy(doc);
+}
+
+static DWORD WINAPI WorkerProc(LPVOID arg)
 {
     (void)arg;
-    const char *path = g_load_path;
-    
-    // log_msg("[LOAD] Opening file: %s\n", path);
-    void *doc = ld_open_file(path, &g_cb, g_page_w, g_ch);
-    if (g_load_cancel) {
-        // log_msg("[LOAD] Cancelled after open\n");
-        if (doc) ld_destroy(doc);
-        return 0;
+    for (;;)
+    {
+        Job *j = dequeue_job();
+        if (!j)
+        {
+            WaitForSingleObject(g_job_event, INFINITE);
+            continue;
+        }
+
+        if (j->kind == JOB_QUIT)
+        {
+            free(j);
+            break;
+        }
+
+        switch (j->kind)
+        {
+        case JOB_LOAD:
+        {
+            void *doc = ld_open_file(j->path, &g_cb,
+                                     j->viewport_w > 0 ? j->viewport_w : 800,
+                                     j->viewport_h > 0 ? j->viewport_h : 600);
+            if (doc && !g_shutdown)
+                ld_render(doc, j->content_w);
+
+            if (g_shutdown)
+            {
+                if (doc) ld_destroy(doc);
+            }
+            else if (!doc)
+            {
+                PostMessageA(j->hwnd, WM_APP_DOC_READY, (WPARAM)j->id, 0);
+            }
+            else
+            {
+                PostMessageA(j->hwnd, WM_APP_DOC_READY, (WPARAM)j->id, (LPARAM)doc);
+            }
+            break;
+        }
+
+        case JOB_RENDER:
+            if (j->doc && !g_shutdown)
+                ld_render(j->doc, j->content_w);
+            if (!g_shutdown)
+                PostMessageA(j->hwnd, WM_APP_RENDER_DONE,
+                             (WPARAM)j->content_w, (LPARAM)j->doc);
+            break;
+
+        case JOB_DESTROY:
+            if (j->doc)
+                ld_destroy(j->doc);
+            break;
+
+        default:
+            break;
+        }
+        free(j);
     }
-    if (doc) {
-        const int page_margin_x = 64;
-        int content_w = g_page_w - 2 * page_margin_x;
-        if (content_w < 1) content_w = 1;
-        // log_msg("[LOAD] Rendering doc with content_w=%d\n", content_w);
-        ld_render(doc, content_w);
-        // log_msg("[LOAD] Render complete, doc height=%d\n", ld_height(doc));
-    }
-    if (g_load_cancel) {
-        // log_msg("[LOAD] Cancelled after render\n");
-        if (doc) ld_destroy(doc);
-        return 0;
-    }
-    // log_msg("[LOAD] Posting WM_APP_DOC_READY\n");
-    PostMessageA(g_hwnd, WM_APP_DOC_READY, 0, (LPARAM)doc);
     return 0;
+}
+
+static int start_worker(void)
+{
+    if (g_worker_started)
+        return 1;
+
+    InitializeCriticalSection(&g_job_lock);
+    g_job_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (!g_job_event)
+        return 0;
+
+    g_worker_thread = CreateThread(NULL, 0, WorkerProc, NULL, 0, NULL);
+    if (!g_worker_thread)
+        return 0;
+
+    g_worker_started = 1;
+    return 1;
+}
+
+static void request_render(int w)
+{
+    Job *j;
+
+    if (!g_doc || g_load_active)
+        return;
+
+    if (!g_worker_started)
+    {
+        /* Fallback sincrono */
+        ld_render(g_doc, w);
+        g_doc_content_w = w;
+        g_doc_h = ld_height(g_doc);
+        update_scrollbars();
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        return;
+    }
+
+    if (g_render_busy)
+    {
+        g_render_pending = w;
+        return;
+    }
+
+    j = alloc_job(JOB_RENDER);
+    if (!j)
+        return;
+    j->doc = g_doc;
+    j->content_w = w;
+    g_render_busy = 1;
+    g_render_doc = g_doc;
+    g_render_used_w = w;
+    g_render_pending = -1;
+    enqueue_job(j);
+}
+
+static void apply_loaded_doc(unsigned id, void *doc)
+{
+    if (g_shutdown)
+    {
+        if (doc)
+            dispose_doc(doc);
+        return;
+    }
+
+    /* Risultato di una richiesta superata: va distrutto sul worker. */
+    if (id != g_load_gen)
+    {
+        if (doc)
+            dispose_doc(doc);
+        return;
+    }
+
+    g_load_active = 0;
+
+    if (doc)
+    {
+        if (g_doc)
+            dispose_doc(g_doc);
+        g_doc = doc;
+        g_doc_content_w = g_load_content_w;
+        g_doc_h = ld_height(doc);
+
+        lstrcpynA(g_path, g_load_path, sizeof(g_path));
+        {
+            const char *p = strrchr(g_load_path, '\\');
+            if (!p)
+                p = strrchr(g_load_path, '/');
+            sprintf(g_title, "docxview_new - %s", p ? p + 1 : g_load_path);
+        }
+        SetWindowTextA(g_hwnd, g_title);
+        g_scroll = 0;
+        update_scrollbars();
+
+        /* Se la finestra è stata ridimensionata durante il caricamento,
+         * riallinea il layout in background. */
+        if (content_width() != g_doc_content_w)
+            request_render(content_width());
+        InvalidateRect(g_hwnd, NULL, TRUE);
+    }
+    else
+    {
+        sprintf(g_title, "docxview_new - [Errore apertura file]");
+        SetWindowTextA(g_hwnd, g_title);
+        if (g_doc && content_width() != g_doc_content_w)
+            request_render(content_width());
+        update_scrollbars();
+        InvalidateRect(g_hwnd, NULL, TRUE);
+    }
+}
+
+static void on_render_done(void *doc, int used_w)
+{
+    if (g_shutdown)
+        return;
+
+    g_render_busy = 0;
+    g_render_doc = NULL;
+
+    if (doc != g_doc)
+        return;
+
+    g_doc_content_w = used_w;
+    g_doc_h = ld_height(doc);
+
+    if (!g_load_active && g_render_pending >= 0 && g_render_pending != used_w)
+    {
+        int w = g_render_pending;
+        g_render_pending = -1;
+        request_render(w);
+        return;
+    }
+
+    g_render_pending = -1;
+    update_scrollbars();
+    InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
 static void start_async_load(const char *path)
 {
-    // log_msg("[MAIN] start_async_load: %s\n", path);
-    if (g_load_thread) {
-        g_load_cancel = 1;
-        WaitForSingleObject(g_load_thread, 2000);
-        CloseHandle(g_load_thread);
-        g_load_thread = NULL;
-    }
-    g_load_cancel = 0;
-    lstrcpynA(g_load_path, path, sizeof(g_load_path));
-    
+    Job *j;
+    int cw;
+
     init_callbacks();
     compute_page();
-    
-    g_load_thread = CreateThread(NULL, 0, LoadThreadProc, NULL, 0, &g_load_thread_id);
-    if (!g_load_thread) {
-        MessageBoxA(g_hwnd, "Impossibile creare thread di caricamento", "Errore", MB_OK | MB_ICONERROR);
-    }
-}
+    cw = content_width();
 
-static void on_doc_ready(void *doc)
-{
-    // log_msg("[READY] on_doc_ready called\n");
-    if (g_load_thread) {
-        CloseHandle(g_load_thread);
-        g_load_thread = NULL;
+    lstrcpynA(g_load_path, path, sizeof(g_load_path));
+    g_load_gen++;
+    g_load_active = 1;
+    g_load_content_w = cw;
+    g_render_pending = -1;
+
+    /* UI mostra subito lo stato */
+    SetWindowTextA(g_hwnd, "docxview_new - Caricamento...");
+
+    if (!g_worker_started)
+    {
+        /* Fallback sincrono: il worker non è disponibile. */
+        void *doc = ld_open_file(path, &g_cb, g_page_w, g_ch > 0 ? g_ch : 600);
+        if (doc)
+            ld_render(doc, cw);
+        g_load_active = 0;
+        apply_loaded_doc(g_load_gen, doc);
+        return;
     }
-    
-    if (g_doc) {
-        // log_msg("[READY] Destroying old doc\n");
-        ld_destroy(g_doc);
+
+    j = alloc_job(JOB_LOAD);
+    if (!j)
+    {
+        g_load_active = 0;
+        MessageBoxA(g_hwnd, "Memoria insufficiente", "Errore", MB_OK | MB_ICONERROR);
+        return;
     }
-    g_doc = doc;
-    
-    if (g_doc) {
-        lstrcpynA(g_path, g_load_path, sizeof(g_path));
-        const char *p = strrchr(g_load_path, '\\');
-        if (!p) p = strrchr(g_load_path, '/');
-        sprintf(g_title, "docxview_new - %s", p ? p + 1 : g_load_path);
-        // log_msg("[READY] New doc loaded: %s, height=%d\n", g_title, ld_height(g_doc));
-    } else {
-        sprintf(g_title, "docxview_new - [Errore apertura file]");
-        g_path[0] = 0;
-        // log_msg("[READY] Failed to load doc\n");
-    }
-    SetWindowTextA(g_hwnd, g_title);
-    g_scroll = 0;
-    update_scrollbars();
-    InvalidateRect(g_hwnd, NULL, TRUE);
+    j->id = g_load_gen;
+    lstrcpynA(j->path, path, sizeof(j->path));
+    j->content_w = cw;
+    j->viewport_w = g_page_w;
+    j->viewport_h = g_ch > 0 ? g_ch : 600;
+    enqueue_job(j);
 }
 
 static void load_docx_file(const char *path)
 {
     if (!path || !path[0]) return;
-    // log_msg("[MAIN] load_docx_file: %s\n", path);
     start_async_load(path);
-    /* UI mostra titolo "Caricamento..." subito */
-    SetWindowTextA(g_hwnd, "docxview_new - Caricamento...");
 }
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -387,7 +668,6 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE:
         // log_msg("[CREATE] WM_CREATE\n");
         g_hwnd = hwnd;
-        g_tmpdc = GetDC(NULL);
         g_br_desk = CreateSolidBrush(RGB(240, 240, 242));
         g_br_shadow = CreateSolidBrush(RGB(190, 190, 195));
         g_br_border = CreateSolidBrush(RGB(210, 210, 215));
@@ -411,13 +691,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ReleaseDC(hwnd, hdc);
         }
         compute_page();
-        if (g_doc) {
-            const int page_margin_x = 64;
-            int content_w = g_page_w - 2 * page_margin_x;
-            if (content_w < 1) content_w = 1;
-            // log_msg("[SIZE] Re-rendering doc with content_w=%d\n", content_w);
-            ld_render(g_doc, content_w);
-            // log_msg("[SIZE] Re-render complete, new doc height=%d\n", ld_height(g_doc));
+        if (g_doc && !g_load_active) {
+            int content_w = content_width();
+            /* Il layout viene rifatto dal worker: la UI non si blocca.
+             * Durante il render il paint mostra solo lo sfondo. */
+            if (content_w != g_doc_content_w)
+                request_render(content_w);
         }
         update_scrollbars();
         InvalidateRect(hwnd, NULL, FALSE);
@@ -428,11 +707,19 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc_all = {0, 0, g_cw, g_ch};
 
+        if (!g_memdc) {
+            FillRect(hdc, &rc_all, g_br_desk);
+            EndPaint(hwnd, &ps);
+            break;
+        }
+
         FillRect(g_memdc, &rc_all, g_br_desk);
 
-        if (g_doc) {
+        /* Se un render è in corso il documento viene modificato dal worker:
+         * non chiamare ld_draw per evitare accessi concorrenti. */
+        if (g_doc && !g_render_busy) {
             int pt = page_top();
-            int doc_h = ld_height(g_doc);
+            int doc_h = g_doc_h;
             int page_h = doc_h + 120;
             RECT rc_shd = {g_page_x + 4, pt + 4, g_page_x + g_page_w + 4, pt + page_h + 4};
             RECT rc_page = {g_page_x, pt, g_page_x + g_page_w, pt + page_h};
@@ -448,14 +735,17 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int content_x = g_page_x + page_margin_x;
             int content_y = pt + page_margin_y;
 
-            // log_msg("[PAINT] Drawing doc at (%d,%d) content_w=%d doc_h=%d\n", content_x, content_y, content_w, doc_h);
-            /* NON chiamare ld_render qui - già fatto nel thread di caricamento */
             /* Clip rect = area contenuto (esclude margini) */
             RECT rc_content = {content_x, content_y, content_x + content_w, content_y + doc_h};
-            // log_msg("[PAINT] Calling ld_draw at (%d,%d) clip=(%d,%d,%d,%d)\n", content_x, content_y, rc_content.left, rc_content.top, rc_content.right - rc_content.left, rc_content.bottom - rc_content.top);
             ld_draw(g_doc, g_memdc, content_x, content_y,
                     rc_content.left, rc_content.top, rc_content.right - rc_content.left, rc_content.bottom - rc_content.top);
-            // log_msg("[PAINT] ld_draw returned\n");
+        } else if (g_doc && g_render_busy) {
+            /* Layout in corso: mostra la pagina bianca senza contenuto. */
+            int pt = page_top();
+            int page_h = g_doc_h + 120;
+            RECT rc_page = {g_page_x, pt, g_page_x + g_page_w, pt + page_h};
+            FillRect(g_memdc, &rc_page, (HBRUSH)GetStockObject(WHITE_BRUSH));
+            FrameRect(g_memdc, &rc_page, g_br_border);
         }
 
         BitBlt(hdc, 0, 0, g_cw, g_ch, g_memdc, 0, 0, SRCCOPY);
@@ -466,7 +756,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_VSCROLL: {
         SCROLLINFO si;
         int old_s = g_scroll;
-        int doc_h = g_doc ? ld_height(g_doc) : 0;
+        int doc_h = g_doc_h;
         int max_s = (doc_h + 120) - g_ch;
         if (max_s < 0) max_s = 0;
 
@@ -494,7 +784,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_MOUSEWHEEL: {
         int delta = GET_WHEEL_DELTA_WPARAM(wp);
-        int doc_h = g_doc ? ld_height(g_doc) : 0;
+        int doc_h = g_doc_h;
         int max_s = (doc_h + 120) - g_ch;
         if (max_s < 0) max_s = 0;
         g_scroll -= delta / 3;
@@ -506,7 +796,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_APP_DOC_READY:
-        on_doc_ready((void *)lp);
+        apply_loaded_doc((unsigned)wp, (void *)lp);
+        return 0;
+
+    case WM_APP_RENDER_DONE:
+        on_render_done((void *)lp, (int)wp);
         return 0;
 
     case WM_COMMAND:
@@ -541,15 +835,17 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_DESTROY:
         // log_msg("[DESTROY] Cleaning up\n");
-        if (g_load_thread) {
-            g_load_cancel = 1;
-            WaitForSingleObject(g_load_thread, 2000);
-            CloseHandle(g_load_thread);
-            g_load_thread = NULL;
-        }
+        /* Tutte le distruzioni avvengono sul worker, lo stesso thread che ha
+         * creato i documenti (COM/GDI hanno affinità di thread). Non si attende:
+         * un layout in corso non deve bloccare la chiusura. */
+        g_shutdown = 1;
         if (g_doc) {
-            ld_destroy(g_doc);
+            dispose_doc(g_doc);
             g_doc = NULL;
+        }
+        if (g_worker_started) {
+            Job *q = alloc_job(JOB_QUIT);
+            if (q) enqueue_job(q);
         }
         if (g_memold) SelectObject(g_memdc, g_memold);
         if (g_membmp) DeleteObject(g_membmp);
@@ -557,7 +853,6 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_br_desk) DeleteObject(g_br_desk);
         if (g_br_shadow) DeleteObject(g_br_shadow);
         if (g_br_border) DeleteObject(g_br_border);
-        if (g_tmpdc) ReleaseDC(NULL, g_tmpdc);
         if (g_log_file) {
             fclose(g_log_file);
             g_log_file = NULL;
@@ -587,6 +882,12 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = L"DocxViewNewClass";
     RegisterClassExW(&wc);
+
+    if (!start_worker())
+        MessageBoxA(NULL,
+                    "Impossibile avviare il thread di caricamento.\n"
+                    "L'apertura dei file avverra' in modo sincrono.",
+                    "Avviso", MB_OK | MB_ICONWARNING);
 
     menu = CreateMenu();
     filemenu = CreatePopupMenu();

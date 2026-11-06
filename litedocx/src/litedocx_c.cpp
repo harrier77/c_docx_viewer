@@ -167,7 +167,14 @@ namespace
         std::unordered_map<std::string, decltype(m_list)::iterator> m_map;
     };
 
-    static Utf8ToUtf16Cache g_utf_cache;
+    /* Cache per-thread: il rendering può avvenire sul worker mentre il thread
+     * UI disegna il documento precedente. Una cache globale non sincronizzata
+     * sarebbe una data race. */
+    static Utf8ToUtf16Cache& utf_cache()
+    {
+        static thread_local Utf8ToUtf16Cache cache;
+        return cache;
+    }
 
     struct CachedImage
     {
@@ -638,7 +645,7 @@ namespace
                     return 0;
                 }
                 size_t wlen = 0;
-                const WCHAR* w = g_utf_cache.get_or_convert(text, &wlen);
+                const WCHAR* w = utf_cache().get_or_convert(text, &wlen);
                 if(!w || w[0] == 0)
                 {
                     return 0;
@@ -665,7 +672,7 @@ namespace
             if(cb.lh.draw_text)
             {
                 size_t wlen = 0;
-                const WCHAR* w = g_utf_cache.get_or_convert(text, &wlen);
+                const WCHAR* w = utf_cache().get_or_convert(text, &wlen);
                 if(!w || w[0] == 0)
                 {
                     return;
@@ -1519,7 +1526,7 @@ void ld_destroy(void* doc)
         delete h->container;
     }
     // Clear UTF-8 to UTF-16 cache to free memory
-    g_utf_cache.clear();
+    utf_cache().clear();
     if(h->com_initialized)
     {
         CoUninitialize();
