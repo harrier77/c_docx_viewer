@@ -1,27 +1,26 @@
 # docx2html - DOCX -> HTML in C puro per litehtml (TCC)
 
-Libreria C senza `main()` e senza CLI: legge un file `.docx` e restituisce una
-stringa HTML UTF-8 con il **CSS incorporato in un blocco `<style>`**, pronta
-per `lh_create()` di `litehtml_c.dll`.
+C library without `main()` and without CLI: reads a `.docx` file and returns a
+UTF-8 HTML string with **embedded CSS in a `<style>` block**, ready for
+`lh_create()` of `litehtml_c.dll`.
 
 ```
-docx.h          API pubblica (docx_file_to_html / docx_mem_to_html / free)
-docx.c          orchestrazione: file -> ZIP -> XML -> HTML completo
-zip.c/.h        lettore ZIP (EOCD, central directory, stored + deflate)
-inflate.c       puff.c (Mark Adler, zlib license) - inflate raw, C89
-puff.h          header di puff
-xmlbuf.c/.h     scanner XML sequenziale + decodifica entità
-wml.c/.h        WordprocessingML -> HTML (paragrafi, titoli, run, link, w:jc)
-htmlbuf.c/.h    buffer dinamico, escaping HTML, gestione spazi Word
-css.c/.h        tema CSS incorporato (senza var(), non supportate da litehtml)
-build.bat       compila la libreria e gli strumenti di collaudo in dev\
-
-docxview.c      visualizzatore Win32 (finestra + GDI + litehtml)
-litehtml_c.h    header del bridge C della DLL
-build_viewer.bat compila docxview.exe
+docx.h          Public API (docx_file_to_html / docx_mem_to_html / free)
+docx.c          Orchestration: file -> ZIP -> XML -> full HTML
+zip.c/.h        ZIP reader (EOCD, central directory, stored + deflate)
+inflate.c       puff.c (Mark Adler, zlib license) - raw inflate, C89
+puff.h          puff header
+xmlbuf.c/.h     Sequential XML scanner + entity decoding
+wml.c/.h        WordprocessingML -> HTML (paragraphs, headings, run, link, w:jc)
+css.c/.h        Embedded CSS theme (without var(), not supported by litehtml)
+build.bat       Compiles the library and test tools in dev\
 ```
 
-## Uso
+docxview.c      Win32 viewer (window + GDI + litehtml)
+litehtml_c.h    C bridge header of the DLL
+build_viewer.bat Compiles docxview.exe
+
+## Usage
 
 ```c
 #include "docx.h"
@@ -34,88 +33,88 @@ if (docx_file_to_html("test.docx", NULL, &h)) {
     lh_destroy(doc);
     docx_html_free(&h);
 } else {
-    /* h.error contiene il motivo (in italiano) */
+    /* h.error contains the reason (in Italian) */
 }
 ```
 
-Opzioni (tutte facoltative; `NULL` = default):
+Options (all optional; `NULL` = default):
 
 ```c
 docx_html_opts o = DOCX_HTML_OPTS_INIT; /* {NULL,NULL,0,1} */
-o.title = "Il mio documento";  /* <title>; default = nome del file */
-o.extra_css = "p{color:#333;}";/* accodato al blocco <style> */
-o.font_px = 15;                /* font base in px */
-o.full_document = 0;           /* solo frammento, senza <html>/<style> */
+o.title = "My document";         /* <title>; default = filename */
+o.extra_css = "p{color:#333;}"; /* appended to <style> block */
+o.font_px = 15;                /* base font in px */
+o.full_document = 0;           /* fragment only, without <html>/<style> */
 ```
 
-`docx_mem_to_html(buf, size, ...)` fa lo stesso da un `.docx` già in memoria
-(utile se il file arriva da una risorsa o da rete).
+`docx_mem_to_html(buf, size, ...)` does the same from an in-memory `.docx`
+(useful if the file comes from a resource or network).
 
-## Visualizzatore `docxview.exe`
+## `docxview.exe` Viewer
 
-`docxview.c` è l'app viewer: converte il `.docx` e lo disegna in una finestra
-Win32 tramite `litehtml_c.dll` (stesso schema del pannello di `sunburst.c`).
+`docxview.c` is the viewer app: converts `.docx` and renders it in a Win32 window
+using `litehtml_c.dll` (same scheme as `sunburst.c` panel).
 
-```bat
+```
+bat
 build_viewer.bat
 docxview.exe test.docx
 docxview.exe dev\fixture.docx
 ```
 
-Senza argomento apre `test.docx` accanto all'exe; se non lo trova mostra il
-dialogo "Apri".
+Without arguments opens `test.docx` next to the exe; if not found it shows the
+"Open" dialog.
 
-Comandi:
+Commands:
 
-| Comando | Azione |
+| Command | Action |
 |---|---|
-| rotella / ↑ ↓ / PgUp PgDn / Home End | scorrimento |
-| `Ctrl+O` | apri un altro `.docx` |
-| `F5` | ricarica il file corrente |
-| `Esc` | chiudi |
-| click su un link | apre il browser (o salta all'ancora `#id`) |
-| ridimensionamento finestra | re-layout immediato di litehtml |
+| Mouse wheel / ↑ ↓ / PgUp PgDn / Home End | Scrolling |
+| `Ctrl+O` | Open another `.docx` |
+| `F5` | Reload current file |
+| `Esc` | Close |
+| Click on a link | Opens browser (or jumps to `#anchor`) |
+| Window resizing | Immediate litehtml re-layout |
 
-Note tecniche:
+Technical notes:
 
-- **layout a foglio**: il documento viene impaginato alla larghezza della
-  pagina (max 960 px) e disegnato centrato su una scrivania grigia, con bordo
-  e ombra leggera; il testo va a capo come su carta e i margini interni sono
-  `60px 64px` (override CSS passato dal viewer). Riducendo la finestra la
-  pagina si restringe mantenendo 24 px di margine per lato;
-- doppio buffer GDI (`CreateCompatibleDC` + `BitBlt`), niente sfarfallio;
-- font, metriche e wrapping passano dai callback `lh_callbacks`: i testi UTF-8
-  sono convertiti in UTF-16 per `DrawTextW`/`GetTextExtentPoint32W`;
-- i link sono aperti con `ShellExecuteA` caricata a runtime da `shell32.dll`
-  (tcc non ha l'import library);
-- `docxview` cerca `litehtml_c.dll` nella propria cartella di esecuzione (stesso repo di `docxview_new.c` e `litedocx/`),
-  infine nel percorso assoluto usato in sviluppo.
+- **Sheet layout**: document is laid out at page width (max 960 px) and drawn
+  centered on a gray desk, with light border and shadow; text wraps as on paper
+  and inner margins are `60px 64px` (override CSS passed by the viewer). Reducing
+  the window the page shrinks keeping 24 px margin on the side;
+- GDI double buffering (`CreateCompatibleDC` + `BitBlt`), no flicker;
+- Fonts, metrics and wrapping go through `lh_callbacks`: UTF-8 texts are
+  converted to UTF-16 for `DrawTextW`/`GetTextExtentPoint32W`;
+- Links are opened with `ShellExecuteA` loaded at runtime from `shell32.dll`
+  (tcc does not have the import library);
+- `docxview` looks for `litehtml_c.dll` in its own execution folder (same repo
+  as `docxview_new.c` and `litedocx/`), otherwise in the absolute path used
+  during development.
 
-Richiede `litehtml_c.dll` e, per compilare, i sorgenti della libreria nella
-stessa cartella.
+Requires `litehtml_c.dll` and, to compile, the library sources in the same folder.
 
-## Compilazione
+## Compilation
 
 ```bat
 build.bat
 ```
 
-Verifica la libreria con `-Wall` e produce:
+Verifies the library with `-Wall` and produces:
 
-- `dev\dump_html.exe` — converte e scrive l'HTML su file/stdout (collaudo)
-- `dev\check_litehtml.exe` — converte, carica `litehtml_c.dll`, esegue
-  `lh_create`/`lh_render` e stampa `width`/`height` (collaudo d'integrazione)
-- `dev\check_justify.exe` — renderizza un paragrafo giustificato e stampa
-  la posizione di ogni pezzo di testo (collaudo di `text-align:justify`)
+- `dev\dump_html.exe` — converts and writes HTML to file/stdout (validation)
+- `dev\check_litehtml.exe` — converts, loads `litehtml_c.dll`, runs
+  `lh_create`/`lh_render` and prints `width`/`height` (integration test)
+- `dev\check_justify.exe` — renders a justified paragraph and prints
+  the position of each text piece (validation of `text-align:justify`)
 
-Per l'app host basta aggiungere i `.c` alla riga tcc esistente:
+To add the host app, just append the `.c` files to the existing tcc command:
 
 ```bat
 tcc app.c docx.c zip.c inflate.c xmlbuf.c htmlbuf.c wml.c css.c ^
     -o app.exe -lgdi32 -luser32 -lkernel32 -Wall
 ```
 
-## Cosa viene convertito
+## What is converted
 
 | DOCX | HTML |
 |---|---|
@@ -123,35 +122,43 @@ tcc app.c docx.c zip.c inflate.c xmlbuf.c htmlbuf.c wml.c css.c ^
 | `w:pStyle` = `Heading1..9`, `Title`, `Subtitle` | `<h1>`..`<h6>` |
 | `w:b` / `w:i` / `w:u` | `<strong>` / `<em>` / `<u>` |
 | `w:color`, `w:sz` | `<span style="color:#…;font-size:…px">` |
-| `w:t` | testo con escaping e spazi preservati |
+| `w:t` | text with escaping and spaces preserved |
 | `w:br`, `w:cr` | `<br>` |
-| `w:tab` | quattro `&#160;` |
+| `w:tab` | four `&#160;` |
 | `w:hyperlink` (r:id / anchor) | `<a href="…">` via `document.xml.rels` |
-| `w:jc` (diretto, dallo stile del paragrafo o da `docDefaults`) | `style="text-align:left\|center\|right\|justify"` |
-| `w:instrText`, `w:delText` | ignorati |
+| `w:jc` (direct, from paragraph style or from `docDefaults`) | `style="text-align:left\|center\|right\|justify"` |
+| `w:instrText`, `w:delText` | ignored |
 
-Per `w:jc` vale la gerarchia di Word: `w:pPr/w:jc` del paragrafo, poi lo
-stile indicato da `w:pStyle` seguendo la catena `w:basedOn`, poi lo stile
-predefinito (`w:default="1"`), infine `w:docDefaults` (da `word/styles.xml`,
-che viene letto solo per questo). I valori `both`/`distribute` diventano
-`justify`: litehtml estende le righe intermedie fino al bordo destro e
-lascia invariata l'ultima riga.
+For `w:jc` the Word hierarchy applies: `w:pPr/w:jc` of the paragraph, then the
+style indicated by `w:pStyle` following the `w:basedOn` chain, then the default
+style (`w:default="1"`), finally `w:docDefaults` (read only from
+`word/styles.xml`, which is read for this purpose). Values `both`/`distribute`
+become `justify`: litehtml extends intermediate lines to the right edge and
+leaves the last line unchanged.
 
-Fuori scope (per ora): liste (`numbering.xml`), tabelle, immagini, aspetti
-degli stili diversi dall'allineamento. I paragrafi dentro tabelle/liste
-vengono comunque emessi come `<p>` lineari, quindi il testo non va perso.
+Out of scope (for now): lists (`numbering.xml`), tables, images, aspects of
+styles other than alignment. Paragraphs inside tables/lists are nevertheless
+emitted as linear `<p>`, so the text is not lost.
 
-## Note su litehtml
+## Known limits
 
-- Il CSS usa solo proprietà supportate: **niente `var(--…)`, niente grid**.
-- Il tema non imposta `max-width`: il wrapping lo decide `lh_render(doc, width)`.
-- Le unità sono px (il font base è configurabile con `font_px`).
-- Gli spazi iniziali/finali e multipli diventano `&#160;` (li rende visibili
-  litehtml); i singoli spazi interni restano spazi normali per permettere il
-  ritorno a capo.
-- Le immagini non sono supportate: `litehtml_c.dll` non ha un callback immagini.
+- ZIP64, ZIP encrypted and compression methods other than store/deflate are
+  rejected with an explicit error.
+- Maximum decompressed entry size: 64 MB; maximum `.docx` file size: 128 MB.
+- The document must contain `word/document.xml` (standard OOXML).
+- A trailing space of a run becomes `&#160;`, so there is no line break at that
+  point: it is the compromise to not lose Word spacing.
 
-## Collaudo
+## About litehtml
+
+- CSS uses only supported properties: **no `var(--…)`, no grid**.
+- Theme does not set `max-width`: wrapping is decided by `lh_render(doc, width)`.
+- Units are px (base font configurable with `font_px`).
+- Leading/trailing spaces and multiple spaces become `&#160;` (makes them visible
+  to litehtml); internal single spaces remain normal spaces to allow line break.
+- Images are not supported: `litehtml_c.dll` has no image callback.
+
+## Testing
 
 ```bat
 dev\dump_html.exe test.docx dev\out.html
@@ -160,20 +167,19 @@ dev\check_litehtml.exe dev\fixture.docx
 dev\check_justify.exe
 ```
 
-Risultati attesi:
+Expected results:
 
-- `test.docx` -> 3 paragrafi, `layout: width=800 height=138`
-- `fixture.docx` -> titoli h1/h2/h3, grassetto, corsivo, link, accenti e
-  virgolette tipografiche preservati (UTF-8), `height ~ 310`
-- `check_justify.exe` -> le righe intermedie finiscono a `right=400`
-  (parole distanziate), l'ultima riga resta non estesa
+- `test.docx` -> 3 paragraphs, `layout: width=800 height=138`
+- `fixture.docx` -> h1/h2/h3 titles, bold, italic, links, accents and
+  typographic quotes preserved (UTF-8), `height ~ 310`
+- `check_justify.exe` -> intermediate lines end at `right=400`
+  (words spaced out), the last line remains unextended
 
-## Limiti noti
+## Known limits
 
-- ZIP64, ZIP cifrati e metodi di compressione diversi da store/deflate vengono
-  rifiutati con un errore esplicito.
-- Dimensione massima di una entry decompressa: 64 MB; file `.docx` massimo
-  128 MB.
-- Il documento deve contenere `word/document.xml` (standard OOXML).
-- Un singolo spazio finale di un run diventa `&#160;`, quindi in quel punto non
-  c'è ritorno a capo: è il compromesso per non perdere la spaziatura di Word.
+- ZIP64, ZIP encrypted and compression methods other than store/deflate are
+  rejected with an explicit error.
+- Maximum decompressed entry size: 64 MB; maximum `.docx` file size: 128 MB.
+- The document must contain `word/document.xml` (standard OOXML).
+- A trailing space of a run becomes `&#160;`, so there is no line break at that
+  point: it is the compromise to not lose Word spacing.
