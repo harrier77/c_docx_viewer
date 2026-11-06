@@ -132,6 +132,12 @@ const char* ld_last_error(void);
 const char* ld_version(void);
 void ld_destroy(void* doc);
 
+/* Paginated / incremental layout API */
+int ld_render_range(void* doc, int page_idx, int viewport_h, int max_width);
+int ld_get_page_count(void* doc);
+int ld_get_page_height(void* doc, int page_idx);
+void ld_clear_page_cache(void* doc);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

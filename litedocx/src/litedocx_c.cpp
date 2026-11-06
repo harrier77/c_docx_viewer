@@ -1043,6 +1043,11 @@ HGDIOBJ old = SelectObject(reinterpret_cast<HDC>(hdc), reinterpret_cast<HFONT>(h
         int                     page_w = 0;
         int                     page_h = 0;
         bool                    com_initialized = false;
+        // Pagination state (Fase 2)
+        int                     m_page_height_px = 0;       // CSS page height from DocxBuilder
+        std::vector<int>        m_page_heights;             // Computed page heights (lazy)
+        std::vector<int>        m_page_y_offsets;           // Y-offset of each page
+        int                     m_last_rendered_page = -1;  // Highest page laid out
     };
 
     void fire_redraw(void* user, const litehtml::position& pos)
@@ -1143,6 +1148,7 @@ HGDIOBJ old = SelectObject(reinterpret_cast<HDC>(hdc), reinterpret_cast<HFONT>(h
             h->doc    = doc;
             h->page_w = builder.page_width();
             h->page_h = builder.page_height();
+            h->m_page_height_px = builder.page_height();  // Cache for pagination
 
             // Transfer model ownership into the container so that media data
             // remains valid for the whole document lifetime.

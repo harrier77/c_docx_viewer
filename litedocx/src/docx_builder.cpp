@@ -1165,7 +1165,7 @@ namespace litedocx
         }
         char buf[96];
         std::snprintf(buf, sizeof(buf), "height:%dpx;", content_h);
-        auto div = make_element("div", buf);
+        auto div = make_element("div", buf, "data-page-break", std::to_string(m_page_break_count++));
         parent->appendChild(div);
     }
 
