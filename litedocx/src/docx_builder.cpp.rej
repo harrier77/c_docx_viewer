@@ -1,0 +1,45 @@
+--- docx_builder.cpp
++++ docx_builder.cpp
+@@ -1108,30 +1108,31 @@ void DocxBuilder::append_text(const litehtml::element::ptr& parent, const std::string& text)
+     {
+         if (text.empty()) return;
+         
+-        // Reserve capacity for nbsp building (max 3 bytes per char for UTF-8 NBSP)
+-        std::string nbsp_buf;
+-        nbsp_buf.reserve(text.size() * 3);
++        // Reserve capacity for nbsp building (max 2 bytes per char for UTF-8 NBSP)
++        // and for word segments (worst case: one long word = text.size())
++        if (m_nbsp_buf.capacity() < text.size() * 2) {
++            m_nbsp_buf.reserve(text.size() * 2);
++        }
++        if (m_word_buf.capacity() < text.size()) {
++            m_word_buf.reserve(text.size());
++        }
+         
+         size_t i = 0;
+         while(i < text.size())
+         {
+             bool space = text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n';
+             size_t start = i;
+             if(space)
+             {
+                 while(i < text.size() && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n'))
+                 {
+                     ++i;
+                 }
+                 size_t len = i - start;
+                 bool edge = start == 0 || i == text.size();
+                 if(len > 1 || edge)
+                 {
+-                    nbsp_buf.clear();
+-                    // Build NBSP string: \xC2\xA0 repeated len times
+-                    nbsp_buf.resize(len * 2);
+-                    for (size_t k = 0; k < len; ++k) {
+-                        nbsp_buf[k * 2] = '\xC2';
+-                        nbsp_buf[k * 2 + 1] = '\xA0';
+-                    }
+-                    parent->appendChild(std::make_shared<litehtml::el_text>(nbsp_buf.c_str(), m_doc));
++                    m_nbsp_buf.clear();
++                    // Build NBSP string: \xC2\xA0 repeated len times
++                    m_nbsp_buf.resize(len * 2);
++                    for (size_t k = 0; k < len; ++k) {

@@ -1,0 +1,107 @@
+NOTA: Errore ricorrente chiamata tool `edit`
+==============================================
+
+PROBLEMA
+--------
+Quando chiamo il tool `edit`, passo `edits` come **stringa JSON** invece che come **array di oggetti**.
+
+ESEMPIO SBAGLIATO (quello che faccio sempre):
+```json
+{
+  "path": "file.cpp",
+  "edits": "[{\"oldText\": \"...\", \"newText\": \"...\"}]"
+}
+```
+❌ `edits` è una **stringa** (inizia con `[` ma è quotata)
+
+ESEMPIO CORRETTO:
+```json
+{
+  "path": "file.cpp",
+  "edits": [
+    {"oldText": "...", "newText": "..."}
+  ]
+}
+```
+✅ `edits` è un **array** di oggetti (nessun quoting esterno)
+
+CAUSA ROOT
+----------
+- Pensiero: "devo passare JSON" → stringifico tutto
+- Realtà: il protocollo degli strumenti accetta **oggetti nativi**, non stringhe JSON
+- Il field `edits` deve essere `array<object>`, non `string`
+
+SINTOMI
+-------
+Errore returned:
+```
+Validation failed for tool "edit":
+  - edits.0: expected object, got string
+```
+
+IMPATTO
+-------
+- Perdo tempo a ri-prendere il comando
+- Frustrazione inutile
+- Il fix è banale: **togliere le virgolette esterne** intorno all'array
+
+REGOLE MNEMONICHE
+-----------------
+1. `edits` = **array**, non stringa
+2. Ogni elemento = **oggetto** con `oldText` + `newText` (chiavi esatte)
+3. `oldText` deve matchare **esattamente** (whitespace, newline, escape)
+4. Se il match fallisce → errore "oldText must match uniquely"
+
+WORKAROUND QUANDO SBAGLIO
+-------------------------
+- Usa `bash` con `sed`/`python` per edit complessi
+- O riscrivi tutto il file con `write` (se piccolo)
+- O fai patch manuale + `git apply`
+
+PROMEMORIA PER DOMANI (PATCH A PI)
+----------------------------------
+Quando farai la patch a pi per fixare questo:
+- Il validatore dello schema tool deve rifiutare `string` per campi `array`/`object`
+- Errore chiaro: "edits must be an array, got string"
+- Non "expected object, got string" (confonde: sembra che l'array vada bene ma l'elemento no)
+
+RISPOSTA ALLA DOMANDA "Con messaggio migliore sei già in grado di produrre edit corretto?"
+----------------------------------------------------------------------------------
+**Sì per la diagnosi, ma no per la prevenzione.**
+
+Con errore chiaro ("got string, expected array") → capisco subito l'errore e correggo.
+MA la causa radice è nel **mio generatore di chiamate**: passo `json.dumps(array)` invece di `array` nativo.
+
+```python
+# SBAGLIATO (cosa faccio oggi)
+"edits": json.dumps([{"oldText": "...", "newText": "..."}])  # stringa!
+
+# CORRETTO (cosa devo fare)
+"edits": [{"oldText": "...", "newText": "..."}]  # array nativo
+```
+
+Il protocollo serializza da solo — io non devo stringificare.
+
+**Patch ideale fa DUE cose:**
+1. Validazione schema: rifiuta `string` per campi `array`/`object` con messaggio esplicito
+2. Esempio nel messaggio: `"edits": [...] not "edits": "[...]"`
+
+FIX APPLICATO (2026-11-06)
+-----------------------------
+Creato `~/.pi/agent/APPEND_SYSTEM.md` con le regole di tool calling.
+Questo file viene **aggiunto al system prompt** ad ogni avvio di pi (cross-project).
+
+Contenuto chiave:
+- Regola: "The protocol serializes. I pass native."
+- Esempio WRONG vs RIGHT per `edit.edits`
+- Diagnosi rapida: se vedi "expected object, got string" → hai quotato l'array
+
+Attivazione immediata:
+```bash
+/reload
+```
+O riavvia pi.
+
+---
+
+DATA: 2026-11-06
