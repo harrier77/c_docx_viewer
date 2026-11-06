@@ -303,6 +303,7 @@ typedef enum JobKind
 {
     JOB_LOAD = 1,
     JOB_RENDER,
+    JOB_RENDER_RANGE,
     JOB_DESTROY,
     JOB_QUIT
 } JobKind;
@@ -318,6 +319,8 @@ typedef struct Job
     int         viewport_w;
     int         viewport_h;
     void       *doc;
+    int         first_page;
+    int         last_page;
 } Job;
 
 static CRITICAL_SECTION g_job_lock;
@@ -338,6 +341,11 @@ static int      g_render_busy;      /* un render è in corso/in coda */
 static int      g_render_pending;   /* larghezza richiesta, -1 = nessuna */
 static void    *g_render_doc;
 static int      g_render_used_w;
+
+/* FASE 5/6: Pagination state */
+static int      g_first_rendered_page = -1;  /* prima pagina renderizzata */
+static int      g_last_rendered_page = -1;   /* ultima pagina renderizzata */
+static int      g_page_h_est = 0;            /* altezza stimata singola pagina */
 
 static int content_width(void)
 {
@@ -463,6 +471,17 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                              (WPARAM)j->content_w, (LPARAM)j->doc);
             break;
 
+        case JOB_RENDER_RANGE:
+            if (j->doc && !g_shutdown) {
+                for (int p = j->first_page; p <= j->last_page; ++p) {
+                    ld_render_range(j->doc, p, j->viewport_h, j->content_w);
+                }
+            }
+            if (!g_shutdown)
+                PostMessageA(j->hwnd, WM_APP_RENDER_DONE,
+                             (WPARAM)j->content_w, (LPARAM)j->doc);
+            break;
+
         case JOB_DESTROY:
             if (j->doc)
                 ld_destroy(j->doc);
@@ -530,6 +549,42 @@ static void request_render(int w)
     enqueue_job(j);
 }
 
+/* FASE 5/6: Renderizza un range di pagine (es. pagina 0, o 1-2 per lookahead) */
+static void request_render_range(int first_page, int last_page)
+{
+    Job *j;
+
+    if (!g_doc || g_load_active)
+        return;
+
+    if (!g_worker_started)
+    {
+        /* Fallback sincrono: renderizza solo la prima pagina richiesta */
+        ld_render_range(g_doc, first_page, g_ch, content_width());
+        return;
+    }
+
+    if (g_render_busy)
+    {
+        /* Accoda come pending: per semplicità teniamo solo l'ultimo range richiesto */
+        g_render_pending = first_page; /* riutilizziamo come flag */
+        g_render_used_w = last_page;   /* riutilizziamo per last_page */
+        return;
+    }
+
+    j = alloc_job(JOB_RENDER_RANGE);
+    if (!j)
+        return;
+    j->doc = g_doc;
+    j->content_w = content_width();
+    j->viewport_h = g_ch;
+    j->first_page = first_page;
+    j->last_page = last_page;
+    g_render_busy = 1;
+    g_render_doc = g_doc;
+    enqueue_job(j);
+}
+
 static void apply_loaded_doc(unsigned id, void *doc)
 {
     if (g_shutdown)
@@ -555,7 +610,6 @@ static void apply_loaded_doc(unsigned id, void *doc)
             dispose_doc(g_doc);
         g_doc = doc;
         g_doc_content_w = g_load_content_w;
-        g_doc_h = ld_height(doc);
 
         lstrcpynA(g_path, g_load_path, sizeof(g_path));
         {
@@ -566,12 +620,24 @@ static void apply_loaded_doc(unsigned id, void *doc)
         }
         SetWindowTextA(g_hwnd, g_title);
         g_scroll = 0;
-        update_scrollbars();
 
-        /* Se la finestra è stata ridimensionata durante il caricamento,
-         * riallinea il layout in background. */
-        if (content_width() != g_doc_content_w)
-            request_render(content_width());
+        /* FASE 5/6: Layout solo pagina 0 per first paint < 1s */
+        int page_h = ld_get_page_height(g_doc, 0);
+        int page_count = ld_get_page_count(g_doc);
+        if (page_h > 0 && page_count > 0) {
+            g_doc_h = page_h * page_count;
+        } else {
+            g_doc_h = 1000; /* fallback */
+        }
+        g_page_h_est = page_h > 0 ? page_h : 800;
+        g_first_rendered_page = 0;
+        g_last_rendered_page = 0;
+        log_msg("[LOAD] page_h=%d page_count=%d doc_h_est=%d\n", page_h, page_count, g_doc_h);
+
+        /* Render pagina 0 in background (first paint) */
+        request_render_range(0, 0);
+
+        update_scrollbars();
         InvalidateRect(g_hwnd, NULL, TRUE);
     }
     else
@@ -599,6 +665,28 @@ static void on_render_done(void *doc, int used_w)
     g_doc_content_w = used_w;
     g_doc_h = ld_height(doc);
 
+    /* FASE 5/6: Traccia pagine renderizzate per lookahead */
+    if (g_render_pending >= 0) { /* era un range render */
+        int first = g_render_pending;
+        int last = g_render_used_w;
+        if (g_first_rendered_page == -1 || first < g_first_rendered_page)
+            g_first_rendered_page = first;
+        if (last > g_last_rendered_page)
+            g_last_rendered_page = last;
+        log_msg("[RENDER_DONE] pages %d-%d, total rendered %d-%d\n",
+                first, last, g_first_rendered_page, g_last_rendered_page);
+        
+        /* Lookahead: pre-renderizza prossime 2 pagine */
+        int page_count = ld_get_page_count(g_doc);
+        int next_first = last + 1;
+        int next_last = next_first + 1;
+        if (next_last >= page_count) next_last = page_count - 1;
+        if (next_first < page_count) {
+            request_render_range(next_first, next_last);
+        }
+    }
+
+    /* Handle legacy pending width render */
     if (!g_load_active && g_render_pending >= 0 && g_render_pending != used_w)
     {
         int w = g_render_pending;
@@ -608,6 +696,7 @@ static void on_render_done(void *doc, int used_w)
     }
 
     g_render_pending = -1;
+    g_render_used_w = -1;
     update_scrollbars();
     InvalidateRect(g_hwnd, NULL, FALSE);
 }
@@ -778,6 +867,17 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_scroll != old_s) {
             SetScrollPos(hwnd, SB_VERT, g_scroll, TRUE);
             InvalidateRect(hwnd, NULL, FALSE);
+            /* FASE 5/6: Trigger on-demand page rendering */
+            if (g_doc && g_page_h_est > 0) {
+                int visible_first = g_scroll / g_page_h_est;
+                int visible_last = (g_scroll + g_ch) / g_page_h_est + 1; /* +1 lookahead */
+                int page_count = ld_get_page_count(g_doc);
+                if (visible_last >= page_count) visible_last = page_count - 1;
+                if (visible_first < 0) visible_first = 0;
+                if (visible_last > g_last_rendered_page) {
+                    request_render_range(g_last_rendered_page + 1, visible_last);
+                }
+            }
         }
         break;
     }
@@ -792,6 +892,17 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_scroll > max_s) g_scroll = max_s;
         SetScrollPos(hwnd, SB_VERT, g_scroll, TRUE);
         InvalidateRect(hwnd, NULL, FALSE);
+        /* FASE 5/6: Trigger on-demand page rendering */
+        if (g_doc && g_page_h_est > 0) {
+            int visible_first = g_scroll / g_page_h_est;
+            int visible_last = (g_scroll + g_ch) / g_page_h_est + 1; /* +1 lookahead */
+            int page_count = ld_get_page_count(g_doc);
+            if (visible_last >= page_count) visible_last = page_count - 1;
+            if (visible_first < 0) visible_first = 0;
+            if (visible_last > g_last_rendered_page) {
+                request_render_range(g_last_rendered_page + 1, visible_last);
+            }
+        }
         break;
     }
 

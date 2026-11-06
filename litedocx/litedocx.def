@@ -3,6 +3,10 @@ EXPORTS
     ld_open_file
     ld_open_memory
     ld_render
+    ld_render_range
+    ld_get_page_count
+    ld_get_page_height
+    ld_clear_page_cache
     ld_draw
     ld_width
     ld_height
