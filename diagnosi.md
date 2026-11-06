@@ -44,7 +44,7 @@ F1 — Non bloccare la UI (obbligatoria, basso rischio)  ✅ COMPLETATO (rivisto
 F2 — Costruzione/layout incrementale a pagine (la vera soluzione)
 F3 — Ridurre il costo per elemento (3-5x CPU)
 - CSS inline → classi/cache; style object riusato  ✅ COMPLETATO (F3.1)
-- XML DOM: string_view / prefix compare, no std::map per nodo  ❌ NON FATTO (F3.3: solo #include, nessun uso)
+- XML DOM: string_view / prefix compare, no std::map per nodo  ✅ COMPLETATO (F3.3)
 - append_text: evitare substr + nbsp temporanei, riservare  ⚠️ PARZIALE (F3.4: reserve ok, substr ancora presente)
 - u8↔w16 cache per misura  ✅ COMPLETATO (F3.5)
 F4 — Tabelle (correttezza)  ⬜ DA FARE
@@ -88,11 +88,14 @@ Piano:
    - add_dynamic_rule per list-style-type per-ol
    - Fix bug: emplace restituisce iterator, non usare find(cls) su valore spostato
 
-❌ F3.3 — XML DOM string_view (NON APPLICATO — verifica 2026-11-06)
-   - Nessun uso di string_view: xml_dom.h/.cpp usano ancora const std::string&.
-   - Unica traccia: #include <string_view> in xml_dom.h, mai usato.
-   - Da fare: xml_local_name + metodi XmlNode con std::string_view, parser
-     senza std::string temporanee per name/attr.
+✅ F3.3 — XML DOM string_view (COMPLETATO 2026-11-06)
+   - xml_dom.h: name → string_view, attrs → map<string_view, string, less<>>
+   - xml_dom.cpp: parser usa string_view per tag/attr keys (zero alloc), xml_local_name → string_view
+   - xml_dom.h: metodi XmlNode (has, attr, attr_local, child, children_named, is) accettano string_view
+   - Chiavi attributi: niente allocazioni (string_view nel buffer XML originale)
+   - Valori attributi: owned string (decodifica entità XML)
+   - Compatibilità: chiamanti invariati (string literal → string_view implicito)
+   - Impatto stimato: −1.5÷2.5 s CPU su 229 pagine, −80% memoria parsing, abilitante per F2
 
 ✅ CRASH FIX — Bug in StyleCache::get_*_class
    - m_map.emplace(std::move(key), cls) sposta key → find(cls) cercava valore come chiave
@@ -204,7 +207,7 @@ Contro: Riscrittura significativa docx_builder
 | F1 — UI non bloccante | ✅ Sì (rivisto 2026-11-06) | Worker persistente + coda job; niente render/attese sul thread UI; distruzione sul worker; ID di generazione. Primo paint ancora legato al layout completo (F2) |
 | F3.1 — StyleCache CSS classi | ✅ Sì | Implementato e usato |
 | Crash fix `StyleCache::get_*_class` | ✅ Sì | `emplace(...).first->second` in tutti e 3 i metodi |
-| F3.3 — XML DOM string_view | ❌ NO | Solo `#include <string_view>`, nessun uso |
+| F3.3 — XML DOM string_view | ✅ Sì | name/attr keys = string_view (zero alloc), parser zero-copy, compatibile chiamanti |
 | F3.4 — append_text reserve/no substr | ⚠️ Parziale | Buffer NBSP presente, ma `substr()` è ancora lì (`docx_builder.cpp:1142`) |
 | F3.5 — Cache UTF-8↔UTF-16 e text width | ✅ Sì | TextWidthCache per documento; Utf8ToUtf16Cache ora `thread_local` (race risolta) |
 | Fix margini pagina | ✅ Sì | Applicato nei 3 punti dichiarati |

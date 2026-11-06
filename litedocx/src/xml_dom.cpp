@@ -6,18 +6,18 @@
 
 namespace litedocx
 {
-    std::string xml_local_name(const std::string& name)
+    std::string_view xml_local_name(std::string_view name)
     {
         auto pos = name.rfind(':');
-        return pos == std::string::npos ? name : name.substr(pos + 1);
+        return pos == std::string_view::npos ? name : name.substr(pos + 1);
     }
 
-    bool XmlNode::is(const std::string& local) const
+    bool XmlNode::is(std::string_view local) const
     {
         return xml_local_name(name) == local;
     }
 
-    std::string XmlNode::attr_local(const std::string& local, const std::string& def) const
+    std::string XmlNode::attr_local(std::string_view local, std::string_view def) const
     {
         for(const auto& a : attrs)
         {
@@ -26,10 +26,10 @@ namespace litedocx
                 return a.second;
             }
         }
-        return def;
+        return std::string(def);
     }
 
-    const XmlNode* XmlNode::child(const std::string& local) const
+    const XmlNode* XmlNode::child(std::string_view local) const
     {
         for(const auto& c : children)
         {
@@ -41,7 +41,7 @@ namespace litedocx
         return nullptr;
     }
 
-    std::vector<const XmlNode*> XmlNode::children_named(const std::string& local) const
+    std::vector<const XmlNode*> XmlNode::children_named(std::string_view local) const
     {
         std::vector<const XmlNode*> out;
         for(const auto& c : children)
@@ -56,7 +56,10 @@ namespace litedocx
 
     namespace
     {
-        void parse_attrs(const char* p, size_t n, std::map<std::string, std::string>& out)
+        // Map key = string_view into original XML buffer; value = owned decoded string
+        using AttrMap = std::map<std::string_view, std::string, std::less<>>;
+
+        void parse_attrs(const char* p, size_t n, AttrMap& out)
         {
             const char* end = p + n;
             while(p < end)
@@ -79,7 +82,7 @@ namespace litedocx
                     ++p;
                     continue;
                 }
-                std::string key(name, static_cast<size_t>(p - name));
+                std::string_view key(name, static_cast<size_t>(p - name));
                 while(p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n'))
                 {
                     ++p;
@@ -119,7 +122,7 @@ namespace litedocx
                 std::string decoded(value.size() + 1, '\0');
                 size_t len = xml_decode(value.data(), value.size(), decoded.data(), decoded.size());
                 decoded.resize(len);
-                out[key] = decoded;
+                out.emplace(key, std::move(decoded));
             }
         }
     } // namespace
@@ -158,7 +161,7 @@ namespace litedocx
                 {
                     continue;
                 }
-                std::string local = xml_local_name(std::string(tok.name, tok.name_len));
+                std::string_view local = xml_local_name(std::string_view(tok.name, tok.name_len));
                 for(size_t i = stack.size(); i-- > 0;)
                 {
                     if(xml_local_name(stack[i]->name) == local)
@@ -170,8 +173,8 @@ namespace litedocx
                 continue;
             }
 
-            auto node      = std::unique_ptr<XmlNode>(new XmlNode());
-            node->name.assign(tok.name, tok.name_len);
+            auto node = std::unique_ptr<XmlNode>(new XmlNode());
+            node->name = std::string_view(tok.name, tok.name_len);
             parse_attrs(tok.attrs, tok.attrs_len, node->attrs);
 
             XmlNode* raw = node.get();
