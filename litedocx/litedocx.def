@@ -1,0 +1,21 @@
+LIBRARY litedocx
+EXPORTS
+    ld_open_file
+    ld_open_memory
+    ld_render
+    ld_draw
+    ld_width
+    ld_height
+    ld_page_width
+    ld_page_height
+    ld_mouse_over
+    ld_lbutton_down
+    ld_lbutton_up
+    ld_mouse_leave
+    ld_find_box
+    ld_table_count
+    ld_get_table_cells
+    ld_free_table_cells
+    ld_last_error
+    ld_version
+    ld_destroy

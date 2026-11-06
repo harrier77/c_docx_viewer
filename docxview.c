@@ -387,7 +387,7 @@ static int dll_load(void)
 {
     g_dll = LoadLibraryA("litehtml_c.dll");
     if (!g_dll) g_dll = LoadLibraryA("..\\sunburst\\litehtml_c.dll");
-    if (!g_dll) g_dll = LoadLibraryA("..\\litehtml_host\\litehtml_c.dll");
+    if (!g_dll) g_dll = LoadLibraryA(".\\litehtml_c.dll");
     if (!g_dll) g_dll = LoadLibraryA("C:\\Users\\pr30565\\Desktop\\Pure_C\\sunburst\\litehtml_c.dll");
     if (!g_dll) return 0;
 

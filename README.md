@@ -88,8 +88,8 @@ Note tecniche:
   sono convertiti in UTF-16 per `DrawTextW`/`GetTextExtentPoint32W`;
 - i link sono aperti con `ShellExecuteA` caricata a runtime da `shell32.dll`
   (tcc non ha l'import library);
-- `docxview` cerca `litehtml_c.dll` accanto all'exe, poi in `..\sunburst\` e
-  `..\litehtml_host\`, infine nel percorso assoluto usato in sviluppo.
+- `docxview` cerca `litehtml_c.dll` nella propria cartella di esecuzione (stesso repo di `docxview_new.c` e `litedocx/`),
+  infine nel percorso assoluto usato in sviluppo.
 
 Richiede `litehtml_c.dll` e, per compilare, i sorgenti della libreria nella
 stessa cartella.
