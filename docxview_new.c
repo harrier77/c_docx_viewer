@@ -632,7 +632,6 @@ static void apply_loaded_doc(unsigned id, void *doc)
         g_page_h_est = page_h > 0 ? page_h : 800;
         g_first_rendered_page = 0;
         g_last_rendered_page = 0;
-        log_msg("[LOAD] page_h=%d page_count=%d doc_h_est=%d\n", page_h, page_count, g_doc_h);
 
         /* Render pagina 0 in background (first paint) */
         request_render_range(0, 0);
@@ -673,8 +672,6 @@ static void on_render_done(void *doc, int used_w)
             g_first_rendered_page = first;
         if (last > g_last_rendered_page)
             g_last_rendered_page = last;
-        log_msg("[RENDER_DONE] pages %d-%d, total rendered %d-%d\n",
-                first, last, g_first_rendered_page, g_last_rendered_page);
         
         /* Lookahead: pre-renderizza prossime 2 pagine */
         int page_count = ld_get_page_count(g_doc);

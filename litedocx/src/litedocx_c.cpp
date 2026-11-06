@@ -32,7 +32,7 @@
 #include "litedocx_c.h"
 
 #ifndef LITEDOCX_DEBUG
-#define LITEDOCX_DEBUG 1
+#define LITEDOCX_DEBUG 0
 #endif
 
 #if LITEDOCX_DEBUG
@@ -1214,20 +1214,6 @@ int ld_render(void* doc, int max_width)
         int w = static_cast<int>(h->doc->render(max_width));
         LDBG((std::string("[LITEDOCX_RENDER] result width=") + std::to_string(w) + "\n").c_str());
 
-        // TEMP DEBUG: log page-break divs (Fase 3 verification)
-        if (h->doc && h->doc->root()) {
-            auto page_breaks = h->doc->root()->select_all("[data-page-break]");
-            fprintf(stderr, "[DEBUG] Found %zu page-break divs\n", page_breaks.size());
-            for (const auto& el : page_breaks) {
-                if (el) {
-                    const char* attr = el->get_attr("data-page-break");
-                    litehtml::position pos = el->get_placement();
-                    fprintf(stderr, "[DEBUG]   page-break %s: y=%.0f h=%.0f\n",
-                            attr ? attr : "?", pos.y, pos.height);
-                }
-            }
-        }
-
         if(h->container)
         {
             h->container->doc = h->doc;
@@ -1571,8 +1557,6 @@ static void extract_page_geometry(ld_doc* h)
     }
     
     h->m_last_rendered_page = static_cast<int>(h->m_page_heights.size()) - 1;
-    
-    LDBG((std::string("[PAGINATION] Extracted ") + std::to_string(h->m_page_heights.size()) + " pages\n").c_str());
 }
 
 int ld_get_page_count(void* doc)
