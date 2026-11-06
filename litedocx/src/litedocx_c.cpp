@@ -1519,6 +1519,119 @@ void ld_free_table_cells(ld_table_cell_info* cells)
     }
 }
 
+// ===== Paginated layout API (Fase 4) =====
+
+static void extract_page_geometry(ld_doc* h)
+{
+    if (!h || !h->doc || !h->doc->root())
+        return;
+    
+    // Already extracted?
+    if (!h->m_page_heights.empty())
+        return;
+    
+    // Ensure full layout is done
+    if (h->m_last_rendered_page == -1 && h->container)
+    {
+        int w = h->container->viewport_w > 0 ? h->container->viewport_w : 800;
+        h->doc->render(w);
+        h->container->doc = h->doc;
+        h->container->rebuild_table_cells();
+    }
+    
+    // Find all page-break divs
+    auto page_breaks = h->doc->root()->select_all("[data-page-break]");
+    
+    int last_y = 0;
+    for (const auto& el : page_breaks)
+    {
+        if (!el) continue;
+        litehtml::position pos = el->get_placement();
+        int page_h = static_cast<int>(pos.y - last_y);
+        if (page_h > 0)
+        {
+            h->m_page_y_offsets.push_back(last_y);
+            h->m_page_heights.push_back(page_h);
+            last_y = static_cast<int>(pos.y);
+        }
+    }
+    
+    // Last page: from last page-break to end of document
+    int doc_h = static_cast<int>(h->doc->height());
+    if (doc_h > last_y)
+    {
+        h->m_page_y_offsets.push_back(last_y);
+        h->m_page_heights.push_back(doc_h - last_y);
+    }
+    else if (h->m_page_heights.empty())
+    {
+        // No page breaks at all -> single page
+        h->m_page_y_offsets.push_back(0);
+        h->m_page_heights.push_back(doc_h > 0 ? doc_h : h->m_page_height_px);
+    }
+    
+    h->m_last_rendered_page = static_cast<int>(h->m_page_heights.size()) - 1;
+    
+    LDBG((std::string("[PAGINATION] Extracted ") + std::to_string(h->m_page_heights.size()) + " pages\n").c_str());
+}
+
+int ld_get_page_count(void* doc)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->doc)
+        return 0;
+    
+    extract_page_geometry(h);
+    return static_cast<int>(h->m_page_heights.size());
+}
+
+int ld_get_page_height(void* doc, int page_idx)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->doc || page_idx < 0)
+        return 0;
+    
+    extract_page_geometry(h);
+    if (page_idx >= static_cast<int>(h->m_page_heights.size()))
+        return 0;
+    
+    return h->m_page_heights[page_idx];
+}
+
+int ld_render_range(void* doc, int page_idx, int viewport_h, int max_width)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->doc)
+        return 0;
+    
+    // For now: ensure full layout on first call, then no-op
+    if (h->m_last_rendered_page == -1)
+    {
+        int w = max_width > 0 ? max_width : (h->container ? h->container->viewport_w : 800);
+        int rendered_w = static_cast<int>(h->doc->render(w));
+        if (h->container)
+        {
+            h->container->doc = h->doc;
+            h->container->rebuild_table_cells();
+        }
+        extract_page_geometry(h);
+        return rendered_w;
+    }
+    
+    // Already laid out
+    return ld_width(doc);
+}
+
+void ld_clear_page_cache(void* doc)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h)
+        return;
+    h->m_page_heights.clear();
+    h->m_page_y_offsets.clear();
+    h->m_last_rendered_page = -1;
+}
+
 void ld_destroy(void* doc)
 {
     auto* h = static_cast<ld_doc*>(doc);
