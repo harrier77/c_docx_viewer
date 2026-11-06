@@ -32,7 +32,7 @@
 #include "litedocx_c.h"
 
 #ifndef LITEDOCX_DEBUG
-#define LITEDOCX_DEBUG 0
+#define LITEDOCX_DEBUG 1
 #endif
 
 #if LITEDOCX_DEBUG
@@ -40,10 +40,6 @@
 #else
 #define LDBG(msg) ((void)0)
 #endif
-
-// Debug disabilitato - decommentare sotto per abilitare
-// #undef LITEDOCX_DEBUG
-// #define LITEDOCX_DEBUG 1
 
 namespace
 {
@@ -1217,6 +1213,21 @@ int ld_render(void* doc, int max_width)
         }
         int w = static_cast<int>(h->doc->render(max_width));
         LDBG((std::string("[LITEDOCX_RENDER] result width=") + std::to_string(w) + "\n").c_str());
+
+        // TEMP DEBUG: log page-break divs (Fase 3 verification)
+        if (h->doc && h->doc->root()) {
+            auto page_breaks = h->doc->root()->select_all("[data-page-break]");
+            fprintf(stderr, "[DEBUG] Found %zu page-break divs\n", page_breaks.size());
+            for (const auto& el : page_breaks) {
+                if (el) {
+                    const char* attr = el->get_attr("data-page-break");
+                    litehtml::position pos = el->get_placement();
+                    fprintf(stderr, "[DEBUG]   page-break %s: y=%.0f h=%.0f\n",
+                            attr ? attr : "?", pos.y, pos.height);
+                }
+            }
+        }
+
         if(h->container)
         {
             h->container->doc = h->doc;
