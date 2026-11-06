@@ -1,2 +1,2 @@
 cd C:/Users/pr30565/Desktop/Pure_C/docx/litedocx
-powershell -NoProfile -ExecutionPolicy Bypass -Command ".\build_litedocx.ps1 -Root 'C:/Users/pr30565/Desktop/Pure_C/docx' -Litehtml 'C:/Users/pr30565/Desktop/Pure_C/docx/litehtml' -Obj 'obj' -Gcc 'C:/Users/pr30565/Nim_code/mingw64/bin/gcc.exe' -Gxx 'C:/Users/pr30565/Nim_code/mingw64/bin/g++.exe' -Here 'C:/Users/pr30565/Desktop/Pure_C/docx/litedocx/'"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ".\build_litedocx.ps1 -Root 'C:/Users/pr30565/Desktop/Pure_C/docx' -Litehtml 'C:/Users/pr30565/Desktop/Pure_C/docx/litehtml' -Obj 'obj' -Gcc 'C:/Users/pr30565/Nim_code/mingw64/bin/gcc.exe' -Gxx 'C:/Users/pr30565/Nim_code/mingw64/bin/g++.exe' -Here 'C:/Users/pr30565/Desktop/Pure_C/docx/litedocx/' -Configuration Debug"

@@ -1138,8 +1138,8 @@ namespace litedocx
                 {
                     ++i;
                 }
-                // Use pointer arithmetic to avoid substr allocation - el_text takes const char*
-                parent->appendChild(std::make_shared<litehtml::el_text>(text.c_str() + start, m_doc));
+                // Must use substr to get null-terminated string; el_text copies into std::string
+                parent->appendChild(std::make_shared<litehtml::el_text>(text.substr(start, i - start).c_str(), m_doc));
             }
         }
     }

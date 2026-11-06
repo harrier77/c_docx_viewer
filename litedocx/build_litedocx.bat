@@ -24,8 +24,8 @@ if not exist "%LITEHTML%\include\litehtml.h" (
   exit /b 1
 )
 
-if not exist "%HERE%psbuild.ps1" (
-  echo [ERRORE] psbuild.ps1 non trovato
+if not exist "%HERE%\build_litedocx.ps1" (
+  echo [ERRORE] build_litedocx.ps1 non trovato
   exit /b 1
 )
 

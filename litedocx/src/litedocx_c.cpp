@@ -16,6 +16,7 @@
 #include <litehtml.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <list>
 #include <map>
@@ -29,6 +30,20 @@
 #include "docx_model.h"
 #include "docx_package.h"
 #include "litedocx_c.h"
+
+#ifndef LITEDOCX_DEBUG
+#define LITEDOCX_DEBUG 0
+#endif
+
+#if LITEDOCX_DEBUG
+#define LDBG(msg) do { fprintf(stderr, "%s", msg); fflush(stderr); } while(0)
+#else
+#define LDBG(msg) ((void)0)
+#endif
+
+// Debug disabilitato - decommentare sotto per abilitare
+// #undef LITEDOCX_DEBUG
+// #define LITEDOCX_DEBUG 1
 
 namespace
 {
@@ -609,6 +624,7 @@ namespace
 
         litehtml::pixel_t text_width(const char* text, litehtml::uint_ptr hFont) override
         {
+            LDBG((std::string("[LITEDOCX_TEXT_WIDTH] text='") + (text ? text : "NULL") + "'\n").c_str());
             // Check cache first
             int cached = text_width_cache.get(text, hFont);
             if (cached >= 0) {
@@ -645,6 +661,7 @@ namespace
         void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color,
                        const litehtml::position& pos) override
         {
+            LDBG((std::string("[LITEDOCX_DRAW_TEXT] text='") + (text ? text : "NULL") + "' at (" + std::to_string(static_cast<int>(pos.x)) + "," + std::to_string(static_cast<int>(pos.y)) + ")\n").c_str());
             if(cb.lh.draw_text)
             {
                 size_t wlen = 0;
@@ -661,6 +678,10 @@ HGDIOBJ old = SelectObject(reinterpret_cast<HDC>(hdc), reinterpret_cast<HFONT>(h
                 DrawTextW(reinterpret_cast<HDC>(hdc), w, static_cast<int>(wlen), &rc,
                           DT_SINGLELINE | DT_NOPREFIX | DT_NOCLIP);
                 SelectObject(reinterpret_cast<HDC>(hdc), old);
+            }
+            else
+            {
+                LDBG("[LITEDOCX_DRAW_TEXT] cb.lh.draw_text is NULL!\n");
             }
         }
 
@@ -809,6 +830,7 @@ HGDIOBJ old = SelectObject(reinterpret_cast<HDC>(hdc), reinterpret_cast<HFONT>(h
             const int y = static_cast<int>(layer.border_box.y);
             const int w = static_cast<int>(layer.border_box.width);
             const int h = static_cast<int>(layer.border_box.height);
+            LDBG((std::string("[LITEDOCX_DRAW_FILL] at (") + std::to_string(x) + "," + std::to_string(y) + ") " + std::to_string(w) + "x" + std::to_string(h) + "\n").c_str());
             
             /* Check if this is a table cell and call custom callback */
             if(cb.draw_table_cell_bg)
@@ -1168,6 +1190,7 @@ void* ld_open_memory(const void* data, size_t size, const ld_callbacks* cb, int 
 
 int ld_render(void* doc, int max_width)
 {
+    LDBG((std::string("[LITEDOCX_RENDER] max_width=") + std::to_string(max_width) + "\n").c_str());
     auto* h = static_cast<ld_doc*>(doc);
     if(!h || !h->doc)
     {
@@ -1180,6 +1203,7 @@ int ld_render(void* doc, int max_width)
             h->container->viewport_w = max_width;
         }
         int w = static_cast<int>(h->doc->render(max_width));
+        LDBG((std::string("[LITEDOCX_RENDER] result width=") + std::to_string(w) + "\n").c_str());
         if(h->container)
         {
             h->container->doc = h->doc;
@@ -1195,6 +1219,7 @@ int ld_render(void* doc, int max_width)
 
 void ld_draw(void* doc, void* hdc, int x, int y, int clip_x, int clip_y, int clip_w, int clip_h)
 {
+    LDBG((std::string("[LITEDOCX_DRAW] at (") + std::to_string(x) + "," + std::to_string(y) + ") clip=(" + std::to_string(clip_x) + "," + std::to_string(clip_y) + "," + std::to_string(clip_w) + "," + std::to_string(clip_h) + ")\n").c_str());
     auto* h = static_cast<ld_doc*>(doc);
     if(!h || !h->doc)
     {
@@ -1204,6 +1229,7 @@ void ld_draw(void* doc, void* hdc, int x, int y, int clip_x, int clip_y, int cli
     try
     {
         h->doc->draw(reinterpret_cast<litehtml::uint_ptr>(hdc), x, y, &clip);
+        LDBG("[LITEDOCX_DRAW] draw returned\n");
     } catch(...)
     {
         set_error("errore durante il disegno");

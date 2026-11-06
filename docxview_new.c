@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 
 
@@ -41,6 +42,7 @@ static char      g_path[MAX_PATH];
 static char      g_title[300];
 static char      g_url[2048];
 static char      g_cur[32] = "arrow";
+static FILE     *g_log_file = NULL;
 
 static ld_callbacks g_cb;
 static int g_cb_init;
@@ -137,6 +139,19 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
     return f;
 }
 
+static void log_msg(const char *fmt, ...)
+{
+    if (!g_log_file) {
+        g_log_file = fopen("C:\\Users\\pr30565\\Desktop\\logs.txt", "a");
+        if (!g_log_file) return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(g_log_file, fmt, args);
+    va_end(args);
+    fflush(g_log_file);
+}
+
 static void cb_delete_font(void *font)
 {
     if (font)
@@ -145,6 +160,7 @@ static void cb_delete_font(void *font)
 
 static int cb_text_width(const char *text, void *font)
 {
+    // log_msg("[TEXT_WIDTH] text='%s'\n", text ? text : "NULL");
     SIZE sz;
     HDC dc = g_tmpdc;
     if (!dc || !text || !text[0])
@@ -165,6 +181,7 @@ static int cb_text_width(const char *text, void *font)
 
 static void cb_draw_text(void *hdc, const char *text, void *font, unsigned rgb, int x, int y, int w, int h)
 {
+    // log_msg("[DRAW_TEXT] text='%s' at (%d,%d) w=%d h=%d\n", text ? text : "NULL", x, y, w, h);
     HDC dc = (HDC)hdc;
     if (!dc || !text || !text[0])
         return;
@@ -183,6 +200,7 @@ static void cb_draw_text(void *hdc, const char *text, void *font, unsigned rgb, 
 
 static void cb_draw_solid_fill(void *hdc, int x, int y, int w, int h, unsigned rgb)
 {
+    // log_msg("[DRAW_FILL] at (%d,%d) %dx%d rgb=0x%06X\n", x, y, w, h, rgb);
     HDC dc = (HDC)hdc;
     RECT rc;
     HBRUSH br;
@@ -198,6 +216,7 @@ static void cb_draw_solid_fill(void *hdc, int x, int y, int w, int h, unsigned r
 static void cb_draw_borders(void *hdc, int x, int y, int w, int h, int left_w, int top_w, int right_w, int bottom_w,
                          unsigned left_rgb, unsigned top_rgb, unsigned right_rgb, unsigned bottom_rgb)
 {
+    // log_msg("[DRAW_BORDERS] at (%d,%d) %dx%d L=%d T=%d R=%d B=%d\n", x, y, w, h, left_w, top_w, right_w, bottom_w);
     if (left_w > 0) {
         cb_draw_solid_fill(hdc, x, y, left_w, h, left_rgb);
     }
@@ -212,11 +231,12 @@ static void cb_draw_borders(void *hdc, int x, int y, int w, int h, int left_w, i
     }
 }
 
-static void cb_set_caption(const char *caption) {}
-static void cb_set_base_url(const char *url) {}
-static void cb_link(const char *url, const char *title) {}
+static void cb_set_caption(const char *caption) { /* log_msg("[CB] set_caption: %s\n", caption ? caption : "NULL"); */ }
+static void cb_set_base_url(const char *url) { /* log_msg("[CB] set_base_url: %s\n", url ? url : "NULL"); */ }
+static void cb_link(const char *url, const char *title) { /* log_msg("[CB] link: url=%s title=%s\n", url ? url : "NULL", title ? title : "NULL"); */ }
 static void cb_on_anchor_click(const char *url)
 {
+    /* log_msg("[CB] on_anchor_click: %s\n", url ? url : "NULL"); */
     if (url && url[0])
         MessageBoxA(g_hwnd, url, "Link Clicked", MB_OK);
 }
@@ -275,8 +295,10 @@ static DWORD WINAPI LoadThreadProc(LPVOID arg)
     (void)arg;
     const char *path = g_load_path;
     
+    // log_msg("[LOAD] Opening file: %s\n", path);
     void *doc = ld_open_file(path, &g_cb, g_page_w, g_ch);
     if (g_load_cancel) {
+        // log_msg("[LOAD] Cancelled after open\n");
         if (doc) ld_destroy(doc);
         return 0;
     }
@@ -284,18 +306,23 @@ static DWORD WINAPI LoadThreadProc(LPVOID arg)
         const int page_margin_x = 64;
         int content_w = g_page_w - 2 * page_margin_x;
         if (content_w < 1) content_w = 1;
+        // log_msg("[LOAD] Rendering doc with content_w=%d\n", content_w);
         ld_render(doc, content_w);
+        // log_msg("[LOAD] Render complete, doc height=%d\n", ld_height(doc));
     }
     if (g_load_cancel) {
+        // log_msg("[LOAD] Cancelled after render\n");
         if (doc) ld_destroy(doc);
         return 0;
     }
+    // log_msg("[LOAD] Posting WM_APP_DOC_READY\n");
     PostMessageA(g_hwnd, WM_APP_DOC_READY, 0, (LPARAM)doc);
     return 0;
 }
 
 static void start_async_load(const char *path)
 {
+    // log_msg("[MAIN] start_async_load: %s\n", path);
     if (g_load_thread) {
         g_load_cancel = 1;
         WaitForSingleObject(g_load_thread, 2000);
@@ -316,12 +343,14 @@ static void start_async_load(const char *path)
 
 static void on_doc_ready(void *doc)
 {
+    // log_msg("[READY] on_doc_ready called\n");
     if (g_load_thread) {
         CloseHandle(g_load_thread);
         g_load_thread = NULL;
     }
     
     if (g_doc) {
+        // log_msg("[READY] Destroying old doc\n");
         ld_destroy(g_doc);
     }
     g_doc = doc;
@@ -331,9 +360,11 @@ static void on_doc_ready(void *doc)
         const char *p = strrchr(g_load_path, '\\');
         if (!p) p = strrchr(g_load_path, '/');
         sprintf(g_title, "docxview_new - %s", p ? p + 1 : g_load_path);
+        // log_msg("[READY] New doc loaded: %s, height=%d\n", g_title, ld_height(g_doc));
     } else {
         sprintf(g_title, "docxview_new - [Errore apertura file]");
         g_path[0] = 0;
+        // log_msg("[READY] Failed to load doc\n");
     }
     SetWindowTextA(g_hwnd, g_title);
     g_scroll = 0;
@@ -344,6 +375,7 @@ static void on_doc_ready(void *doc)
 static void load_docx_file(const char *path)
 {
     if (!path || !path[0]) return;
+    // log_msg("[MAIN] load_docx_file: %s\n", path);
     start_async_load(path);
     /* UI mostra titolo "Caricamento..." subito */
     SetWindowTextA(g_hwnd, "docxview_new - Caricamento...");
@@ -353,6 +385,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_CREATE:
+        // log_msg("[CREATE] WM_CREATE\n");
         g_hwnd = hwnd;
         g_tmpdc = GetDC(NULL);
         g_br_desk = CreateSolidBrush(RGB(240, 240, 242));
@@ -361,6 +394,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     case WM_SIZE:
+        // log_msg("[SIZE] WM_SIZE cw=%d ch=%d\n", LOWORD(lp), HIWORD(lp));
         g_cw = LOWORD(lp);
         g_ch = HIWORD(lp);
         {
@@ -381,7 +415,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             const int page_margin_x = 64;
             int content_w = g_page_w - 2 * page_margin_x;
             if (content_w < 1) content_w = 1;
+            // log_msg("[SIZE] Re-rendering doc with content_w=%d\n", content_w);
             ld_render(g_doc, content_w);
+            // log_msg("[SIZE] Re-render complete, new doc height=%d\n", ld_height(g_doc));
         }
         update_scrollbars();
         InvalidateRect(hwnd, NULL, FALSE);
@@ -412,13 +448,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int content_x = g_page_x + page_margin_x;
             int content_y = pt + page_margin_y;
 
-            /* Renderizza per larghezza area contenuto (non pagina intera) */
-            ld_render(g_doc, content_w);
-            
+            // log_msg("[PAINT] Drawing doc at (%d,%d) content_w=%d doc_h=%d\n", content_x, content_y, content_w, doc_h);
+            /* NON chiamare ld_render qui - già fatto nel thread di caricamento */
             /* Clip rect = area contenuto (esclude margini) */
             RECT rc_content = {content_x, content_y, content_x + content_w, content_y + doc_h};
+            // log_msg("[PAINT] Calling ld_draw at (%d,%d) clip=(%d,%d,%d,%d)\n", content_x, content_y, rc_content.left, rc_content.top, rc_content.right - rc_content.left, rc_content.bottom - rc_content.top);
             ld_draw(g_doc, g_memdc, content_x, content_y,
                     rc_content.left, rc_content.top, rc_content.right - rc_content.left, rc_content.bottom - rc_content.top);
+            // log_msg("[PAINT] ld_draw returned\n");
         }
 
         BitBlt(hdc, 0, 0, g_cw, g_ch, g_memdc, 0, 0, SRCCOPY);
@@ -503,6 +540,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     case WM_DESTROY:
+        // log_msg("[DESTROY] Cleaning up\n");
         if (g_load_thread) {
             g_load_cancel = 1;
             WaitForSingleObject(g_load_thread, 2000);
@@ -520,6 +558,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_br_shadow) DeleteObject(g_br_shadow);
         if (g_br_border) DeleteObject(g_br_border);
         if (g_tmpdc) ReleaseDC(NULL, g_tmpdc);
+        if (g_log_file) {
+            fclose(g_log_file);
+            g_log_file = NULL;
+        }
         PostQuitMessage(0);
         break;
 

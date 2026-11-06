@@ -4,7 +4,9 @@ param(
     [string]$Obj,
     [string]$Gcc,
     [string]$Gxx,
-    [string]$Here
+    [string]$Here,
+    [ValidateSet('Release','Debug')]
+    [string]$Configuration = 'Release'
 )
 
 # Normalize paths - remove trailing backslashes
@@ -41,6 +43,15 @@ function Compile-File($src, $dst, $compiler, $flags) {
     Write-Host "  Compilazione $((Split-Path $src -Leaf)) ..."
     $flagList = @()
     if ($flags) { $flagList += $flags -split '\s+' | Where-Object { $_ -ne '' } }
+    # Aggiungi flag di debug se in configurazione Debug
+    if ($Configuration -eq 'Debug') {
+        $flagList += '-g'
+        $flagList += '-O0'
+        $flagList += '-DDEBUG'
+        $flagList += '-DLITEDOCX_DEBUG=1'
+    } else {
+        $flagList += '-DLITEDOCX_DEBUG=0'
+    }
     $flagList += $src
     $flagList += '-o'
     $flagList += $dst
@@ -58,12 +69,15 @@ function Link-Dll($objDir, $def, $outDll, $outLib) {
         $objs += Get-ChildItem $pattern -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
     }
     if ($objs.Count -eq 0) { Write-Host "ERRORE: nessun oggetto trovato"; return $false }
-    & $Gxx -shared -o $outDll `
-        @objs `
-        $def `
-        '-static-libgcc', '-static-libstdc++',
-        "-Wl,--out-implib=$outLib",
-        '-lgdi32', '-luser32', '-lole32', '-luuid', '-lwindowscodecs', '-lmsimg32'
+    $linkFlags = @('-shared', '-o', $outDll)
+    $linkFlags += $objs
+    $linkFlags += $def
+    $linkFlags += '-static-libgcc', '-static-libstdc++', "-Wl,--out-implib=$outLib"
+    $linkFlags += '-lgdi32', '-luser32', '-lole32', '-luuid', '-lwindowscodecs', '-lmsimg32'
+    if ($Configuration -eq 'Debug') {
+        $linkFlags += '-g'
+    }
+    & $Gxx @linkFlags
     if ($LASTEXITCODE -ne 0) { return $false }
     Write-Host "[OK] Creato $outDll"
     return $true
@@ -72,32 +86,34 @@ function Link-Dll($objDir, $def, $outDll, $outLib) {
 # Include flags per tutte le compilazioni
 $IFLAGS = "-I$Litehtml/include -I$Litehtml/include/litehtml -I$Litehtml/src -I$Litehtml/src/gumbo/src -I$Here/include -I$Here/src -I$Here/third_party"
 
+$optFlags = if ($Configuration -eq 'Debug') { '-O0' } else { '-O2' }
+
 # [1/5] gumbo (C)
-Write-Host "[1/5] Compilazione gumbo (C99) con gcc..."
+Write-Host "[1/5] Compilazione gumbo (C99) con gcc... [$Configuration]"
 foreach ($f in Get-ChildItem (Join-Path $Litehtml 'src/gumbo/src/*.c')) {
     $dst = Join-Path $Obj "gumbo/$($f.BaseName).o"
-    if (-not (Compile-File $f.FullName $dst $Gcc "$IFLAGS -O2 -c")) { exit 1 }
+    if (-not (Compile-File $f.FullName $dst $Gcc "$IFLAGS $optFlags -c")) { exit 1 }
 }
 
 # [2/5] third_party (C)
-Write-Host "[2/5] Compilazione zip/inflate/xmlbuf (C) con gcc..."
+Write-Host "[2/5] Compilazione zip/inflate/xmlbuf (C) con gcc... [$Configuration]"
 foreach ($f in Get-ChildItem (Join-Path $Here 'third_party/*.c')) {
     $dst = Join-Path $Obj "third_party/$($f.BaseName).o"
-    if (-not (Compile-File $f.FullName $dst $Gcc "$IFLAGS -O2 -c")) { exit 1 }
+    if (-not (Compile-File $f.FullName $dst $Gcc "$IFLAGS $optFlags -c")) { exit 1 }
 }
 
 # [3/5] litehtml (C++17)
-Write-Host "[3/5] Compilazione litehtml (C++17) con g++..."
+Write-Host "[3/5] Compilazione litehtml (C++17) con g++... [$Configuration]"
 foreach ($f in Get-ChildItem (Join-Path $Litehtml 'src/*.cpp')) {
     $dst = Join-Path $Obj "litehtml/$($f.BaseName).o"
-    if (-not (Compile-File $f.FullName $dst $Gxx "$IFLAGS -O2 -c -std=c++17 -fexceptions")) { exit 1 }
+    if (-not (Compile-File $f.FullName $dst $Gxx "$IFLAGS $optFlags -c -std=c++17 -fexceptions")) { exit 1 }
 }
 
 # [4/5] litedocx (C++17)
-Write-Host "[4/5] Compilazione litedocx (C++17) con g++..."
+Write-Host "[4/5] Compilazione litedocx (C++17) con g++... [$Configuration]"
 foreach ($f in Get-ChildItem (Join-Path $Here 'src/*.cpp')) {
     $dst = Join-Path $Obj "litedocx/$($f.BaseName).o"
-    if (-not (Compile-File $f.FullName $dst $Gxx "$IFLAGS -O2 -c -std=c++17 -fexceptions")) { exit 1 }
+    if (-not (Compile-File $f.FullName $dst $Gxx "$IFLAGS $optFlags -c -std=c++17 -fexceptions")) { exit 1 }
 }
 
 # [5/5] link

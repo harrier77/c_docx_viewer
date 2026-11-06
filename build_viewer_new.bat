@@ -9,7 +9,7 @@ echo Copia di litedocx.dll e liblitedocx.a...
 copy /y ".\\litedocx\\litedocx.dll" . >nul
 copy /y ".\\litedocx\\liblitedocx.a" . >nul
 
-"C:\Program Files (x86)\tcc64\tcc.exe" -Wall -I. -o docxview_new.exe docxview_new.c litedocx.dll -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32
+"C:\Program Files (x86)\tcc64\tcc.exe" -Wall -I. -mconsole -o docxview_new.exe docxview_new.c litedocx.dll -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32
 if errorlevel 1 goto :fail
 
 echo.
