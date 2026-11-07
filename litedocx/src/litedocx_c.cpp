@@ -41,6 +41,9 @@
 #define LDBG(msg) ((void)0)
 #endif
 
+// Logging per debug Fase D (sempre abilitato)
+#define LDLOG(fmt, ...) do { fprintf(stderr, "[LITEDOCX] " fmt "\n", ##__VA_ARGS__); fflush(stderr); } while(0)
+
 namespace
 {
     std::string& last_error()
@@ -1043,7 +1046,8 @@ HGDIOBJ old = SelectObject(reinterpret_cast<HDC>(hdc), reinterpret_cast<HFONT>(h
         int                     m_page_height_px = 0;       // CSS page height from DocxBuilder
         std::vector<int>        m_page_heights;             // Computed page heights (lazy)
         std::vector<int>        m_page_y_offsets;           // Y-offset of each page
-        int                     m_last_rendered_page = -1;  // Highest page laid out
+        int                     m_last_rendered_page = -1;  // Highest page laid out (pagination)
+        bool                    m_full_layout_done = false; // Full document::render completed
     };
 
     void fire_redraw(void* user, const litehtml::position& pos)
@@ -1199,7 +1203,7 @@ void* ld_open_memory(const void* data, size_t size, const ld_callbacks* cb, int 
 
 int ld_render(void* doc, int max_width)
 {
-    LDBG((std::string("[LITEDOCX_RENDER] max_width=") + std::to_string(max_width) + "\n").c_str());
+    LDLOG("ld_render called, max_width=%d", max_width);
     auto* h = static_cast<ld_doc*>(doc);
     if(!h || !h->doc)
     {
@@ -1212,13 +1216,18 @@ int ld_render(void* doc, int max_width)
             h->container->viewport_w = max_width;
         }
         int w = static_cast<int>(h->doc->render(max_width));
-        LDBG((std::string("[LITEDOCX_RENDER] result width=") + std::to_string(w) + "\n").c_str());
+        LDLOG("ld_render done, width=%d", w);
 
         if(h->container)
         {
             h->container->doc = h->doc;
             h->container->rebuild_table_cells();
         }
+        // Full layout fatto: marca flag e invalida cache pagine per ricalcolo geometria reale
+        h->m_full_layout_done = true;
+        h->m_page_heights.clear();
+        h->m_page_y_offsets.clear();
+        h->m_last_rendered_page = -1; // extract_page_geometry ricalcolerà geometria REALE alla prossima chiamata
         return w;
     } catch(...)
     {
@@ -1509,23 +1518,28 @@ void ld_free_table_cells(ld_table_cell_info* cells)
 
 static void extract_page_geometry(ld_doc* h)
 {
+    LDLOG("extract_page_geometry called, m_full_layout_done=%d, m_page_heights.size()=%zu", h ? h->m_full_layout_done : -99, h ? h->m_page_heights.size() : 99);
     if (!h || !h->doc || !h->doc->root())
         return;
     
     // Already extracted?
     if (!h->m_page_heights.empty())
-        return;
-    
-    // Ensure full layout is done
-    if (h->m_last_rendered_page == -1 && h->container)
     {
-        int w = h->container->viewport_w > 0 ? h->container->viewport_w : 800;
-        h->doc->render(w);
-        h->container->doc = h->doc;
-        h->container->rebuild_table_cells();
+        LDLOG("extract_page_geometry: already extracted, returning cached");
+        return;
     }
     
-    // Find all page-break divs
+    // Se full layout NON fatto: restituisci stima (non triggerare render su UI thread)
+    if (!h->m_full_layout_done)
+    {
+        LDLOG("extract_page_geometry: full layout not done, returning estimate (m_page_height_px=%d)", h->m_page_height_px);
+        h->m_page_y_offsets.push_back(0);
+        h->m_page_heights.push_back(h->m_page_height_px > 0 ? h->m_page_height_px : 1000);
+        return;
+    }
+    
+    LDLOG("extract_page_geometry: full layout done, computing real geometry from page-breaks");
+    // Full layout fatto: calcola geometria REALE dai page-break
     auto page_breaks = h->doc->root()->select_all("[data-page-break]");
     
     int last_y = 0;
@@ -1557,20 +1571,25 @@ static void extract_page_geometry(ld_doc* h)
     }
     
     h->m_last_rendered_page = static_cast<int>(h->m_page_heights.size()) - 1;
+    LDLOG("extract_page_geometry: computed %d pages, m_last_rendered_page=%d", h->m_last_rendered_page + 1, h->m_last_rendered_page);
 }
 
 int ld_get_page_count(void* doc)
 {
+    LDLOG("ld_get_page_count called");
     auto* h = static_cast<ld_doc*>(doc);
     if (!h || !h->doc)
         return 0;
     
     extract_page_geometry(h);
-    return static_cast<int>(h->m_page_heights.size());
+    int count = static_cast<int>(h->m_page_heights.size());
+    LDLOG("ld_get_page_count returning %d", count);
+    return count;
 }
 
 int ld_get_page_height(void* doc, int page_idx)
 {
+    LDLOG("ld_get_page_height called, page_idx=%d", page_idx);
     auto* h = static_cast<ld_doc*>(doc);
     if (!h || !h->doc || page_idx < 0)
         return 0;
@@ -1579,11 +1598,14 @@ int ld_get_page_height(void* doc, int page_idx)
     if (page_idx >= static_cast<int>(h->m_page_heights.size()))
         return 0;
     
-    return h->m_page_heights[page_idx];
+    int hgt = h->m_page_heights[page_idx];
+    LDLOG("ld_get_page_height returning %d", hgt);
+    return hgt;
 }
 
 int ld_render_range(void* doc, int page_idx, int viewport_h, int max_width)
 {
+    LDLOG("ld_render_range called, page_idx=%d, viewport_h=%d, max_width=%d", page_idx, viewport_h, max_width);
     auto* h = static_cast<ld_doc*>(doc);
     if (!h || !h->doc)
         return 0;
@@ -1591,6 +1613,7 @@ int ld_render_range(void* doc, int page_idx, int viewport_h, int max_width)
     // For now: ensure full layout on first call, then no-op
     if (h->m_last_rendered_page == -1)
     {
+        LDLOG("ld_render_range: first call, doing full layout");
         int w = max_width > 0 ? max_width : (h->container ? h->container->viewport_w : 800);
         int rendered_w = static_cast<int>(h->doc->render(w));
         if (h->container)
@@ -1598,10 +1621,13 @@ int ld_render_range(void* doc, int page_idx, int viewport_h, int max_width)
             h->container->doc = h->doc;
             h->container->rebuild_table_cells();
         }
+        // Dopo il full layout, m_last_rendered_page viene settato da extract_page_geometry
+        // quando verrà chiamato da ld_get_page_count/height
         extract_page_geometry(h);
         return rendered_w;
     }
     
+    LDLOG("ld_render_range: already laid out, returning width");
     // Already laid out
     return ld_width(doc);
 }
@@ -1614,6 +1640,8 @@ void ld_clear_page_cache(void* doc)
     h->m_page_heights.clear();
     h->m_page_y_offsets.clear();
     h->m_last_rendered_page = -1;
+    h->m_full_layout_done = false; // Reset anche flag full layout
+    // Nota: non resettiamo m_page_height_px (stima CSS) per evitare di perderla
 }
 
 void ld_destroy(void* doc)
