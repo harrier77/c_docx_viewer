@@ -55,7 +55,7 @@ namespace litedocx
                       "html,body{margin:0;padding:0;}\n"
                       "body{color:#000000;background:#ffffff;font-family:%s,\"Segoe UI\",Arial,sans-serif;"
                       "font-size:%dpx;line-height:1.15;}\n"
-                      "p{margin:0;padding:0;}\n"
+                      "p{margin:0;padding:0;line-height:1.15;}\n"
                       "div{margin:0;padding:0;}\n"
                       "span{white-space:normal;}\n"
                       "table{border-collapse:collapse;border-spacing:0;}\n"
