@@ -630,7 +630,6 @@ namespace
 
         litehtml::pixel_t text_width(const char* text, litehtml::uint_ptr hFont) override
         {
-            LDBG((std::string("[LITEDOCX_TEXT_WIDTH] text='") + (text ? text : "NULL") + "'\n").c_str());
             // Check cache first
             int cached = text_width_cache.get(text, hFont);
             if (cached >= 0) {
@@ -649,6 +648,8 @@ namespace
                 {
                     return 0;
                 }
+                // Ensure consistent map mode with draw DC
+                SetMapMode(m_measure_dc, MM_TEXT);
                 SIZE sz = {};
                 HGDIOBJ old = SelectObject(m_measure_dc, reinterpret_cast<HFONT>(hFont));
                 GetTextExtentPoint32W(m_measure_dc, w, static_cast<int>(wlen), &sz);
@@ -676,14 +677,20 @@ namespace
                 {
                     return;
                 }
-                RECT rc = {static_cast<int>(pos.x), static_cast<int>(pos.y),
-                           static_cast<int>(pos.x + pos.width), static_cast<int>(pos.y + pos.height)};
-HGDIOBJ old = SelectObject(reinterpret_cast<HDC>(hdc), reinterpret_cast<HFONT>(hFont));
-                SetBkMode(reinterpret_cast<HDC>(hdc), TRANSPARENT);
-                SetTextColor(reinterpret_cast<HDC>(hdc), (COLORREF)to_cref(color));
-                DrawTextW(reinterpret_cast<HDC>(hdc), w, static_cast<int>(wlen), &rc,
+                // Consistent rounding with measure DC (MM_TEXT uses integer coords)
+                int x = static_cast<int>(floor(pos.x + 0.5f));
+                int y = static_cast<int>(floor(pos.y + 0.5f));
+                int w_px = static_cast<int>(floor(pos.width + 0.5f));
+                int h_px = static_cast<int>(floor(pos.height + 0.5f));
+                RECT rc = {x, y, x + w_px, y + h_px};
+                HDC dc = reinterpret_cast<HDC>(hdc);
+                SetMapMode(dc, MM_TEXT);
+                HGDIOBJ old = SelectObject(dc, reinterpret_cast<HFONT>(hFont));
+                SetBkMode(dc, TRANSPARENT);
+                SetTextColor(dc, (COLORREF)to_cref(color));
+                DrawTextW(dc, w, static_cast<int>(wlen), &rc,
                           DT_SINGLELINE | DT_NOPREFIX | DT_NOCLIP);
-                SelectObject(reinterpret_cast<HDC>(hdc), old);
+                SelectObject(dc, old);
             }
             else
             {
