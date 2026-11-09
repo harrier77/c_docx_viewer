@@ -213,6 +213,14 @@ litehtml::pixel_t litehtml::render_item_inline_context::new_box(const std::uniqu
     el_pos.el_pos.width    += text_indent + first_line_margin;
     auto new_pos            = fmt_ctx->place_to_left(el_pos);
 
+    // NOTE: Caching m_justify_left_margin here and forcing line_left/line_right for justified text
+    // was attempted but BREAKS THE RENDERER (blank page) because:
+    // 1. The line_box constructor expects exact left/right from place_to_left for proper layout
+    // 2. Forcing rounded edges disrupts the justification spacing_x calculation inside line_box
+    // 3. The line_box::finish() internally uses m_left/m_right/m_width for justification logic
+    //    and modifying them after construction causes misalignment/blank output.
+    // The fix must be inside line_box.cpp where first text item is forced to m_left.
+
     m_line_boxes.emplace_back(std::make_unique<line_box>(new_pos.top, new_pos.left + first_line_margin + text_indent,
                                                          new_pos.left + new_pos.width, css().line_height(),
                                                          css().get_font_metrics(), css().get_text_align()));

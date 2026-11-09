@@ -382,6 +382,15 @@ namespace
         std::unordered_map<std::string, decltype(m_list)::iterator> m_map;
     };
 
+    // Helper: log start pixel of each text line to startpix.txt (for justified text alignment debugging)
+    // Only logs the first word of each line (detected by y position change)
+    // DISABLED: logging suspended
+    static void log_start_pixel(int x_px, int y_px, int w_px, int h_px, const char* txt)
+    {
+        (void)x_px; (void)y_px; (void)w_px; (void)h_px; (void)txt;
+        // Logging disabled
+    }
+
     class ld_container : public litehtml::document_container
     {
       public:
@@ -669,6 +678,10 @@ namespace
                        const litehtml::position& pos) override
         {
             LDBG((std::string("[LITEDOCX_DRAW_TEXT] text='") + (text ? text : "NULL") + "' at (" + std::to_string(static_cast<int>(pos.x)) + "," + std::to_string(static_cast<int>(pos.y)) + ")\n").c_str());
+            
+            // Log start pixel for alignment debugging (justified text indent bug)
+            log_start_pixel(static_cast<int>(pos.x), static_cast<int>(pos.y), static_cast<int>(pos.width), static_cast<int>(pos.height), text);
+            
             if(cb.lh.draw_text)
             {
                 size_t wlen = 0;

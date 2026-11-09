@@ -43,6 +43,7 @@ static char      g_title[300];
 static char      g_url[2048];
 static char      g_cur[32] = "arrow";
 static FILE     *g_log_file = NULL;
+static char      g_log_path[MAX_PATH];
 
 static ld_callbacks g_cb;
 static int g_cb_init;
@@ -145,10 +146,26 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
     return f;
 }
 
+#define ENABLE_FILE_LOGGING 0  // set to 0 to disable all file logging
+
+static void init_log_path(void)
+{
+    if (g_log_path[0]) return;
+    GetModuleFileNameA(NULL, g_log_path, MAX_PATH);
+    char *p = strrchr(g_log_path, '\\');
+    if (p) p[1] = '\0';
+    else g_log_path[0] = '\0';
+    strcat(g_log_path, "logs.txt");
+}
+
 static void log_msg(const char *fmt, ...)
 {
+#if !ENABLE_FILE_LOGGING
+    return;
+#else
     if (!g_log_file) {
-        g_log_file = fopen("C:\\Users\\pr30565\\Desktop\\logs.txt", "a");
+        init_log_path();
+        g_log_file = fopen(g_log_path, "a");
         if (!g_log_file) return;
     }
     va_list args;
@@ -156,6 +173,7 @@ static void log_msg(const char *fmt, ...)
     vfprintf(g_log_file, fmt, args);
     va_end(args);
     fflush(g_log_file);
+#endif
 }
 
 #define LOG_JOB(kind, msg) log_msg("[JOB] %s: %s\n", #kind, msg)

@@ -4,6 +4,20 @@
 #include "render_item.h"
 #include "types.h"
 #include <algorithm>
+#include <cmath>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+namespace
+{
+    // Debug logging for justified text alignment - DISABLED: logging suspended
+    static void log_justify_params(float left, float right, float width, float spacing, int item_count, float offj)
+    {
+        (void)left; (void)right; (void)width; (void)spacing; (void)item_count; (void)offj;
+        // Logging disabled
+    }
+}
 
 //////////////////////////////////////////////////////////////////////////////////////////
 
@@ -332,9 +346,20 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
         shift_x = 0_px;
     }
 
-    int   counter = 0;
-    float offj    = static_cast<float>(spacing_x) / std::max(1.f, static_cast<float>(m_items.size()) - 1.f);
-    float cixx    = 0.0f;
+    int  counter    = 0;
+    bool first_text = true;
+    const int gaps  = m_items.empty() ? 0 : static_cast<int>(m_items.size()) - 1;
+    int  extra      = static_cast<int>(spacing_x);
+    int  base_add   = (gaps > 0) ? (extra / gaps) : 0;
+    int  rem        = (gaps > 0) ? (extra % gaps) : 0;
+    int  acc        = 0;
+
+    if(m_text_align == text_align_justify && spacing_x != 0_px)
+    {
+        log_justify_params((float)m_left, (float)m_right, (float)m_width,
+                           (float)spacing_x, (int)m_items.size(),
+                           gaps > 0 ? (float)spacing_x / (float)gaps : 0.f);
+    }
 
     std::optional<pixel_t> line_height;
 
@@ -386,26 +411,34 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
     //    and for top and bottom aligned items
     for(const auto& lbi : m_items)
     {
-        // Apply text-align-justify
         m_rendered_width.natural_width += lbi->get_rendered_min_width();
-        m_rendered_width.min_width      = std::max(m_rendered_width.min_width, lbi->get_rendered_min_width());
+        m_rendered_width.min_width =
+            std::max(m_rendered_width.min_width, lbi->get_rendered_min_width());
+
         if(spacing_x != 0_px && counter)
         {
-            cixx += offj;
-            if((counter + 1) == static_cast<int>(m_items.size()))
-            {
-                cixx += 0.99f;
-            }
-            lbi->pos().x += pixel_t(cixx);
+            int add = base_add;
+            if(rem > 0) { ++add; --rem; }
+            acc += add;
+            lbi->pos().x += pixel_t(acc);
         }
         counter++;
-        if((m_text_align == text_align_right || spacing_x != 0_px) && counter == static_cast<int>(m_items.size()))
+
+        if((m_text_align == text_align_right || spacing_x != 0_px) &&
+           counter == static_cast<int>(m_items.size()))
         {
-            // Forcible justify the last element to the right side for text align right and justify;
             lbi->pos().x = m_right - lbi->pos().width;
-        } else if(shift_x != 0_px)
+        }
+        else if(shift_x != 0_px)
         {
             lbi->pos().x += shift_x;
+        }
+
+        if(spacing_x != 0_px && first_text &&
+           lbi->get_type() == line_box_item::type_text_part)
+        {
+            lbi->pos().x = m_left;
+            first_text = false;
         }
 
         // Calculate new baseline for inline start/continue
