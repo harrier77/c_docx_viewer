@@ -84,6 +84,26 @@ namespace litehtml
         virtual void split_text(const char* text, const std::function<void(const char*)>& on_word,
                                 const std::function<void(const char*)>& on_space);
 
+        // Visual padding (margins) for paint - used to center layout box inside visual box
+        virtual int get_visual_padding_x() const
+        {
+            return 0;
+        }
+        virtual int get_visual_padding_y() const
+        {
+            return 0;
+        }
+        // Viewport width (page width) for calculating full paintable area
+        virtual int get_viewport_width() const
+        {
+            return 0;
+        }
+        // Layout width (content width for justification/wrapping) = viewport_width - layout_padding_x
+        virtual int get_layout_width() const
+        {
+            return 0;
+        }
+
       protected:
         virtual ~document_container() = default;
     };

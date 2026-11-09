@@ -1,7 +1,11 @@
 #include "render_inline_context.h"
 #include "document.h"
+#include "document_container.h"
 #include "iterators.h"
 #include "types.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 litehtml::rendered_width litehtml::render_item_inline_context::_render_content(
     pixel_t /*x*/, pixel_t /*y*/, bool /*second_pass*/, const containing_block_context& self_size,
@@ -221,12 +225,43 @@ litehtml::pixel_t litehtml::render_item_inline_context::new_box(const std::uniqu
     //    and modifying them after construction causes misalignment/blank output.
     // The fix must be inside line_box.cpp where first text item is forced to m_left.
 
-    pixel_t visual_left  = new_pos.left + first_line_margin + text_indent;
-    pixel_t visual_right = new_pos.left + new_pos.width;
+    // Get visual padding and viewport width from container
+    int visual_pad_x = 0;
+    int visual_pad_y = 0;
+    int viewport_w = 0;
+    int layout_w = 0;
+    if(auto doc = src_el()->get_document(); doc && doc->container())
+    {
+        visual_pad_x = doc->container()->get_visual_padding_x();
+        visual_pad_y = doc->container()->get_visual_padding_y();
+        viewport_w = doc->container()->get_viewport_width();
+        layout_w = doc->container()->get_layout_width();
+    }
+
+    // self_size.width = containing block width (for percentage calculations)
+    // self_size.render_width = containing block content width (for layout)
+    // The visual box should span the full paintable content area:
+    // paintable_width = viewport_w - 2*visual_pad_x
+    // layout_width = layout_w (from ld_render max_width, e.g., page_w - g_layout_padding_x)
+    // The layout box (layout_width) should be centered in the visual box (paintable_width)
+    fprintf(stderr, "[NEW_BOX_DEBUG] self_size.width=%d self_size.render_width=%d visual_pad_x=%d viewport_w=%d layout_w=%d new_pos.left=%d new_pos.width=%d\n",
+                    (int)(pixel_t)self_size.width, (int)(pixel_t)self_size.render_width, visual_pad_x, viewport_w, layout_w,
+                    (int)new_pos.left, (int)new_pos.width);
+
+    // Visual bounds: full paintable width from viewport
+    pixel_t paintable_width = viewport_w > 0 ? pixel_t(viewport_w - 2 * visual_pad_x) : new_pos.width;
+    pixel_t visual_left   = new_pos.left;  // Should be 0 for root
+    pixel_t visual_right  = visual_left + paintable_width;
+    pixel_t visual_width  = paintable_width;
     auto lb = std::make_unique<line_box>(new_pos.top, visual_left, visual_right, css().line_height(),
                                          css().get_font_metrics(), css().get_text_align());
-    // Set layout bounds based on containing block's render_width (content width for justification/wrapping)
-    lb->set_layout_bounds(visual_left, visual_left + self_size.render_width);
+    // Set layout bounds: center the layout box (width = layout_w) inside the visual box
+    // layout_left = visual_left + (visual_width - layout_width) / 2
+    pixel_t layout_width  = layout_w > 0 ? pixel_t(layout_w) : self_size.render_width;
+    pixel_t layout_left   = visual_left + (visual_width - layout_width) / 2;
+    fprintf(stderr, "[NEW_BOX] visual_left=%d visual_right=%d visual_width=%d layout_width=%d layout_left=%d\n",
+                    (int)visual_left, (int)visual_right, (int)visual_width, (int)layout_width, (int)layout_left);
+    lb->set_layout_bounds(layout_left, layout_left + layout_width);
     m_line_boxes.emplace_back(std::move(lb));
 
     // Add items returned by finish_last_box function into the new line

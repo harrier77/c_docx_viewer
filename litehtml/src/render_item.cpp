@@ -1450,11 +1450,27 @@ litehtml::containing_block_context litehtml::render_item::calculate_containing_b
 {
     containing_block_context ret;
     ret.context_idx = cb_context.context_idx + 1;
-    ret.width.value = ret.max_width.value = cb_context.width.value - content_offset_width();
-    if(src_el()->css().get_position() != element_position_absolute &&
-       src_el()->css().get_position() != element_position_fixed)
+    
+    // For body element: don't subtract visual padding (CSS padding from section margins) from layout width
+    // The body's CSS padding represents page margins (visual), not layout constraints
+    bool is_body = src_el()->tag() == _body_;
+    if(is_body)
     {
-        ret.height.value = cb_context.height.value - content_offset_height();
+        // Body gets the full containing block width as its layout width
+        ret.width.value = ret.max_width.value = cb_context.width.value;
+        if(src_el()->css().get_position() != element_position_absolute &&
+           src_el()->css().get_position() != element_position_fixed)
+        {
+            ret.height.value = cb_context.height.value;
+        }
+    } else
+    {
+        ret.width.value = ret.max_width.value = cb_context.width.value - content_offset_width();
+        if(src_el()->css().get_position() != element_position_absolute &&
+           src_el()->css().get_position() != element_position_fixed)
+        {
+            ret.height.value = cb_context.height.value - content_offset_height();
+        }
     }
 
     // Calculate width if css property is not auto

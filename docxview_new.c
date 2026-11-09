@@ -149,7 +149,7 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
     return f;
 }
 
-#define ENABLE_FILE_LOGGING 0  // set to 0 to disable all file logging
+#define ENABLE_FILE_LOGGING 1  // set to 0 to disable all file logging
 
 static void init_log_path(void)
 {
@@ -377,7 +377,10 @@ static int      g_page_h_est = 0;            /* altezza stimata singola pagina *
 static int      g_layout_complete = 0;       /* layout completo dopo primo full render */
 
 /* Layout vs visual margins separation */
-static int      g_layout_padding_x = 173;    /* padding TOTALE orizzontale per layout (giustificazione) */
+static int      g_layout_padding_x = 365;    /* padding TOTALE orizzontale per layout (giustificazione)  era 173 e poi 365*/
+/*groq equation*/
+//static int      g_layout_padding_x = g_page_w - word_text;
+
 static int      g_visual_padding_x = 6;      /* <-- IMPOSTA QUI il padding visivo orizzontale (paint), es. 6, 12, 20... */
 static int      g_visual_margin_y = 6;      /* margine visivo alto/basso (paint) */
 
@@ -696,6 +699,9 @@ static void apply_loaded_doc(unsigned id, void *doc)
         g_doc = doc;
         g_doc_content_w = g_load_content_w;
 
+        /* Set visual padding so layout box is centered inside visual box */
+        ld_set_visual_padding(g_doc, g_visual_padding_x, g_visual_margin_y);
+
         lstrcpynA(g_path, g_load_path, sizeof(g_path));
         {
             const char *p = strrchr(g_load_path, '\\');
@@ -946,6 +952,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     rc_content.left, rc_content.top, rc_content.right, rc_content.bottom,
                     rc_viewport.left, rc_viewport.top, rc_viewport.right, rc_viewport.bottom,
                     rc_clip.left, rc_clip.top, rc_clip.right, rc_clip.bottom);
+            log_msg("[PAINT] g_page_w=%d g_page_x=%d g_visual_padding_x=%d g_layout_padding_x=%d content_w=%d content_x=%d\n",
+                    g_page_w, g_page_x, g_visual_padding_x, g_layout_padding_x, content_w, content_x);
 
             ld_draw(g_doc, g_memdc, content_x, content_y,
                     rc_clip.left, rc_clip.top, rc_clip.right - rc_clip.left, rc_clip.bottom - rc_clip.top);
@@ -1142,7 +1150,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
                            NULL, menu, inst, NULL);
     if (!hwnd) return 1;
 
-    ShowWindow(hwnd, show);
+    ShowWindow(hwnd, SW_SHOWMAXIMIZED);
     UpdateWindow(hwnd);
 
     if (cmd && cmd[0]) {

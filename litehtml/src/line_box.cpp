@@ -11,11 +11,15 @@
 
 namespace
 {
-    // Debug logging for justified text alignment - DISABLED: logging suspended
+    // Debug logging for justified text alignment
     static void log_justify_params(float left, float right, float width, float spacing, int item_count, float offj)
     {
-        (void)left; (void)right; (void)width; (void)spacing; (void)item_count; (void)offj;
-        // Logging disabled
+        OutputDebugStringA((std::string("[JUSTIFY] layout_left=") + std::to_string(left) + 
+                            " layout_right=" + std::to_string(right) + 
+                            " width=" + std::to_string(width) + 
+                            " spacing=" + std::to_string(spacing) + 
+                            " items=" + std::to_string(item_count) + 
+                            " offj=" + std::to_string(offj) + "\n").c_str());
     }
 }
 
@@ -318,6 +322,20 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
         return ret_items;
     }
 
+    // Visual offset: difference between visual origin (m_left) and layout origin (m_layout_left)
+    // Items are initially positioned at visual coordinates (via add_item using m_left).
+    // We normalize to layout coordinates for all alignment/justification calculations,
+    // then apply the offset back at the end.
+    pixel_t visual_offset = m_left - m_layout_left;
+
+    // Normalize all items to layout coordinates
+    fprintf(stderr, "[FINISH] m_left=%d m_layout_left=%d m_right=%d m_layout_right=%d visual_offset=%d\n",
+            (int)m_left, (int)m_layout_left, (int)m_right, (int)m_layout_right, (int)visual_offset);
+    for(auto& lbi : m_items)
+    {
+        lbi->pos().x -= visual_offset;
+    }
+
     pixel_t spacing_x = 0_px; // Number of pixels to distribute between elements
     pixel_t shift_x   = 0_px; // Shift elements by X to apply the text-align
 
@@ -577,6 +595,21 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
             }
         }
     }
+    fprintf(stderr, "[FINISH_ALIGN] m_text_align=%d shift_x=%d spacing_x=%d first_item_x=%d last_item_x=%d m_layout_left=%d m_layout_right=%d\n",
+            (int)m_text_align, (int)shift_x, (int)spacing_x,
+            m_items.empty() ? 0 : (int)m_items.front()->pos().x,
+            m_items.empty() ? 0 : (int)m_items.back()->pos().x,
+            (int)m_layout_left, (int)m_layout_right);
+
+    // Restore visual offset: convert from layout coordinates back to visual coordinates
+    for(auto& lbi : m_items)
+    {
+        lbi->pos().x += visual_offset;
+    }
+    fprintf(stderr, "[FINISH_END] first_item_x=%d last_item_x=%d m_left=%d m_layout_left=%d visual_offset=%d\n",
+            m_items.empty() ? 0 : (int)m_items.front()->pos().x,
+            m_items.empty() ? 0 : (int)m_items.back()->pos().x,
+            (int)m_left, (int)m_layout_left, (int)visual_offset);
 
     pixel_t top_shift = 0_px;
     if(line_height.has_value())

@@ -159,6 +159,9 @@ litehtml::rendered_width litehtml::render_item_table::_render(pixel_t x, pixel_t
     // containing block width, CAPMIN, and MIN. However, if either CAPMIN or the maximum width required by the columns
     // plus cell spacing or borders (MAX) is less than that of the containing block, use max(MAX, CAPMIN).
 
+    fprintf(stderr, "[TABLE_RENDER] self_size.width=%d self_size.render_width=%d self_size.width.type=%d\n",
+                    (int)(pixel_t)self_size.width, (int)(pixel_t)self_size.render_width, (int)self_size.width.type);
+
     pixel_t table_width     = 0_px;
     pixel_t min_table_width = 0_px;
     pixel_t max_table_width = 0_px;
@@ -173,6 +176,8 @@ litehtml::rendered_width litehtml::render_item_table::_render(pixel_t x, pixel_t
                                                self_size.width.type == containing_block_context::cbc_value_type_auto,
                                                min_table_width, max_table_width);
     }
+    fprintf(stderr, "[TABLE_RENDER] table_width=%d min_table_width=%d max_table_width=%d\n",
+                    (int)table_width, (int)min_table_width, (int)max_table_width);
 
     min_table_width += table_width_spacing;
     max_table_width += table_width_spacing;

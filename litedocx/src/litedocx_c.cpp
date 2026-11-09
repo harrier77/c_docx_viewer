@@ -398,6 +398,9 @@ namespace
         ld_callbacks         cb{};
         int                  viewport_w = 800;
         int                  viewport_h = 600;
+        int                  visual_padding_x = 0;  // Visual horizontal padding (margins) for paint
+        int                  visual_padding_y = 0;  // Visual vertical padding (margins) for paint
+        int                  layout_width = 0;      // Layout width (for justification) = max_width from ld_render
         IWICImagingFactory*  wic        = nullptr;
         HDC                  m_measure_dc = nullptr;
         std::unique_ptr<litedocx::DocxModel> owned_model;
@@ -1049,6 +1052,28 @@ namespace
             }
         }
 
+        int get_visual_padding_x() const override
+        {
+            return visual_padding_x;
+        }
+        int get_visual_padding_y() const override
+        {
+            return visual_padding_y;
+        }
+        int get_viewport_width() const override
+        {
+            return viewport_w;
+        }
+        int get_layout_width() const override
+        {
+            // layout_width = viewport_w - layout_padding_x (if set), else viewport_w
+            // For now, we need to store layout_padding_x in the container
+            // But we can compute it from the render call's max_width
+            // The max_width passed to ld_render IS the layout width
+            // We'll store it when ld_render is called
+            return layout_width;
+        }
+
         void get_language(std::string& language, std::string& culture) const override
         {
             language = "en";
@@ -1233,9 +1258,12 @@ int ld_render(void* doc, int max_width)
     }
     try
     {
-        if(max_width > 0 && h->container)
+        // DO NOT overwrite viewport_w here! viewport_w should remain the visual page width
+        // (set by ld_open_file/ld_open_memory) for media queries.
+        // max_width is the LAYOUT width (content width for wrapping/justification).
+        if(h->container)
         {
-            h->container->viewport_w = max_width;
+            h->container->layout_width = max_width;
         }
         int w = static_cast<int>(h->doc->render(max_width));
         LDLOG("ld_render done, width=%d", w);
@@ -1260,8 +1288,12 @@ int ld_render(void* doc, int max_width)
 
 void ld_draw(void* doc, void* hdc, int x, int y, int clip_x, int clip_y, int clip_w, int clip_h)
 {
-    LDBG((std::string("[LITEDOCX_DRAW] at (") + std::to_string(x) + "," + std::to_string(y) + ") clip=(" + std::to_string(clip_x) + "," + std::to_string(clip_y) + "," + std::to_string(clip_w) + "," + std::to_string(clip_h) + ")\n").c_str());
     auto* h = static_cast<ld_doc*>(doc);
+    int doc_w = h && h->doc ? (int)h->doc->width() : 0;
+    int doc_h = h && h->doc ? (int)h->doc->height() : 0;
+    fprintf(stderr, "[LD_DRAW] doc=%p x=%d y=%d clip=(%d,%d,%d,%d) doc_w=%d doc_h=%d\n",
+            doc, x, y, clip_x, clip_y, clip_w, clip_h, doc_w, doc_h);
+    LDBG((std::string("[LITEDOCX_DRAW] at (") + std::to_string(x) + "," + std::to_string(y) + ") clip=(" + std::to_string(clip_x) + "," + std::to_string(clip_y) + "," + std::to_string(clip_w) + "," + std::to_string(clip_h) + ")\n").c_str());
     if(!h || !h->doc)
     {
         return;
@@ -1274,6 +1306,16 @@ void ld_draw(void* doc, void* hdc, int x, int y, int clip_x, int clip_y, int cli
     } catch(...)
     {
         set_error("errore durante il disegno");
+    }
+}
+
+void ld_set_visual_padding(void* doc, int visual_padding_x, int visual_padding_y)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if(h && h->container)
+    {
+        h->container->visual_padding_x = visual_padding_x;
+        h->container->visual_padding_y = visual_padding_y;
     }
 }
 

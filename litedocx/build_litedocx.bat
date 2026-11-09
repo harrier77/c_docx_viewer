@@ -13,7 +13,7 @@ rem Remove trailing backslash for PowerShell
 if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
 set "ROOT=%HERE%\.."
 set "LITEHTML=%ROOT%\litehtml"
-set "OBJ=%HERE%obj"
+set "OBJ=%HERE%\obj"
 
 if not exist "%GCC%" (
   echo [ERRORE] gcc non trovato in "%GCC%"
