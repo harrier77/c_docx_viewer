@@ -43,6 +43,7 @@ static char      g_title[300];
 static char      g_url[2048];
 static char      g_cur[32] = "arrow";
 static FILE     *g_log_file = NULL;
+static char      g_log_path[MAX_PATH];
 
 static ld_callbacks g_cb;
 static int g_cb_init;
@@ -132,7 +133,10 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
             SelectObject(dc, old);
             ReleaseDC(NULL, dc);
             fm->font_size = size;
-            fm->height = tm.tmHeight;
+            /* Word usa interlinea 1.15 di default (single spacing).
+             * tm.tmHeight include ascent+descent+internal_leading.
+             * Moltiplichiamo per 1.xx per approssimare lo spacing di Word. */
+            fm->height = (int)(tm.tmHeight * 1.15f);
             fm->ascent = tm.tmAscent;
             fm->descent = tm.tmDescent;
             fm->x_height = tm.tmHeight / 2;
@@ -145,10 +149,26 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
     return f;
 }
 
+#define ENABLE_FILE_LOGGING 0  // set to 0 to disable all file logging
+
+static void init_log_path(void)
+{
+    if (g_log_path[0]) return;
+    GetModuleFileNameA(NULL, g_log_path, MAX_PATH);
+    char *p = strrchr(g_log_path, '\\');
+    if (p) p[1] = '\0';
+    else g_log_path[0] = '\0';
+    strcat(g_log_path, "logs.txt");
+}
+
 static void log_msg(const char *fmt, ...)
 {
+#if !ENABLE_FILE_LOGGING
+    return;
+#else
     if (!g_log_file) {
-        g_log_file = fopen("C:\\Users\\pr30565\\Desktop\\logs.txt", "a");
+        init_log_path();
+        g_log_file = fopen(g_log_path, "a");
         if (!g_log_file) return;
     }
     va_list args;
@@ -156,7 +176,13 @@ static void log_msg(const char *fmt, ...)
     vfprintf(g_log_file, fmt, args);
     va_end(args);
     fflush(g_log_file);
+#endif
 }
+
+#define LOG_JOB(kind, msg) log_msg("[JOB] %s: %s\n", #kind, msg)
+#define LOG_RENDER(msg) log_msg("[RENDER] %s\n", msg)
+#define LOG_PAINT(msg) log_msg("[PAINT] %s\n", msg)
+#define LOG_SCROLL(msg) log_msg("[SCROLL] %s\n", msg)
 
 static void cb_delete_font(void *font)
 {
@@ -338,7 +364,9 @@ static int      g_load_active;      /* load in corso o in coda */
 static int      g_load_content_w;   /* larghezza usata da quella load */
 static int      g_doc_content_w;    /* larghezza del layout corrente */
 static int      g_render_busy;      /* un render è in corso/in coda */
-static int      g_render_pending;   /* larghezza richiesta, -1 = nessuna */
+static int      g_render_pending_width;   /* larghezza richiesta per resize, -1 = nessuna */
+static int      g_render_pending_first_page; /* first page per range pending, -1 = none */
+static int      g_render_pending_last_page;  /* last page per range pending, -1 = none */
 static void    *g_render_doc;
 static int      g_render_used_w;
 
@@ -346,10 +374,11 @@ static int      g_render_used_w;
 static int      g_first_rendered_page = -1;  /* prima pagina renderizzata */
 static int      g_last_rendered_page = -1;   /* ultima pagina renderizzata */
 static int      g_page_h_est = 0;            /* altezza stimata singola pagina */
+static int      g_layout_complete = 0;       /* layout completo dopo primo full render */
 
 static int content_width(void)
 {
-    int w = g_page_w - 128; /* 64 px per lato */
+    int w = g_page_w - 173; /* px width, increase negative number to 173 is same as MS Word */
     return w > 0 ? w : 1;
 }
 
@@ -442,11 +471,11 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
         {
         case JOB_LOAD:
         {
+            LOG_JOB(JOB_LOAD, "start ld_open_file (NO ld_render)");
             void *doc = ld_open_file(j->path, &g_cb,
                                      j->viewport_w > 0 ? j->viewport_w : 800,
                                      j->viewport_h > 0 ? j->viewport_h : 600);
-            if (doc && !g_shutdown)
-                ld_render(doc, j->content_w);
+            /* D1: NON chiamare ld_render qui - layout avverrà in background dopo apply_loaded_doc */
 
             if (g_shutdown)
             {
@@ -460,23 +489,30 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
             {
                 PostMessageA(j->hwnd, WM_APP_DOC_READY, (WPARAM)j->id, (LPARAM)doc);
             }
+            LOG_JOB(JOB_LOAD, "ld_open_file done, posted WM_APP_DOC_READY");
             break;
         }
 
         case JOB_RENDER:
+            LOG_JOB(JOB_RENDER, "start ld_render");
+            LOG_RENDER("ld_render called from JOB_RENDER");
             if (j->doc && !g_shutdown)
                 ld_render(j->doc, j->content_w);
+            LOG_JOB(JOB_RENDER, "ld_render done, posting WM_APP_RENDER_DONE");
             if (!g_shutdown)
                 PostMessageA(j->hwnd, WM_APP_RENDER_DONE,
                              (WPARAM)j->content_w, (LPARAM)j->doc);
             break;
 
         case JOB_RENDER_RANGE:
+            LOG_JOB(JOB_RENDER_RANGE, "start ld_render_range");
+            LOG_RENDER("ld_render_range called from JOB_RENDER_RANGE");
             if (j->doc && !g_shutdown) {
                 for (int p = j->first_page; p <= j->last_page; ++p) {
                     ld_render_range(j->doc, p, j->viewport_h, j->content_w);
                 }
             }
+            LOG_JOB(JOB_RENDER_RANGE, "ld_render_range done, posting WM_APP_RENDER_DONE");
             if (!g_shutdown)
                 PostMessageA(j->hwnd, WM_APP_RENDER_DONE,
                              (WPARAM)j->content_w, (LPARAM)j->doc);
@@ -520,6 +556,9 @@ static void request_render(int w)
     if (!g_doc || g_load_active)
         return;
 
+    LOG_RENDER("request_render called");
+    log_msg("[RENDER] request_render: w=%d g_render_busy=%d\n", w, g_render_busy);
+
     if (!g_worker_started)
     {
         /* Fallback sincrono */
@@ -533,7 +572,8 @@ static void request_render(int w)
 
     if (g_render_busy)
     {
-        g_render_pending = w;
+        LOG_RENDER("render busy, queuing pending width");
+        g_render_pending_width = w;
         return;
     }
 
@@ -545,8 +585,9 @@ static void request_render(int w)
     g_render_busy = 1;
     g_render_doc = g_doc;
     g_render_used_w = w;
-    g_render_pending = -1;
+    g_render_pending_width = -1;
     enqueue_job(j);
+    LOG_RENDER("JOB_RENDER enqueued");
 }
 
 /* FASE 5/6: Renderizza un range di pagine (es. pagina 0, o 1-2 per lookahead).
@@ -564,9 +605,16 @@ static void request_render_range(int first_page, int last_page)
     if (last_page < first_page)
         last_page = first_page;
 
+    LOG_RENDER("request_render_range called");
+    log_msg("[RENDER] request_render_range: first=%d last=%d g_last_rendered_page=%d g_render_busy=%d g_layout_complete=%d\n",
+            first_page, last_page, g_last_rendered_page, g_render_busy, g_layout_complete);
+
     /* Già layoutato fino a last_page: niente job, niente busy. */
     if (g_last_rendered_page >= 0 && last_page <= g_last_rendered_page)
+    {
+        LOG_RENDER("range already rendered, skipping");
         return;
+    }
 
     if (!g_worker_started)
     {
@@ -587,13 +635,13 @@ static void request_render_range(int first_page, int last_page)
 
     if (g_render_busy)
     {
-        /* Accoda solo se serve un range oltre a quello già in corso.
-         * Riutilizziamo g_render_pending / g_render_used_w come first/last. */
-        if (g_render_pending < 0 || last_page > g_render_used_w)
+        /* Accoda range pending separato da width pending */
+        if (g_render_pending_first_page < 0 || last_page > g_render_pending_last_page)
         {
-            g_render_pending = first_page;
-            g_render_used_w = last_page;
+            g_render_pending_first_page = first_page;
+            g_render_pending_last_page = last_page;
         }
+        LOG_RENDER("render busy, queued pending range");
         return;
     }
 
@@ -607,9 +655,11 @@ static void request_render_range(int first_page, int last_page)
     j->last_page = last_page;
     g_render_busy = 1;
     g_render_doc = g_doc;
-    g_render_pending = first_page;
-    g_render_used_w = last_page;
+    g_render_used_w = last_page; /* reused as last_page for range jobs */
+    g_render_pending_first_page = first_page;
+    g_render_pending_last_page = last_page;
     enqueue_job(j);
+    LOG_RENDER("JOB_RENDER_RANGE enqueued");
 }
 
 static void apply_loaded_doc(unsigned id, void *doc)
@@ -620,6 +670,9 @@ static void apply_loaded_doc(unsigned id, void *doc)
             dispose_doc(doc);
         return;
     }
+
+    LOG_RENDER("apply_loaded_doc called");
+    log_msg("[RENDER] apply_loaded_doc: id=%u g_load_gen=%u doc=%p\n", id, g_load_gen, doc);
 
     /* Risultato di una richiesta superata: va distrutto sul worker. */
     if (id != g_load_gen)
@@ -648,20 +701,19 @@ static void apply_loaded_doc(unsigned id, void *doc)
         SetWindowTextA(g_hwnd, g_title);
         g_scroll = 0;
 
-        /* FASE 5/6: Layout solo pagina 0 per first paint < 1s */
-        int page_h = ld_get_page_height(g_doc, 0);
-        int page_count = ld_get_page_count(g_doc);
-        if (page_h > 0 && page_count > 0) {
-            g_doc_h = page_h * page_count;
-        } else {
-            g_doc_h = 1000; /* fallback */
-        }
-        g_page_h_est = page_h > 0 ? page_h : 800;
-        g_first_rendered_page = 0;
-        g_last_rendered_page = 0;
+        /* Stima altezza documento SENZA chiamare ld_get_page_height/count
+         * (possono triggerare full render sul thread UI - vedi D7). */
+        g_doc_h = 2000; /* fallback iniziale, sarà aggiornato dopo render */
+        g_page_h_est = 1000;
+        g_first_rendered_page = -1;
+        g_last_rendered_page = -1;
+        g_layout_complete = 0;
 
-        /* Render pagina 0 in background (first paint) */
-        request_render_range(0, 0);
+        /* Lancia UN SOLO job di layout completo in background */
+        g_render_pending_width = -1;
+        g_render_pending_first_page = -1;
+        g_render_pending_last_page = -1;
+        request_render(content_width());
 
         update_scrollbars();
         InvalidateRect(g_hwnd, NULL, TRUE);
@@ -682,6 +734,10 @@ static void on_render_done(void *doc, int used_w)
     if (g_shutdown)
         return;
 
+    LOG_RENDER("on_render_done called");
+    log_msg("[RENDER] on_render_done: used_w=%d g_render_busy=%d g_render_pending_width=%d g_render_pending_first=%d g_render_pending_last=%d\n",
+            used_w, g_render_busy, g_render_pending_width, g_render_pending_first_page, g_render_pending_last_page);
+
     g_render_busy = 0;
     g_render_doc = NULL;
 
@@ -698,24 +754,52 @@ static void on_render_done(void *doc, int used_w)
         int page_count = ld_get_page_count(g_doc);
         if (page_count > 0)
             g_last_rendered_page = page_count - 1;
-        else if (g_render_pending >= 0 && g_render_used_w > g_last_rendered_page)
-            g_last_rendered_page = g_render_used_w;
+        else if (g_render_pending_last_page >= 0 && g_render_pending_last_page > g_last_rendered_page)
+            g_last_rendered_page = g_render_pending_last_page;
 
         if (g_first_rendered_page < 0)
             g_first_rendered_page = 0;
+
+        /* Aggiorna stima altezza pagina con valore REALE dopo full layout */
+        int page_h = ld_get_page_height(g_doc, 0);
+        if (page_h > 0)
+            g_page_h_est = page_h;
+        log_msg("[RENDER] on_render_done: page_count=%d g_last_rendered_page=%d g_page_h_est=%d\n",
+                page_count, g_last_rendered_page, g_page_h_est);
     }
 
-    /* Pending: solo se è una richiesta di width diversa (resize), non un range. */
-    if (!g_load_active && g_render_pending >= 0 &&
-        g_render_pending != used_w && g_render_used_w < 0)
+    /* Layout completo dopo il primo full render */
+    g_layout_complete = 1;
+    LOG_RENDER("layout complete flag set");
+
+    /* Pending width (resize) ha priorità su pending range */
+    if (!g_load_active && g_render_pending_width >= 0 && g_render_pending_width != used_w)
     {
-        int w = g_render_pending;
-        g_render_pending = -1;
+        int w = g_render_pending_width;
+        g_render_pending_width = -1;
         request_render(w);
+        /* Non processare pending range se c'era pending width */
+        g_render_pending_first_page = -1;
+        g_render_pending_last_page = -1;
+        update_scrollbars();
+        InvalidateRect(g_hwnd, NULL, FALSE);
         return;
     }
 
-    g_render_pending = -1;
+    /* Pending range (scroll) */
+    if (!g_load_active && g_render_pending_first_page >= 0)
+    {
+        int first = g_render_pending_first_page;
+        int last = g_render_pending_last_page;
+        g_render_pending_first_page = -1;
+        g_render_pending_last_page = -1;
+        request_render_range(first, last);
+        return;
+    }
+
+    g_render_pending_width = -1;
+    g_render_pending_first_page = -1;
+    g_render_pending_last_page = -1;
     g_render_used_w = -1;
     update_scrollbars();
     InvalidateRect(g_hwnd, NULL, FALSE);
@@ -734,7 +818,9 @@ static void start_async_load(const char *path)
     g_load_gen++;
     g_load_active = 1;
     g_load_content_w = cw;
-    g_render_pending = -1;
+    g_render_pending_width = -1;
+    g_render_pending_first_page = -1;
+    g_render_pending_last_page = -1;
 
     /* UI mostra subito lo stato */
     SetWindowTextA(g_hwnd, "docxview_new - Caricamento...");
@@ -743,8 +829,7 @@ static void start_async_load(const char *path)
     {
         /* Fallback sincrono: il worker non è disponibile. */
         void *doc = ld_open_file(path, &g_cb, g_page_w, g_ch > 0 ? g_ch : 600);
-        if (doc)
-            ld_render(doc, cw);
+        /* D1: NON chiamare ld_render qui - apply_loaded_doc lancerà request_render */
         g_load_active = 0;
         apply_loaded_doc(g_load_gen, doc);
         return;
@@ -804,7 +889,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int content_w = content_width();
             /* Il layout viene rifatto dal worker: la UI non si blocca.
              * Durante il render il paint mostra solo lo sfondo. */
-            if (content_w != g_doc_content_w)
+            /* Soglia 2px per evitare render spuri su resize minimi (es. WM_SIZE iniziale) */
+            if (abs(content_w - g_doc_content_w) > 2)
                 request_render(content_w);
         }
         update_scrollbars();
@@ -844,10 +930,20 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int content_x = g_page_x + page_margin_x;
             int content_y = pt + page_margin_y;
 
-            /* Clip rect = area contenuto (esclude margini) */
+            /* Clip rect = intersezione area contenuto + viewport visibile */
             RECT rc_content = {content_x, content_y, content_x + content_w, content_y + doc_h};
+            RECT rc_viewport = {0, 0, g_cw, g_ch};
+            RECT rc_clip;
+            IntersectRect(&rc_clip, &rc_content, &rc_viewport);
+            
+            LOG_PAINT("ld_draw with clipped rect");
+            log_msg("[PAINT] ld_draw: content=(%d,%d,%d,%d) viewport=(%d,%d,%d,%d) clip=(%d,%d,%d,%d)\n",
+                    rc_content.left, rc_content.top, rc_content.right, rc_content.bottom,
+                    rc_viewport.left, rc_viewport.top, rc_viewport.right, rc_viewport.bottom,
+                    rc_clip.left, rc_clip.top, rc_clip.right, rc_clip.bottom);
+
             ld_draw(g_doc, g_memdc, content_x, content_y,
-                    rc_content.left, rc_content.top, rc_content.right - rc_content.left, rc_content.bottom - rc_content.top);
+                    rc_clip.left, rc_clip.top, rc_clip.right - rc_clip.left, rc_clip.bottom - rc_clip.top);
         } else if (g_doc && g_render_busy) {
             /* Layout in corso: mostra la pagina bianca senza contenuto. */
             int pt = page_top();
@@ -887,8 +983,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_scroll != old_s) {
             SetScrollPos(hwnd, SB_VERT, g_scroll, TRUE);
             InvalidateRect(hwnd, NULL, FALSE);
-            /* FASE 5/6: Trigger on-demand page rendering */
-            if (g_doc && g_page_h_est > 0) {
+            LOG_SCROLL("WM_VSCROLL scroll changed");
+            log_msg("[SCROLL] WM_VSCROLL: scroll=%d g_layout_complete=%d g_last_rendered_page=%d\n",
+                    g_scroll, g_layout_complete, g_last_rendered_page);
+            /* FASE 5/6: Trigger on-demand page rendering SOLO se layout non completo */
+            if (g_doc && g_page_h_est > 0 && !g_layout_complete) {
                 int visible_first = g_scroll / g_page_h_est;
                 int visible_last = (g_scroll + g_ch) / g_page_h_est + 1; /* +1 lookahead */
                 int page_count = ld_get_page_count(g_doc);
@@ -912,8 +1011,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_scroll > max_s) g_scroll = max_s;
         SetScrollPos(hwnd, SB_VERT, g_scroll, TRUE);
         InvalidateRect(hwnd, NULL, FALSE);
-        /* FASE 5/6: Trigger on-demand page rendering */
-        if (g_doc && g_page_h_est > 0) {
+        LOG_SCROLL("WM_MOUSEWHEEL scroll changed");
+        log_msg("[SCROLL] WM_MOUSEWHEEL: scroll=%d g_layout_complete=%d g_last_rendered_page=%d\n",
+                g_scroll, g_layout_complete, g_last_rendered_page);
+        /* FASE 5/6: Trigger on-demand page rendering SOLO se layout non completo */
+        if (g_doc && g_page_h_est > 0 && !g_layout_complete) {
             int visible_first = g_scroll / g_page_h_est;
             int visible_last = (g_scroll + g_ch) / g_page_h_est + 1; /* +1 lookahead */
             int page_count = ld_get_page_count(g_doc);

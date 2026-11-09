@@ -179,6 +179,8 @@ namespace litehtml
         pixel_t           m_top;
         pixel_t           m_left;
         pixel_t           m_right;
+        pixel_t           m_layout_left;
+        pixel_t           m_layout_right;
         pixel_t           m_height;
         pixel_t           m_width;
         css_line_height_t m_default_line_height;
@@ -195,6 +197,8 @@ namespace litehtml
             m_top(top),
             m_left(left),
             m_right(right),
+            m_layout_left(left),
+            m_layout_right(right),
             m_height(0),
             m_width(0),
             m_default_line_height(line_height),
@@ -231,6 +235,23 @@ namespace litehtml
         pixel_t line_right() const
         {
             return m_right;
+        }
+        pixel_t layout_left() const
+        {
+            return m_layout_left;
+        }
+        pixel_t layout_right() const
+        {
+            return m_layout_right;
+        }
+        pixel_t layout_width() const
+        {
+            return m_layout_right - m_layout_left;
+        }
+        void set_layout_bounds(pixel_t left, pixel_t right)
+        {
+            m_layout_left = left;
+            m_layout_right = right;
         }
         rendered_width get_rendered_width() const
         {

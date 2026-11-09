@@ -133,7 +133,10 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
             SelectObject(dc, old);
             ReleaseDC(NULL, dc);
             fm->font_size = size;
-            fm->height = tm.tmHeight;
+            /* Word usa interlinea 1.15 di default (single spacing).
+             * tm.tmHeight include ascent+descent+internal_leading.
+             * Moltiplichiamo per 1.xx per approssimare lo spacing di Word. */
+            fm->height = (int)(tm.tmHeight * 1.15f);
             fm->ascent = tm.tmAscent;
             fm->descent = tm.tmDescent;
             fm->x_height = tm.tmHeight / 2;
@@ -373,9 +376,14 @@ static int      g_last_rendered_page = -1;   /* ultima pagina renderizzata */
 static int      g_page_h_est = 0;            /* altezza stimata singola pagina */
 static int      g_layout_complete = 0;       /* layout completo dopo primo full render */
 
+/* Layout vs visual margins separation */
+static int      g_layout_padding_x = 173;    /* padding TOTALE orizzontale per layout (giustificazione) */
+static int      g_visual_padding_x = 6;      /* <-- IMPOSTA QUI il padding visivo orizzontale (paint), es. 6, 12, 20... */
+static int      g_visual_margin_y = 6;      /* margine visivo alto/basso (paint) */
+
 static int content_width(void)
 {
-    int w = g_page_w - 128; /* 64 px per lato */
+    int w = g_page_w - g_layout_padding_x;
     return w > 0 ? w : 1;
 }
 
@@ -920,9 +928,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             FillRect(g_memdc, &rc_page, (HBRUSH)GetStockObject(WHITE_BRUSH));
             FrameRect(g_memdc, &rc_page, g_br_border);
 
-            /* Margini interni pagina (simmetrici): 64px sinistra/destra, 60px alto/basso */
-            const int page_margin_x = 64;
-            const int page_margin_y = 60;
+            /* Margini interni pagina: visual padding orizzontale configurabile */
+            const int page_margin_x = g_visual_padding_x;
+            const int page_margin_y = g_visual_margin_y;
             int content_w = g_page_w - 2 * page_margin_x;
             int content_x = g_page_x + page_margin_x;
             int content_y = pt + page_margin_y;

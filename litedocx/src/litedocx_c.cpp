@@ -617,7 +617,9 @@ namespace
             {
                 const int size = static_cast<int>(descr.size);
                 fm->font_size   = litehtml::pixel_t(m.font_size ? m.font_size : size);
+                // setta altezza riga NON APPLICATO
                 fm->height      = litehtml::pixel_t(m.height ? m.height : static_cast<int>(size * 1.35));
+                //
                 fm->ascent      = litehtml::pixel_t(m.ascent ? m.ascent : size);
                 fm->descent     = litehtml::pixel_t(m.descent ? m.descent : size / 4);
                 fm->x_height    = litehtml::pixel_t(m.x_height ? m.x_height : size / 2);

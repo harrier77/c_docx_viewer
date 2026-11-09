@@ -321,25 +321,28 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
     pixel_t spacing_x = 0_px; // Number of pixels to distribute between elements
     pixel_t shift_x   = 0_px; // Shift elements by X to apply the text-align
 
+    // Use layout bounds for justification/alignment calculations
+    pixel_t layout_width = m_layout_right - m_layout_left;
+
     switch(m_text_align)
     {
     case text_align_right:
-        if(m_width < (m_right - m_left))
+        if(m_width < layout_width)
         {
-            shift_x = (m_right - m_left) - m_width;
+            shift_x = layout_width - m_width;
         }
         break;
     case text_align_center:
-        if(m_width < (m_right - m_left))
+        if(m_width < layout_width)
         {
-            shift_x = ((m_right - m_left) - m_width) / 2_px;
+            shift_x = (layout_width - m_width) / 2_px;
         }
         break;
     case text_align_justify:
-        if(m_width < (m_right - m_left) && !last_box && !finished_with_break)
+        if(m_width < layout_width && !last_box && !finished_with_break)
         {
             shift_x   = 0_px;
-            spacing_x = (m_right - m_left) - m_width;
+            spacing_x = layout_width - m_width;
         }
         break;
     default:
@@ -356,7 +359,7 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
 
     if(m_text_align == text_align_justify && spacing_x != 0_px)
     {
-        log_justify_params((float)m_left, (float)m_right, (float)m_width,
+        log_justify_params((float)m_layout_left, (float)m_layout_right, (float)m_width,
                            (float)spacing_x, (int)m_items.size(),
                            gaps > 0 ? (float)spacing_x / (float)gaps : 0.f);
     }
@@ -427,7 +430,7 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
         if((m_text_align == text_align_right || spacing_x != 0_px) &&
            counter == static_cast<int>(m_items.size()))
         {
-            lbi->pos().x = m_right - lbi->pos().width;
+            lbi->pos().x = m_layout_right - lbi->pos().width;
         }
         else if(shift_x != 0_px)
         {
@@ -437,7 +440,7 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
         if(spacing_x != 0_px && first_text &&
            lbi->get_type() == line_box_item::type_text_part)
         {
-            lbi->pos().x = m_left;
+            lbi->pos().x = m_layout_left;
             first_text = false;
         }
 
@@ -816,8 +819,9 @@ bool litehtml::line_box::can_hold(const std::unique_ptr<line_box_item>& item, wh
         {
             return true;
         }
-
-        if(m_left + m_width + item->width() > m_right)
+        //fix right margin 1 char too width >= instead of >
+        // Use layout bounds for wrapping decision
+        if(m_layout_left + m_width + item->width() >= m_layout_right)
         {
             return false;
         }
@@ -917,6 +921,8 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::new_widt
     {
         m_left            = left;
         m_right           = right;
+        m_layout_left     = left;
+        m_layout_right    = right;
         m_width           = 0_px;
         auto remove_begin = m_items.end();
         auto i            = m_items.begin();
@@ -925,7 +931,8 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::new_widt
         {
             if(!(*i)->get_el()->skip())
             {
-                if(m_left + m_width + (*i)->width() > m_right)
+                //fix margin right - use layout bounds for wrapping
+                if(m_layout_left + m_width + (*i)->width() >= m_layout_right)
                 {
                     remove_begin = i;
                     break;

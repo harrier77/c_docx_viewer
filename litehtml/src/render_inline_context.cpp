@@ -221,9 +221,13 @@ litehtml::pixel_t litehtml::render_item_inline_context::new_box(const std::uniqu
     //    and modifying them after construction causes misalignment/blank output.
     // The fix must be inside line_box.cpp where first text item is forced to m_left.
 
-    m_line_boxes.emplace_back(std::make_unique<line_box>(new_pos.top, new_pos.left + first_line_margin + text_indent,
-                                                         new_pos.left + new_pos.width, css().line_height(),
-                                                         css().get_font_metrics(), css().get_text_align()));
+    pixel_t visual_left  = new_pos.left + first_line_margin + text_indent;
+    pixel_t visual_right = new_pos.left + new_pos.width;
+    auto lb = std::make_unique<line_box>(new_pos.top, visual_left, visual_right, css().line_height(),
+                                         css().get_font_metrics(), css().get_text_align());
+    // Set layout bounds based on containing block's render_width (content width for justification/wrapping)
+    lb->set_layout_bounds(visual_left, visual_left + self_size.render_width);
+    m_line_boxes.emplace_back(std::move(lb));
 
     // Add items returned by finish_last_box function into the new line
     for(auto& it : items)
