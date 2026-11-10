@@ -7,6 +7,7 @@
 #include "litedocx_c.h"
 
 #include <windows.h>
+#undef WINAPI_FAMILY_PARTITION
 #include <commdlg.h>
 #include <stdio.h>
 #include <stdlib.h>

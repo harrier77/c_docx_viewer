@@ -138,6 +138,10 @@ int ld_get_page_count(void* doc);
 int ld_get_page_height(void* doc, int page_idx);
 void ld_clear_page_cache(void* doc);
 
+/* Visual padding (margins for paint) and justification width (fixed width for text-align:justify). */
+void ld_set_visual_padding(void* doc, int visual_padding_x, int visual_padding_y);
+void ld_set_justification_width(void* doc, int justification_width);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
