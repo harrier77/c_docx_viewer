@@ -98,8 +98,13 @@ namespace litehtml
         {
             return 0;
         }
-        // Layout width (content width for justification/wrapping) = viewport_width - layout_padding_x
+        // Layout width (content width for wrapping) = viewport_width - layout_padding_x
         virtual int get_layout_width() const
+        {
+            return 0;
+        }
+        // Justification width (fixed, independent of layout_padding) for root block justification
+        virtual int get_justification_width() const
         {
             return 0;
         }

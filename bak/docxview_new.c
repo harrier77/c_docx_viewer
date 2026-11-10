@@ -21,6 +21,22 @@
 #define PAGE_DESK_MARGIN 24
 #define PAGE_TOP_GAP     20
 
+/* ------------------------------------------------------------------
+ * Master flag: set to 0 to disable ALL console (stderr) logging from
+ * the viewer. Set to 1 to re-enable it. When 1, the amount of output
+ * is further controlled by TABLE_DEBUG below (0 = only the essential
+ * render-lifecycle line, 1 = full table-layout trace set used to
+ * diagnose the "first column text in second column" bug).
+ * NOTE: this flag covers the viewer only; the DLL has its own switch
+ * (LITEDOCX_CONSOLE_LOG in litedocx_c.cpp).
+ * ------------------------------------------------------------------ */
+#define CONSOLE_LOGGING 0
+
+/* NEVER CHANGE THIS VALUE! Last valid value was 366 but it depends from other layout parameters*/
+static int      g_layout_padding_x = 366;     /* padding TOTALE orizzontale per layout (giustificazione) */
+/*groq equation does not work*/
+//static int      g_layout_padding_x = g_page_w - word_text;
+
 static HWND   g_hwnd;
 static void  *g_doc;
 static int    g_doc_h;               /* altezza layout, cache lato UI */
@@ -179,6 +195,26 @@ static void log_msg(const char *fmt, ...)
 #endif
 }
 
+/* Fine-grained switch, active only when CONSOLE_LOGGING is 1.
+ * 0 = only the essential render-lifecycle message stays visible.
+ * 1 = full table-layout trace set (diagnosis of the "first column text
+ * in second column" bug; see REGRESSION WARNING below). */
+#define TABLE_DEBUG 0
+
+static void dbg_log(const char *fmt, ...)
+{
+#if CONSOLE_LOGGING && TABLE_DEBUG
+    va_list args;
+    va_start(args, fmt);
+    fprintf(stderr, "[DBG] ");
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+#else
+    (void)fmt;
+#endif
+}
+
 #define LOG_JOB(kind, msg) log_msg("[JOB] %s: %s\n", #kind, msg)
 #define LOG_RENDER(msg) log_msg("[RENDER] %s\n", msg)
 #define LOG_PAINT(msg) log_msg("[PAINT] %s\n", msg)
@@ -225,6 +261,9 @@ static void cb_draw_text(void *hdc, const char *text, void *font, unsigned rgb, 
     HDC dc = (HDC)hdc;
     if (!dc || !text || !text[0])
         return;
+    static int s_text_count = 0;
+    if (s_text_count++ < 200)
+        dbg_log("[TABLE] cb_draw_text text='%.60s' at (%d,%d) size=%dx%d\n", text, x, y, w, h);
     if (font)
         SelectObject(dc, (HFONT)font);
     SetTextColor(dc, RGB(GetRValue(rgb), GetGValue(rgb), GetBValue(rgb)));
@@ -240,7 +279,6 @@ static void cb_draw_text(void *hdc, const char *text, void *font, unsigned rgb, 
 
 static void cb_draw_solid_fill(void *hdc, int x, int y, int w, int h, unsigned rgb)
 {
-    // log_msg("[DRAW_FILL] at (%d,%d) %dx%d rgb=0x%06X\n", x, y, w, h, rgb);
     HDC dc = (HDC)hdc;
     RECT rc;
     HBRUSH br;
@@ -256,7 +294,6 @@ static void cb_draw_solid_fill(void *hdc, int x, int y, int w, int h, unsigned r
 static void cb_draw_borders(void *hdc, int x, int y, int w, int h, int left_w, int top_w, int right_w, int bottom_w,
                          unsigned left_rgb, unsigned top_rgb, unsigned right_rgb, unsigned bottom_rgb)
 {
-    // log_msg("[DRAW_BORDERS] at (%d,%d) %dx%d L=%d T=%d R=%d B=%d\n", x, y, w, h, left_w, top_w, right_w, bottom_w);
     if (left_w > 0) {
         cb_draw_solid_fill(hdc, x, y, left_w, h, left_rgb);
     }
@@ -376,9 +413,24 @@ static int      g_last_rendered_page = -1;   /* ultima pagina renderizzata */
 static int      g_page_h_est = 0;            /* altezza stimata singola pagina */
 static int      g_layout_complete = 0;       /* layout completo dopo primo full render */
 
+
+
+/* REGRESSION WARNING: content_width() = page_w - g_layout_padding_x is the
+ * LAYOUT width passed to ld_render, while paint uses the full page width
+ * (g_page_w - 2*g_visual_padding_x). The root-level line boxes get the
+ * layout box centered inside the paint box (offset ~177px). This only works
+ * because litehtml clamps line-box layout bounds to the containing block
+ * width (see REGRESSION WARNING in litehtml render_inline_context.cpp).
+ * If that clamp is removed or broken again, table-cell text of the first
+ * column will render inside the second column. */
+
+static int      g_visual_padding_x = 6;      /* <-- IMPOSTA QUI il padding visivo orizzontale (paint), es. 6, 12, 20... */
+static int      g_visual_margin_y = 6;      /* margine visivo alto/basso (paint) */
+
 static int content_width(void)
 {
-    int w = g_page_w - 173; /* px width, increase negative number to 173 is same as MS Word */
+    int w = g_page_w - g_layout_padding_x;
+    dbg_log("[TABLE] content_width page_w=%d layout_padding_x=%d result=%d\n", g_page_w, g_layout_padding_x, w);
     return w > 0 ? w : 1;
 }
 
@@ -496,6 +548,11 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
         case JOB_RENDER:
             LOG_JOB(JOB_RENDER, "start ld_render");
             LOG_RENDER("ld_render called from JOB_RENDER");
+            /* Essential trace: one line per full layout, shows the width
+             * contract between viewer and litedocx (see content_width()). */
+#if CONSOLE_LOGGING
+            fprintf(stderr, "[RENDER] ld_render content_w=%d\n", j->content_w);
+#endif
             if (j->doc && !g_shutdown)
                 ld_render(j->doc, j->content_w);
             LOG_JOB(JOB_RENDER, "ld_render done, posting WM_APP_RENDER_DONE");
@@ -586,6 +643,7 @@ static void request_render(int w)
     g_render_doc = g_doc;
     g_render_used_w = w;
     g_render_pending_width = -1;
+    dbg_log("[TABLE] request_render content_w=%d\n", w);
     enqueue_job(j);
     LOG_RENDER("JOB_RENDER enqueued");
 }
@@ -690,6 +748,9 @@ static void apply_loaded_doc(unsigned id, void *doc)
             dispose_doc(g_doc);
         g_doc = doc;
         g_doc_content_w = g_load_content_w;
+
+        /* Set visual padding so layout box is centered inside visual box */
+        ld_set_visual_padding(g_doc, g_visual_padding_x, g_visual_margin_y);
 
         lstrcpynA(g_path, g_load_path, sizeof(g_path));
         {
@@ -923,9 +984,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             FillRect(g_memdc, &rc_page, (HBRUSH)GetStockObject(WHITE_BRUSH));
             FrameRect(g_memdc, &rc_page, g_br_border);
 
-            /* Margini interni pagina (simmetrici): 64px sinistra/destra, 60px alto/basso */
-            const int page_margin_x = 64;
-            const int page_margin_y = 60;
+            /* Margini interni pagina: visual padding orizzontale configurabile */
+            const int page_margin_x = g_visual_padding_x;
+            const int page_margin_y = g_visual_margin_y;
             int content_w = g_page_w - 2 * page_margin_x;
             int content_x = g_page_x + page_margin_x;
             int content_y = pt + page_margin_y;
@@ -936,10 +997,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             RECT rc_clip;
             IntersectRect(&rc_clip, &rc_content, &rc_viewport);
             
-            LOG_PAINT("ld_draw with clipped rect");
-            log_msg("[PAINT] ld_draw: content=(%d,%d,%d,%d) viewport=(%d,%d,%d,%d) clip=(%d,%d,%d,%d)\n",
-                    rc_content.left, rc_content.top, rc_content.right, rc_content.bottom,
-                    rc_viewport.left, rc_viewport.top, rc_viewport.right, rc_viewport.bottom,
+            dbg_log("[TABLE] WM_PAINT page_w=%d page_x=%d layout_padding_x=%d content_w=%d content_x=%d content_y=%d clip=(%d,%d,%d,%d)\n",
+                    g_page_w, g_page_x, g_layout_padding_x, content_w, content_x, content_y,
                     rc_clip.left, rc_clip.top, rc_clip.right, rc_clip.bottom);
 
             ld_draw(g_doc, g_memdc, content_x, content_y,
@@ -1137,7 +1196,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
                            NULL, menu, inst, NULL);
     if (!hwnd) return 1;
 
-    ShowWindow(hwnd, show);
+    ShowWindow(hwnd, SW_SHOWMAXIMIZED);
     UpdateWindow(hwnd);
 
     if (cmd && cmd[0]) {

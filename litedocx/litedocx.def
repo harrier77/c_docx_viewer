@@ -13,6 +13,7 @@ EXPORTS
     ld_page_width
     ld_page_height
     ld_set_visual_padding
+    ld_set_justification_width
     ld_mouse_over
     ld_lbutton_down
     ld_lbutton_up

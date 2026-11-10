@@ -32,6 +32,10 @@
  * ------------------------------------------------------------------ */
 #define CONSOLE_LOGGING 0
 
+/* NEVER CHANGE THIS VALUE! Last valid value was 366 but it depends from other layout parameters*/
+static int      g_layout_padding_x = 366;     /* padding TOTALE orizzontale per layout (giustificazione) */
+/*groq equation does not work*/
+//static int      g_layout_padding_x = g_page_w - word_text;
 
 static HWND   g_hwnd;
 static void  *g_doc;
@@ -409,10 +413,7 @@ static int      g_last_rendered_page = -1;   /* ultima pagina renderizzata */
 static int      g_page_h_est = 0;            /* altezza stimata singola pagina */
 static int      g_layout_complete = 0;       /* layout completo dopo primo full render */
 
-/* NEVER CHANGE THIS VALUE! Last valid value was 366 but it depends from other layout parameters*/
-static int      g_layout_padding_x = 366;     /* padding TOTALE orizzontale per layout (giustificazione) */
-/*groq equation does not work*/
-//static int      g_layout_padding_x = g_page_w - word_text;
+
 
 /* REGRESSION WARNING: content_width() = page_w - g_layout_padding_x is the
  * LAYOUT width passed to ld_render, while paint uses the full page width
@@ -750,6 +751,11 @@ static void apply_loaded_doc(unsigned id, void *doc)
 
         /* Set visual padding so layout box is centered inside visual box */
         ld_set_visual_padding(g_doc, g_visual_padding_x, g_visual_margin_y);
+        /* Set fixed justification width = paintable width (viewport - 2*visual_padding)
+         * This keeps justified text stable when g_layout_padding_x changes. */
+        int justification_w = g_page_w - 2 * g_visual_padding_x;
+        if (justification_w > 0)
+            ld_set_justification_width(g_doc, justification_w);
 
         lstrcpynA(g_path, g_load_path, sizeof(g_path));
         {
@@ -946,6 +952,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         compute_page();
         if (g_doc && !g_load_active) {
+            /* Update justification width on page size change */
+            int justification_w = g_page_w - 2 * g_visual_padding_x;
+            if (justification_w > 0)
+                ld_set_justification_width(g_doc, justification_w);
             int content_w = content_width();
             /* Il layout viene rifatto dal worker: la UI non si blocca.
              * Durante il render il paint mostra solo lo sfondo. */

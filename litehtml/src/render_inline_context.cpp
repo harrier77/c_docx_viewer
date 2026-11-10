@@ -230,12 +230,14 @@ litehtml::pixel_t litehtml::render_item_inline_context::new_box(const std::uniqu
     int visual_pad_y = 0;
     int viewport_w = 0;
     int layout_w = 0;
+    int justification_w = 0;
     if(auto doc = src_el()->get_document(); doc && doc->container())
     {
         visual_pad_x = doc->container()->get_visual_padding_x();
         visual_pad_y = doc->container()->get_visual_padding_y();
         viewport_w = doc->container()->get_viewport_width();
         layout_w = doc->container()->get_layout_width();
+        justification_w = doc->container()->get_justification_width();
     }
 
     // self_size.width = containing block width (for percentage calculations)
@@ -250,8 +252,19 @@ litehtml::pixel_t litehtml::render_item_inline_context::new_box(const std::uniqu
     pixel_t visual_left   = new_pos.left;  // Should be 0 for root
     pixel_t visual_right  = visual_left + paintable_width;
     pixel_t visual_width  = paintable_width;
-    pixel_t layout_width  = layout_w > 0 ? pixel_t(layout_w) : self_size.render_width;
+    
+    // Use justification_width for root block to keep justification stable when layout_padding changes
+    // For nested blocks, use layout_w (which respects the containing block's width)
+    bool is_root = src_el() && (src_el()->tag() == _body_ || !src_el()->parent());
+    pixel_t layout_width  = (is_root && justification_w > 0) ? pixel_t(justification_w) : (layout_w > 0 ? pixel_t(layout_w) : self_size.render_width);
+    
+    // Per il root block, centriamo il layout box nel visual box
     pixel_t layout_left   = visual_left + (visual_width - layout_width) / 2;
+    if (is_root)
+    {
+        pixel_t root_shift_x = 50; /* <-- Spostamento a destra della root senza restringere la larghezza */
+        layout_left += root_shift_x;
+    }
 
     // ------------------------------------------------------------------
     // REGRESSION WARNING: this bug was fixed once and silently came back.
@@ -273,7 +286,9 @@ litehtml::pixel_t litehtml::render_item_inline_context::new_box(const std::uniqu
     // again, do it at draw time or for the root block only - never by
     // feeding page bounds into line boxes of nested blocks.
     // ------------------------------------------------------------------
-    if(paintable_width > (pixel_t)self_size.render_width + 4)
+    // Only apply this guard for NESTED blocks, NOT for root block.
+    // The root block needs the centered layout with optional shift.
+    if (!is_root && paintable_width > (pixel_t)self_size.render_width + 4)
     {
         visual_width = (pixel_t)self_size.render_width;
         visual_right = visual_left + visual_width;

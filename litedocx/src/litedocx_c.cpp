@@ -411,7 +411,8 @@ namespace
         int                  viewport_h = 600;
         int                  visual_padding_x = 0;  // Visual horizontal padding (margins) for paint
         int                  visual_padding_y = 0;  // Visual vertical padding (margins) for paint
-        int                  layout_width = 0;      // Layout width (for justification) = max_width from ld_render
+        int                  layout_width = 0;      // Layout width (for wrapping) = max_width from ld_render
+        int                  justification_width = 0; // Justification width (fixed, independent of layout_padding)
         IWICImagingFactory*  wic        = nullptr;
         HDC                  m_measure_dc = nullptr;
         std::unique_ptr<litedocx::DocxModel> owned_model;
@@ -1084,6 +1085,11 @@ namespace
             // We'll store it when ld_render is called
             return layout_width;
         }
+        int get_justification_width() const override
+        {
+            // Return fixed justification width, or fall back to layout_width
+            return justification_width > 0 ? justification_width : layout_width;
+        }
 
         void get_language(std::string& language, std::string& culture) const override
         {
@@ -1329,6 +1335,15 @@ void ld_set_visual_padding(void* doc, int visual_padding_x, int visual_padding_y
     {
         h->container->visual_padding_x = visual_padding_x;
         h->container->visual_padding_y = visual_padding_y;
+    }
+}
+
+void ld_set_justification_width(void* doc, int justification_width)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if(h && h->container)
+    {
+        h->container->justification_width = justification_width;
     }
 }
 

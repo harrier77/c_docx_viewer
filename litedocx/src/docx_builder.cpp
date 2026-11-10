@@ -289,6 +289,8 @@ namespace litedocx
 
         std::string body_css;
         add_px(body_css, "padding-top", twip_to_px(m_model.section.margin_t_tw));
+        /* Ripristiniamo i margini originali del documento Word per il padding del body,
+         * così il testo riacquista il suo posizionamento naturale rispetto alla pagina. */
         add_px(body_css, "padding-right", twip_to_px(m_model.section.margin_r_tw));
         add_px(body_css, "padding-bottom", twip_to_px(m_model.section.margin_b_tw));
         add_px(body_css, "padding-left", twip_to_px(m_model.section.margin_l_tw));
