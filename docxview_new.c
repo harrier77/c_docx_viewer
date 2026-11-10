@@ -18,7 +18,8 @@
 
 
 
-#define PAGE_MAX_W       960
+/*#define PAGE_MAX_W       960 */
+#define PAGE_MAX_W       800
 #define PAGE_DESK_MARGIN 24
 #define PAGE_TOP_GAP     20
 
@@ -33,10 +34,13 @@
  * ------------------------------------------------------------------ */
 #define CONSOLE_LOGGING 0
 
-/* NEVER CHANGE THIS VALUE! Last valid value was 366 but it depends from other layout parameters*/
-static int      g_layout_padding_x = 366;     /* padding TOTALE orizzontale per layout (giustificazione) */
+/* MAGIC VALUE!   depends from other layout parameters 
+padding TOTALE orizzontale per layout giustificazione  
+( 364, se PAGE_MAX_W=960  g_visual_padding_x = 70) 
+(206, se page_max_w 800 e g_visual_padding = 18) */
+static int      g_layout_padding_x = 206;     
 
-static int      g_visual_padding_x = 70;      /* <-- IMPOSTA QUI il padding da destra, magic number circa 70*/
+static int      g_visual_padding_x = 18;      /* <-- IMPOSTA QUI il padding da sinistra, può variare senza rompere il layout*/
 static int      g_visual_margin_y = 6;      /* margine visivo alto/basso (paint) */
 
 static HWND   g_hwnd;
