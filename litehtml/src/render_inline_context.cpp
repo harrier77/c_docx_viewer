@@ -244,23 +244,45 @@ litehtml::pixel_t litehtml::render_item_inline_context::new_box(const std::uniqu
     // paintable_width = viewport_w - 2*visual_pad_x
     // layout_width = layout_w (from ld_render max_width, e.g., page_w - g_layout_padding_x)
     // The layout box (layout_width) should be centered in the visual box (paintable_width)
-    fprintf(stderr, "[NEW_BOX_DEBUG] self_size.width=%d self_size.render_width=%d visual_pad_x=%d viewport_w=%d layout_w=%d new_pos.left=%d new_pos.width=%d\n",
-                    (int)(pixel_t)self_size.width, (int)(pixel_t)self_size.render_width, visual_pad_x, viewport_w, layout_w,
-                    (int)new_pos.left, (int)new_pos.width);
 
     // Visual bounds: full paintable width from viewport
     pixel_t paintable_width = viewport_w > 0 ? pixel_t(viewport_w - 2 * visual_pad_x) : new_pos.width;
     pixel_t visual_left   = new_pos.left;  // Should be 0 for root
     pixel_t visual_right  = visual_left + paintable_width;
     pixel_t visual_width  = paintable_width;
-    auto lb = std::make_unique<line_box>(new_pos.top, visual_left, visual_right, css().line_height(),
-                                         css().get_font_metrics(), css().get_text_align());
-    // Set layout bounds: center the layout box (width = layout_w) inside the visual box
-    // layout_left = visual_left + (visual_width - layout_width) / 2
     pixel_t layout_width  = layout_w > 0 ? pixel_t(layout_w) : self_size.render_width;
     pixel_t layout_left   = visual_left + (visual_width - layout_width) / 2;
-    fprintf(stderr, "[NEW_BOX] visual_left=%d visual_right=%d visual_width=%d layout_width=%d layout_left=%d\n",
-                    (int)visual_left, (int)visual_right, (int)visual_width, (int)layout_width, (int)layout_left);
+
+    // ------------------------------------------------------------------
+    // REGRESSION WARNING: this bug was fixed once and silently came back.
+    //
+    // Line boxes must NOT inherit page-global visual/layout bounds when
+    // they are created inside a NARROWER containing block (e.g. a table
+    // cell). line_box::finish() computes alignment and justification from
+    // the layout bounds: if a ~100px-wide cell receives the page-wide
+    // layout box (centered at +177px, width 594px), justified/centered/
+    // right-aligned text of the FIRST column gets forced to x=177, which
+    // is exactly the start of the SECOND column ("first column renders
+    // empty, its text appears in the second column"). Wrapping breaks too,
+    // because line_box wrapping checks use m_layout_right.
+    //
+    // Rule: page-global bounds (layout_width from ld_render, centered in
+    // the paintable area) may only be applied to ROOT-level line boxes.
+    // Inside a narrower block the line box must use the containing
+    // block's own content box. If you ever need page-level centering
+    // again, do it at draw time or for the root block only - never by
+    // feeding page bounds into line boxes of nested blocks.
+    // ------------------------------------------------------------------
+    if(paintable_width > (pixel_t)self_size.render_width + 4)
+    {
+        visual_width = (pixel_t)self_size.render_width;
+        visual_right = visual_left + visual_width;
+        layout_width = visual_width;
+        layout_left  = visual_left;
+    }
+
+    auto lb = std::make_unique<line_box>(new_pos.top, visual_left, visual_right, css().line_height(),
+                                         css().get_font_metrics(), css().get_text_align());
     lb->set_layout_bounds(layout_left, layout_left + layout_width);
     m_line_boxes.emplace_back(std::move(lb));
 

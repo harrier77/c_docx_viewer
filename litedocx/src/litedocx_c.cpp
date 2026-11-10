@@ -41,8 +41,19 @@
 #define LDBG(msg) ((void)0)
 #endif
 
-// Logging per debug Fase D (sempre abilitato)
+// Console logging switch for the DLL. 0 = no stderr output in release use.
+// The viewer's CONSOLE_LOGGING flag does not reach here: litedocx.dll is a
+// separate binary, so it has its own master switch.
+#ifndef LITEDOCX_CONSOLE_LOG
+#define LITEDOCX_CONSOLE_LOG 0
+#endif
+
+// Logging per debug Fase D (gated by LITEDOCX_CONSOLE_LOG)
+#if LITEDOCX_CONSOLE_LOG
 #define LDLOG(fmt, ...) do { fprintf(stderr, "[LITEDOCX] " fmt "\n", ##__VA_ARGS__); fflush(stderr); } while(0)
+#else
+#define LDLOG(fmt, ...) ((void)0)
+#endif
 
 namespace
 {
@@ -1291,8 +1302,10 @@ void ld_draw(void* doc, void* hdc, int x, int y, int clip_x, int clip_y, int cli
     auto* h = static_cast<ld_doc*>(doc);
     int doc_w = h && h->doc ? (int)h->doc->width() : 0;
     int doc_h = h && h->doc ? (int)h->doc->height() : 0;
+#if LITEDOCX_CONSOLE_LOG
     fprintf(stderr, "[LD_DRAW] doc=%p x=%d y=%d clip=(%d,%d,%d,%d) doc_w=%d doc_h=%d\n",
             doc, x, y, clip_x, clip_y, clip_w, clip_h, doc_w, doc_h);
+#endif
     LDBG((std::string("[LITEDOCX_DRAW] at (") + std::to_string(x) + "," + std::to_string(y) + ") clip=(" + std::to_string(clip_x) + "," + std::to_string(clip_y) + "," + std::to_string(clip_w) + "," + std::to_string(clip_h) + ")\n").c_str());
     if(!h || !h->doc)
     {

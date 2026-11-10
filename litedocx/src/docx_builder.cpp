@@ -941,8 +941,48 @@ namespace litedocx
             }
         }
 
+        // Parse tblGrid → preferred column widths (in px). Critical for correct column count & layout.
+        std::vector<int> grid_widths_px;
+        if(const XmlNode* grid = tbl->child("tblGrid"))
+        {
+            for(const auto& gc : grid->children)
+            {
+                if(!gc->is("gridCol"))
+                    continue;
+                int w_tw = std::atoi(gc->attr("w:w", "0").c_str());
+                grid_widths_px.push_back(w_tw > 0 ? twip_to_px(w_tw) : 0);
+            }
+        }
+        const int grid_cols = static_cast<int>(grid_widths_px.size());
+
+        // Force fixed layout when we know the grid – prevents litehtml from collapsing columns.
+        if(grid_cols > 0)
+        {
+            table_css += "table-layout:fixed;";
+            int total_w = 0;
+            for(int w : grid_widths_px)
+                total_w += w;
+            if(total_w > 0)
+                add_px(table_css, "width", total_w);
+        }
+
         auto table = make_element("table", table_css);
         parent->appendChild(table);
+
+        // <colgroup> helps establish the column structure early.
+        if(grid_cols > 0)
+        {
+            auto colgroup = make_element("colgroup", std::string());
+            for(int w : grid_widths_px)
+            {
+                std::string col_css;
+                if(w > 0)
+                    add_px(col_css, "width", w);
+                auto col = make_element("col", col_css);
+                colgroup->appendChild(col);
+            }
+            table->appendChild(colgroup);
+        }
 
         /* Table rows must be wrapped in tbody/thead/tfoot for litehtml */
         auto tbody = make_element("tbody", std::string());
@@ -963,7 +1003,9 @@ namespace litedocx
         }
 
         std::vector<CellOwner> owners;
-        int                    row_index = 0;
+        if(grid_cols > 0)
+            owners.resize(static_cast<size_t>(grid_cols));
+        int row_index = 0;
         for(const auto* row : rows)
         {
             std::string row_css;
@@ -1023,6 +1065,15 @@ namespace litedocx
                     char buf[64];
                     std::snprintf(buf, sizeof(buf), "width:%.2f%%;", ci.width_pct);
                     css += buf;
+                } else if(grid_cols > 0 && col < grid_cols)
+                {
+                    // Fallback: sum of the grid columns this cell spans
+                    int sum = 0;
+                    int end = std::min(col + ci.span, grid_cols);
+                    for(int k = col; k < end; ++k)
+                        sum += grid_widths_px[static_cast<size_t>(k)];
+                    if(sum > 0)
+                        add_px(css, "width", sum);
                 }
                 add_color(css, "background-color", ci.shading);
                 int pt = ci.mar_t >= 0 ? ci.mar_t : (bi.cell_margin_t >= 0 ? bi.cell_margin_t : 2);
@@ -1090,6 +1141,30 @@ namespace litedocx
                 } else
                 {
                     process_sequence(td, blocks);
+                }
+            }
+
+            // Ensure the row covers the full grid: emit empty cells for any remaining columns
+            // that are not covered by a continuing vertical merge.
+            if(grid_cols > 0)
+            {
+                while(col < grid_cols)
+                {
+                    if(col < static_cast<int>(owners.size()) && owners[static_cast<size_t>(col)].td)
+                    {
+                        // Covered by a vertical merge from a previous row – skip
+                        col += 1; // or owners[...].span if we tracked it, but keep simple
+                        continue;
+                    }
+                    auto td = make_element("td", "padding:2px 5px;");
+                    auto p  = make_element("p", "margin:0;padding:0;");
+                    td->appendChild(p);
+                    append_nbsp(p);
+                    tr->appendChild(td);
+                    if(col >= static_cast<int>(owners.size()))
+                        owners.resize(static_cast<size_t>(col + 1));
+                    owners[static_cast<size_t>(col)] = CellOwner();
+                    ++col;
                 }
             }
             ++row_index;
