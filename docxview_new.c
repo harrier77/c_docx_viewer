@@ -36,9 +36,11 @@
 
 /* MAGIC VALUE!   depends from other layout parameters 
 padding TOTALE orizzontale per layout giustificazione  
-( 364, se PAGE_MAX_W=960  g_visual_padding_x = 70) 
-(206, se page_max_w 800 e g_visual_padding = 18) */
-static int      g_layout_padding_x = 206;     
+( 364, for PAGE_MAX_W=960  g_visual_padding_x = 70) 
+(206, if page_max_w 800  g_visual_padding = 18) 
+(final: 202, 800 e 18)
+*/
+static int      g_layout_padding_x = 202;     
 
 static int      g_visual_padding_x = 18;      /* <-- IMPOSTA QUI il padding da sinistra, può variare senza rompere il layout*/
 static int      g_visual_margin_y = 6;      /* margine visivo alto/basso (paint) */
