@@ -29,7 +29,7 @@ Desktop.ini
 # Sublime Text
 *.sublime-project
 *.sublime-workspace
-
+*.txt
 # Markdown docs (except README.md)
 *.md
 !README.md
