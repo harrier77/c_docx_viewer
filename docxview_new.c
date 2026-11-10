@@ -34,8 +34,9 @@
 
 /* NEVER CHANGE THIS VALUE! Last valid value was 366 but it depends from other layout parameters*/
 static int      g_layout_padding_x = 366;     /* padding TOTALE orizzontale per layout (giustificazione) */
-/*groq equation does not work*/
-//static int      g_layout_padding_x = g_page_w - word_text;
+
+static int      g_visual_padding_x = 70;      /* <-- IMPOSTA QUI il padding da destra, magic number circa 70*/
+static int      g_visual_margin_y = 6;      /* margine visivo alto/basso (paint) */
 
 static HWND   g_hwnd;
 static void  *g_doc;
@@ -424,8 +425,7 @@ static int      g_layout_complete = 0;       /* layout completo dopo primo full 
  * If that clamp is removed or broken again, table-cell text of the first
  * column will render inside the second column. */
 
-static int      g_visual_padding_x = 6;      /* <-- IMPOSTA QUI il padding visivo orizzontale (paint), es. 6, 12, 20... */
-static int      g_visual_margin_y = 6;      /* margine visivo alto/basso (paint) */
+
 
 static int content_width(void)
 {
