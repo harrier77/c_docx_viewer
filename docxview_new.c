@@ -22,6 +22,7 @@
 #define PAGE_MAX_W       800
 #define PAGE_DESK_MARGIN 24
 #define PAGE_TOP_GAP     20
+#define PAGE_SHADOW_OFF  4
 
 /* ------------------------------------------------------------------
  * Master flag: set to 0 to disable ALL console (stderr) logging from
@@ -47,6 +48,13 @@ static int      g_visual_margin_y = 6;      /* margine visivo alto/basso (paint)
 
 static HWND   g_hwnd;
 static void  *g_doc;
+/* Zoom globals */
+static double g_zoom        = 1.0;
+static const double ZOOM_STEP = 0.10;
+static const double ZOOM_MIN  = 0.25;
+static const double ZOOM_MAX  = 5.0;
+static int    g_scroll_x = 0;
+static double g_page_left_doc = 0.0;
 static int    g_doc_h;               /* altezza layout, cache lato UI */
 static int    g_cw = 900, g_ch = 700;
 static int    g_scroll;
@@ -138,7 +146,7 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
         free(w);
     }
     if (size < 6) size = 6;
-    lf.lfHeight = -size;
+    lf.lfHeight = -(int)(size * g_zoom);
     lf.lfWeight = bold ? FW_BOLD : FW_NORMAL;
     lf.lfItalic = (BYTE)(italic ? 1 : 0);
     lf.lfUnderline = (BYTE)(underline ? 1 : 0);
@@ -935,6 +943,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE:
         // log_msg("[CREATE] WM_CREATE\n");
         g_hwnd = hwnd;
+        compute_page();
+        g_page_left_doc = (double)g_page_x;
         g_br_desk = CreateSolidBrush(RGB(240, 240, 242));
         g_br_shadow = CreateSolidBrush(RGB(190, 190, 195));
         g_br_border = CreateSolidBrush(RGB(210, 210, 215));
@@ -958,6 +968,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ReleaseDC(hwnd, hdc);
         }
         compute_page();
+        g_page_left_doc = (double)g_page_x;
         if (g_doc && !g_load_active) {
             /* Update justification width on page size change */
             int justification_w = g_page_w - 2 * g_visual_padding_x;
@@ -990,25 +1001,28 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         /* Se un render è in corso il documento viene modificato dal worker:
          * non chiamare ld_draw per evitare accessi concorrenti. */
         if (g_doc && !g_render_busy) {
-            int pt = page_top();
-            int doc_h = g_doc_h;
-            int page_h = doc_h + 120;
-            RECT rc_shd = {g_page_x + 4, pt + 4, g_page_x + g_page_w + 4, pt + page_h + 4};
-            RECT rc_page = {g_page_x, pt, g_page_x + g_page_w, pt + page_h};
+            int pt = PAGE_TOP_GAP - g_scroll;
+            int pw = (int)(g_page_w * g_zoom);
+            int px = (int)(g_page_left_doc * g_zoom) - g_scroll_x;
+            int py = pt;
+            int ph = (int)((g_doc_h + 120) * g_zoom);
+            RECT rc_shd = {px + PAGE_SHADOW_OFF, py + PAGE_SHADOW_OFF,
+                           px + pw + PAGE_SHADOW_OFF, py + ph + PAGE_SHADOW_OFF};
+            RECT rc_page = {px, py, px + pw, py + ph};
 
             FillRect(g_memdc, &rc_shd, g_br_shadow);
             FillRect(g_memdc, &rc_page, (HBRUSH)GetStockObject(WHITE_BRUSH));
             FrameRect(g_memdc, &rc_page, g_br_border);
 
-            /* Margini interni pagina: visual padding orizzontale configurabile */
-            const int page_margin_x = g_visual_padding_x;
-            const int page_margin_y = g_visual_margin_y;
-            int content_w = g_page_w - 2 * page_margin_x;
-            int content_x = g_page_x + page_margin_x;
-            int content_y = pt + page_margin_y;
+            /* Margini interni pagina: visual padding scalato per zoom */
+            int page_margin_x = (int)(g_visual_padding_x * g_zoom);
+            int page_margin_y = (int)(g_visual_margin_y * g_zoom);
+            int content_w = pw - 2 * page_margin_x;
+            int content_x = px + page_margin_x;
+            int content_y = py + page_margin_y;
 
             /* Clip rect = intersezione area contenuto + viewport visibile */
-            RECT rc_content = {content_x, content_y, content_x + content_w, content_y + doc_h};
+            RECT rc_content = {content_x, content_y, content_x + content_w, content_y + ph};
             RECT rc_viewport = {0, 0, g_cw, g_ch};
             RECT rc_clip;
             IntersectRect(&rc_clip, &rc_content, &rc_viewport);
@@ -1021,9 +1035,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     rc_clip.left, rc_clip.top, rc_clip.right - rc_clip.left, rc_clip.bottom - rc_clip.top);
         } else if (g_doc && g_render_busy) {
             /* Layout in corso: mostra la pagina bianca senza contenuto. */
-            int pt = page_top();
-            int page_h = g_doc_h + 120;
-            RECT rc_page = {g_page_x, pt, g_page_x + g_page_w, pt + page_h};
+            int pt = PAGE_TOP_GAP - g_scroll;
+            int pw = (int)(g_page_w * g_zoom);
+            int px = (int)(g_page_left_doc * g_zoom) - g_scroll_x;
+            int py = pt;
+            int ph = (int)((g_doc_h + 120) * g_zoom);
+            RECT rc_page = {px, py, px + pw, py + ph};
             FillRect(g_memdc, &rc_page, (HBRUSH)GetStockObject(WHITE_BRUSH));
             FrameRect(g_memdc, &rc_page, g_br_border);
         }
@@ -1077,7 +1094,47 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_MOUSEWHEEL: {
+        short cx_ = (short)LOWORD(lp);
+        short cy_ = (short)HIWORD(lp);
         int delta = GET_WHEEL_DELTA_WPARAM(wp);
+
+        if (wp & MK_CONTROL) {
+            double old_zoom = g_zoom;
+
+            /* Aggiorna zoom */
+            if (delta > 0)
+                g_zoom = (old_zoom + ZOOM_STEP < ZOOM_MAX) ? old_zoom + ZOOM_STEP : ZOOM_MAX;
+            else
+                g_zoom = (old_zoom - ZOOM_STEP > ZOOM_MIN) ? old_zoom - ZOOM_STEP : ZOOM_MIN;
+
+            /* 1. Converti cursore da SCREEN a DOCUMENTO (con old_zoom) */
+            double page_scr_left = g_page_left_doc * old_zoom;
+            double doc_x = ((double)cx_ - page_scr_left) / old_zoom;
+            double doc_y = ((double)g_scroll + (double)cy_) / old_zoom;
+
+            /* 2. Clamp verticale */
+            int max_s = (g_doc_h + 120) - g_ch;
+            if (max_s < 0) max_s = 0;
+            int new_scroll = (int)(doc_y * g_zoom - (double)cy_);
+            if (new_scroll < 0) new_scroll = 0;
+            if (new_scroll > max_s) new_scroll = max_s;
+            g_scroll = new_scroll;
+            update_scrollbars();
+
+            /* 3. Aggiorna page_left_doc perché il punto documento resti fisso */
+            double new_page_scr_left = (double)cx_ - doc_x * g_zoom;
+            g_page_left_doc = new_page_scr_left / g_zoom;
+
+            /* Re-render con nuove dimensioni font */
+            if (g_doc && !g_load_active) {
+                request_render(content_width());
+            }
+
+            InvalidateRect(hwnd, NULL, TRUE);
+            return 0;
+        }
+
+        /* Scroll verticale normale */
         int doc_h = g_doc_h;
         int max_s = (doc_h + 120) - g_ch;
         if (max_s < 0) max_s = 0;
