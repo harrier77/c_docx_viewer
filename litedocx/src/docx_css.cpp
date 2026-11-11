@@ -50,12 +50,24 @@ namespace litedocx
             size_px = 15;
         }
 
+        /* -----------------------------------------------------------------
+         * LINE-HEIGHT FIX: Use 'normal' instead of hardcoded 1.15 multiplier.
+         * -----------------------------------------------------------------
+         * CSS 'line-height: 1.15' (unitless) = font-size * 1.15.
+         * Word default = font_natural_height * 1.15, where font_natural_height
+         * = tmHeight = ascent + descent + internalLeading (from GDI GetTextMetrics).
+         * Since tmHeight > font-size (due to internal leading), CSS 1.15 is tighter.
+         * 
+         * The host callback (docxview_new.c cb_create_font) returns fm->height
+         * = tmHeight * 1.15f. When CSS uses 'line-height: normal', litehtml uses
+         * fm->height directly, matching Word's default single spacing.
+         * ----------------------------------------------------------------- */
         char buf[1024];
         std::snprintf(buf, sizeof(buf),
                       "html,body{margin:0;padding:0;}\n"
                       "body{color:#000000;background:#ffffff;font-family:%s,\"Segoe UI\",Arial,sans-serif;"
-                      "font-size:%dpx;line-height:1.15;}\n"
-                      "p{margin:0;padding:0;line-height:1.15;}\n"
+                      "font-size:%dpx;line-height:normal;}\n"
+                      "p{margin:0;padding:0;line-height:normal;}\n"
                       "div{margin:0;padding:0;}\n"
                       "span{white-space:normal;}\n"
                       "table{border-collapse:collapse;border-spacing:0;}\n"
