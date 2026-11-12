@@ -66,10 +66,13 @@ static int    g_doc_h;               /* altezza layout, cache lato UI */
 
 static char      g_path[MAX_PATH];
 static char      g_title[300];
-static char      g_url[2048];
+/* g_url rimosso: serviva al vecchio docxview.c per aprire i link via
+ * ShellExecute; ora cb_on_anchor_click riceve l'URL come parametro. */
 static char      g_cur[32] = "arrow";
 static FILE     *g_log_file = NULL;
+#if ENABLE_FILE_LOGGING
 static char      g_log_path[MAX_PATH];
+#endif
 
 static ld_callbacks g_cb;
 static int g_cb_init;
@@ -138,6 +141,7 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
 
 #define ENABLE_FILE_LOGGING 0  // set to 0 to disable all file logging
 
+#if ENABLE_FILE_LOGGING
 static void init_log_path(void)
 {
     if (g_log_path[0]) return;
@@ -147,6 +151,7 @@ static void init_log_path(void)
     else g_log_path[0] = '\0';
     strcat(g_log_path, "logs.txt");
 }
+#endif
 
 static void log_msg(const char *fmt, ...)
 {
@@ -307,8 +312,9 @@ static void cb_draw_image_bitmap(void *target, void *native_bitmap,
 }
 
 static void cb_set_caption(const char *caption) { /* log_msg("[CB] set_caption: %s\n", caption ? caption : "NULL"); */ }
-static void cb_set_base_url(const char *url) { /* log_msg("[CB] set_base_url: %s\n", url ? url : "NULL"); */ }
-static void cb_link(const char *url, const char *title) { /* log_msg("[CB] link: url=%s title=%s\n", url ? url : "NULL", title ? title : "NULL"); */ }
+/* set_base_url e link rimosse: la DLL le implementa come no-op
+ * (litedocx/src/litedocx_c.cpp:1077) e lh_callbacks non espone i campi:
+ * nessuna callback puo' essere invocata dal viewer. */
 static void cb_on_anchor_click(const char *url)
 {
     /* log_msg("[CB] on_anchor_click: %s\n", url ? url : "NULL"); */

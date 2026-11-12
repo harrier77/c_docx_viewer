@@ -124,7 +124,9 @@ static int d2d_begin_draw(Renderer *r, HWND hwnd, int w, int h)
     ID2D1DCRenderTarget_BeginDraw(d->renderTarget);
     ID2D1DCRenderTarget_SetAntialiasMode(d->renderTarget, D2D1_ANTIALIAS_MODE_ALIASED);
     {
-        D2D1_MATRIX_3X2_F identity = {{1, 0, 0, 1, 0, 0}};
+        /* Identita': union { struct{m11..dy}; struct{_11.._32}; float m[3][2]; }
+         * -> servono 3 livelli di graffe per evitare -Wmissing-braces. */
+        D2D1_MATRIX_3X2_F identity = {{ {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f} }};
         ID2D1DCRenderTarget_SetTransform(d->renderTarget, &identity);
     }
 
