@@ -1112,6 +1112,7 @@ namespace
         std::vector<int>        m_page_y_offsets;           // Y-offset of each page
         int                     m_last_rendered_page = -1;  // Highest page laid out (pagination)
         bool                    m_full_layout_done = false; // Full document::render completed
+        bool                    m_fonts_invalidated = false; // Font cache invalidated, need render tree rebuild
     };
 
     void fire_redraw(void* user, const litehtml::position& pos)
@@ -1275,6 +1276,27 @@ int ld_render(void* doc, int max_width)
     }
     try
     {
+        // CRITICAL: Font cache invalidation due to zoom change.
+        // When the user changes zoom (Ctrl+mouse wheel), the viewer calls
+        // ld_invalidate_font_cache() which sets m_fonts_invalidated flag.
+        // We must clear the font cache AND rebuild the render tree so that
+        // subsequent layout pass creates new HFONTs with size * g_zoom.
+        // Without rebuild_render_tree(), the old render tree would reuse
+        // stale font_metrics and text would not scale with zoom.
+        // This runs on the worker thread to avoid race with UI thread.
+        if (h->m_fonts_invalidated)
+        {
+            fprintf(stderr, "[LITEDOCX] ld_render: font cache invalidated flag set, clearing caches\n");
+            h->doc->clear_font_cache();
+            h->doc->rebuild_render_tree();
+            if (h->container)
+            {
+                h->container->text_width_cache.clear();
+            }
+            h->m_fonts_invalidated = false;
+            fprintf(stderr, "[LITEDOCX] ld_render: font cache cleared and render tree rebuilt due to zoom change\n");
+        }
+
         // DO NOT overwrite viewport_w here! viewport_w should remain the visual page width
         // (set by ld_open_file/ld_open_memory) for media queries.
         // max_width is the LAYOUT width (content width for wrapping/justification).
@@ -1722,6 +1744,16 @@ int ld_render_range(void* doc, int page_idx, int viewport_h, int max_width)
     LDLOG("ld_render_range: already laid out, returning width");
     // Already laid out
     return ld_width(doc);
+}
+
+void ld_invalidate_font_cache(void* doc)
+{
+    // Mark font cache as invalidated; actual clearing and render tree rebuild
+    // happens on the worker thread at the start of the next ld_render call.
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->doc)
+        return;
+    h->m_fonts_invalidated = true;
 }
 
 void ld_clear_page_cache(void* doc)

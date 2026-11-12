@@ -126,6 +126,10 @@ namespace litehtml
             return m_over_element;
         }
 
+        // Clear font cache (used when zoom factor changes)
+        void                         clear_font_cache();
+        void                         rebuild_render_tree();
+
         void append_children_from_string(element& parent, const char* str, bool replace_existing);
         void dump(dumper& cout);
 

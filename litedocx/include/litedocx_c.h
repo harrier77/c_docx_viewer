@@ -140,6 +140,11 @@ void ld_free_table_cells(ld_table_cell_info* cells);
 
 const char* ld_last_error(void);
 const char* ld_version(void);
+
+/* Invalidate font cache (call when zoom factor changes).
+ * Forces font recreation at next layout/render. */
+void ld_invalidate_font_cache(void* doc);
+
 void ld_destroy(void* doc);
 
 #ifdef __cplusplus

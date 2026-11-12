@@ -33,7 +33,7 @@
  * NOTE: this flag covers the viewer only; the DLL has its own switch
  * (LITEDOCX_CONSOLE_LOG in litedocx_c.cpp).
  * ------------------------------------------------------------------ */
-#define CONSOLE_LOGGING 0
+#define CONSOLE_LOGGING 1
 
 /* MAGIC VALUE!   depends from other layout parameters 
 padding TOTALE orizzontale per layout giustificazione  
@@ -138,6 +138,17 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
     HFONT f;
     TEXTMETRICW tm;
     WCHAR *w;
+
+    // CRITICAL: Font creation callback from litedocx.dll/litehtml.
+    // The 'size' parameter is the CSS font-size in pixels (e.g., 16px).
+    // We MUST multiply by g_zoom to scale the font with zoom level.
+    // lfHeight is negative for MatchCellHeight behavior in CreateFontIndirectW.
+    // The litedocx.dll caches HFONTs by logical font_description (family, size, weight,
+    // style, decoration) WITHOUT zoom. When zoom changes, the viewer calls
+    // ld_invalidate_font_cache() which forces the DLL to clear its font cache and
+    // rebuild the render tree, so this callback is invoked again with the new g_zoom.
+    fprintf(stderr, "[FONT_CREATE] fam='%s' size=%d bold=%d italic=%d zoom=%.2f -> lfHeight=%d\n",
+            fam ? fam : "NULL", size, bold, italic, g_zoom, -(int)(size * g_zoom));
 
     ZeroMemory(&lf, sizeof(lf));
     w = u8_to_w(fam && fam[0] ? fam : "Aptos");
@@ -249,6 +260,8 @@ static int cb_text_width(const char *text, void *font)
     HDC dc;
     HGDIOBJ old = NULL;
 
+    fprintf(stderr, "[FONT_WIDTH] text='%.30s' font=%p\n", text ? text : "NULL", font);
+
     sz.cx = sz.cy = 0;
     if (!text || !text[0])
         return 0;
@@ -280,6 +293,7 @@ static void cb_draw_text(void *hdc, const char *text, void *font, unsigned rgb, 
     static int s_text_count = 0;
     if (s_text_count++ < 200)
         dbg_log("[TABLE] cb_draw_text text='%.60s' at (%d,%d) size=%dx%d\n", text, x, y, w, h);
+    fprintf(stderr, "[FONT_DRAW] text='%.30s' font=%p at (%d,%d) zoom=%.2f\n", text ? text : "NULL", font, x, y, g_zoom);
     if (font)
         SelectObject(dc, (HFONT)font);
     SetTextColor(dc, RGB(GetRValue(rgb), GetGValue(rgb), GetBValue(rgb)));
@@ -628,6 +642,8 @@ static void request_render(int w)
     if (!g_doc || g_load_active)
         return;
 
+    fprintf(stderr, "[RENDER_REQ] w=%d g_render_busy=%d g_zoom=%.2f\n", w, g_render_busy, g_zoom);
+
     LOG_RENDER("request_render called");
     log_msg("[RENDER] request_render: w=%d g_render_busy=%d\n", w, g_render_busy);
 
@@ -815,6 +831,8 @@ static void on_render_done(void *doc, int used_w)
     if (g_shutdown)
         return;
 
+    fprintf(stderr, "[RENDER_DONE] used_w=%d g_render_busy=%d g_zoom=%.2f\n", used_w, g_render_busy, g_zoom);
+
     LOG_RENDER("on_render_done called");
     log_msg("[RENDER] on_render_done: used_w=%d g_render_busy=%d g_render_pending_width=%d g_render_pending_first=%d g_render_pending_last=%d\n",
             used_w, g_render_busy, g_render_pending_width, g_render_pending_first_page, g_render_pending_last_page);
@@ -990,6 +1008,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc_all = {0, 0, g_cw, g_ch};
 
+        fprintf(stderr, "[PAINT] g_zoom=%.2f g_render_busy=%d g_doc=%p scroll=%d\n", g_zoom, g_render_busy, g_doc, g_scroll);
+
         if (!g_memdc) {
             FillRect(hdc, &rc_all, g_br_desk);
             EndPaint(hwnd, &ps);
@@ -1027,6 +1047,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             RECT rc_clip;
             IntersectRect(&rc_clip, &rc_content, &rc_viewport);
             
+            fprintf(stderr, "[PAINT] calling ld_draw: content=(%d,%d,%d) clip=(%d,%d,%d,%d)\n",
+                    content_x, content_y, content_w, rc_clip.left, rc_clip.top, rc_clip.right - rc_clip.left, rc_clip.bottom - rc_clip.top);
+            
             dbg_log("[TABLE] WM_PAINT page_w=%d page_x=%d layout_padding_x=%d content_w=%d content_x=%d content_y=%d clip=(%d,%d,%d,%d)\n",
                     g_page_w, g_page_x, g_layout_padding_x, content_w, content_x, content_y,
                     rc_clip.left, rc_clip.top, rc_clip.right, rc_clip.bottom);
@@ -1043,6 +1066,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             RECT rc_page = {px, py, px + pw, py + ph};
             FillRect(g_memdc, &rc_page, (HBRUSH)GetStockObject(WHITE_BRUSH));
             FrameRect(g_memdc, &rc_page, g_br_border);
+            fprintf(stderr, "[PAINT] render busy, showing blank page\n");
         }
 
         BitBlt(hdc, 0, 0, g_cw, g_ch, g_memdc, 0, 0, SRCCOPY);
@@ -1107,6 +1131,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             else
                 g_zoom = (old_zoom - ZOOM_STEP > ZOOM_MIN) ? old_zoom - ZOOM_STEP : ZOOM_MIN;
 
+            fprintf(stderr, "[ZOOM] delta=%d old_zoom=%.2f new_zoom=%.2f cursor=(%d,%d) scroll=%d\n",
+                    delta, old_zoom, g_zoom, cx_, cy_, g_scroll);
+
             /* 1. Converti cursore da SCREEN a DOCUMENTO (con old_zoom) */
             double page_scr_left = g_page_left_doc * old_zoom;
             double doc_x = ((double)cx_ - page_scr_left) / old_zoom;
@@ -1125,8 +1152,26 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             double new_page_scr_left = (double)cx_ - doc_x * g_zoom;
             g_page_left_doc = new_page_scr_left / g_zoom;
 
+            fprintf(stderr, "[ZOOM] doc_pt=(%.1f,%.1f) new_scroll=%d page_left_doc=%.1f\n",
+                    doc_x, doc_y, g_scroll, g_page_left_doc);
+
+            /* CRITICAL: Invalidate font cache in DLL so fonts are recreated at new zoom.
+             * When zoom changes, litedocx.dll caches HFONTs by logical font_description
+             * (family, size, weight, style, decoration) which does NOT include zoom.
+             * The viewer's cb_create_font() multiplies CSS size by g_zoom, but the DLL
+             * would return cached HFONTs created at old zoom. We must:
+             * 1. Call ld_invalidate_font_cache() to set m_fonts_invalidated flag
+             * 2. On next ld_render(), the DLL clears font cache, rebuilds render tree
+             * 3. Layout pass calls cb_create_font() with new zoom -> new HFONTs
+             * Without this, text would stay at initial zoom size while page scales. */
+            if (g_doc) {
+                fprintf(stderr, "[ZOOM] calling ld_invalidate_font_cache\n");
+                ld_invalidate_font_cache(g_doc);
+            }
+
             /* Re-render con nuove dimensioni font */
             if (g_doc && !g_load_active) {
+                fprintf(stderr, "[ZOOM] requesting render with content_width=%d\n", content_width());
                 request_render(content_width());
             }
 

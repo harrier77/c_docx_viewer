@@ -82,6 +82,16 @@ void* ld_open_memory(const void* data, size_t size, const ld_callbacks* cb, int 
 /* Layout for max_width; returns the natural width. */
 int ld_render(void* doc, int max_width);
 
+/* Set visual padding (margins) for paint. The layout box (width = max_width) will be centered
+ * inside the visual box (width = max_width + 2 * visual_padding_x). */
+void ld_set_visual_padding(void* doc, int visual_padding_x, int visual_padding_y);
+
+/* Set justification width for root block. This fixes the justification layout width
+ * independent of the layout width (max_width passed to ld_render).
+ * If 0 (default), falls back to layout_width.
+ * Use this to keep justified text stable when changing page margins. */
+void ld_set_justification_width(void* doc, int justification_width);
+
 /* Paint into hdc, offset by (x,y), clipped to the given rectangle. */
 void ld_draw(void* doc, void* hdc, int x, int y, int clip_x, int clip_y, int clip_w, int clip_h);
 
@@ -130,17 +140,12 @@ void ld_free_table_cells(ld_table_cell_info* cells);
 
 const char* ld_last_error(void);
 const char* ld_version(void);
+
+/* Invalidate font cache (call when zoom factor changes).
+ * Forces font recreation at next layout/render. */
+void ld_invalidate_font_cache(void* doc);
+
 void ld_destroy(void* doc);
-
-/* Paginated / incremental layout API */
-int ld_render_range(void* doc, int page_idx, int viewport_h, int max_width);
-int ld_get_page_count(void* doc);
-int ld_get_page_height(void* doc, int page_idx);
-void ld_clear_page_cache(void* doc);
-
-/* Visual padding (margins for paint) and justification width (fixed width for text-align:justify). */
-void ld_set_visual_padding(void* doc, int visual_padding_x, int visual_padding_y);
-void ld_set_justification_width(void* doc, int justification_width);
 
 #ifdef __cplusplus
 } /* extern "C" */

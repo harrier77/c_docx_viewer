@@ -1207,4 +1207,49 @@ namespace litehtml
         }
     }
 
+    void document::clear_font_cache()
+    {
+        // Clear font cache and delete all cached font handles
+        // Called when zoom factor changes to force font recreation at new size
+        fprintf(stderr, "[LITEHTML] clear_font_cache: clearing %zu fonts\n", m_fonts.size());
+        if (m_container)
+        {
+            for (auto& font : m_fonts)
+            {
+                m_container->delete_font(font.second.font);
+            }
+        }
+        m_fonts.clear();
+        fprintf(stderr, "[LITEHTML] clear_font_cache: done\n");
+    }
+
+    void document::rebuild_render_tree()
+    {
+        // CRITICAL: Rebuild render tree to pick up new font metrics after zoom change.
+        // Called from ld_render() when m_fonts_invalidated flag is set (zoom changed).
+        // This mimics media_changed() behavior but without re-evaluating media queries.
+        // Steps:
+        // 1. refresh_styles() - clears computed styles so they get recalculated
+        // 2. compute_styles() - recalculates all CSS styles including font-size
+        // 3. create_render_item() - builds new render tree from element tree
+        // 4. init() - initializes render items (creates line boxes, etc.)
+        // 5. fix_tables_layout() - rebuilds anonymous table boxes
+        // Without this, the old render tree would keep stale font_metrics and
+        // text would not scale with zoom factor.
+        fprintf(stderr, "[LITEHTML] rebuild_render_tree: starting\n");
+        if (m_root)
+        {
+            m_root->refresh_styles();
+            m_root->compute_styles();
+            m_root_render = m_root->create_render_item(nullptr);
+            if (m_root_render)
+            {
+                m_root_render = m_root_render->init();
+            }
+            m_tabular_elements.clear();
+            fix_tables_layout();
+        }
+        fprintf(stderr, "[LITEHTML] rebuild_render_tree: done\n");
+    }
+
 } // namespace litehtml
