@@ -97,6 +97,10 @@ void ld_draw(void* doc, void* hdc, int x, int y, int clip_x, int clip_y, int cli
 
 int ld_width(void* doc);
 int ld_height(void* doc);
+/* Page-range / on-demand layout helpers */
+int ld_get_page_count(void* doc);
+int ld_get_page_height(void* doc, int page_idx);
+int ld_render_range(void* doc, int page_idx, int viewport_h, int max_width);
 
 /* Page size of the first/active section, in CSS pixels. 0 when unknown. */
 int ld_page_width(void* doc);

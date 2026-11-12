@@ -40,6 +40,7 @@ padding TOTALE orizzontale per layout giustificazione
 ( 364, for PAGE_MAX_W=960  g_visual_padding_x = 70) 
 (206, if page_max_w 800  g_visual_padding = 18) 
 (final: 202, 800 e 18)
+MUST BE FIXED IN CASE OF ZOOM!
 */
 static int      g_layout_padding_x = 202;     
 
@@ -50,9 +51,9 @@ static HWND   g_hwnd;
 static void  *g_doc;
 /* Zoom globals */
 static double g_zoom        = 1.0;
-static const double ZOOM_STEP = 0.10;
-static const double ZOOM_MIN  = 0.25;
-static const double ZOOM_MAX  = 5.0;
+static const double ZOOM_STEP = 0.1;
+static const double ZOOM_MIN  = 0.80;
+static const double ZOOM_MAX  = 2.0;
 static int    g_scroll_x = 0;
 static double g_page_left_doc = 0.0;
 static int    g_doc_h;               /* altezza layout, cache lato UI */
@@ -175,7 +176,8 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
             GetTextMetricsW(dc, &tm);
             SelectObject(dc, old);
             ReleaseDC(NULL, dc);
-            fm->font_size = size;
+            //fm->font_size = size; to fix for zooming
+            fm->font_size   = (int)(size * g_zoom);
             /* Word usa interlinea 1.15 di default (single spacing).
              * tm.tmHeight include ascent+descent+internal_leading.
              * Moltiplichiamo per 1.xx per approssimare lo spacing di Word. */
@@ -185,8 +187,8 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
             fm->x_height = tm.tmHeight / 2;
             fm->ch_width = tm.tmAveCharWidth;
             fm->draw_spaces = (italic || underline || strike) ? 1 : 0;
-            fm->sub_shift = size / 5;
-            fm->super_shift = size / 3;
+            fm->sub_shift   = (int)(size * g_zoom) / 5;
+            fm->super_shift = (int)(size * g_zoom) / 3;
         }
     }
     return f;
@@ -456,13 +458,19 @@ static int      g_layout_complete = 0;       /* layout completo dopo primo full 
 
 
 
-static int content_width(void)
+/*static int content_width(void) fixed for zooming!
 {
-    int w = g_page_w - g_layout_padding_x;
+    int w = g_page_w - g_layout_padding_x; 
+    
     dbg_log("[TABLE] content_width page_w=%d layout_padding_x=%d result=%d\n", g_page_w, g_layout_padding_x, w);
     return w > 0 ? w : 1;
+}*/
+static int content_width(void)
+{
+    int w = (int)((g_page_w - g_layout_padding_x) * g_zoom + 1.5);
+    if (w < 1) w = 1;
+    return w;
 }
-
 static Job *alloc_job(JobKind kind)
 {
     Job *j = (Job *)calloc(1, sizeof(Job));
@@ -1035,8 +1043,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             FrameRect(g_memdc, &rc_page, g_br_border);
 
             /* Margini interni pagina: visual padding scalato per zoom */
-            int page_margin_x = (int)(g_visual_padding_x * g_zoom);
-            int page_margin_y = (int)(g_visual_margin_y * g_zoom);
+            double k = 1.0 + 1.18*(g_zoom-1.0) + 0.09*(g_zoom-1.0)*(g_zoom-1.0);
+            int page_margin_x = (int)(g_visual_padding_x * (g_zoom*k)+1.1);
+            int page_margin_y = (int)(g_visual_margin_y * (g_zoom*0.2));
             int content_w = pw - 2 * page_margin_x;
             int content_x = px + page_margin_x;
             int content_y = py + page_margin_y;

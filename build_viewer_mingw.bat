@@ -15,11 +15,11 @@ copy /y ".\litedocx\litedocx.dll" . >nul
 copy /y ".\litedocx\liblitedocx.a" . >nul
 
 echo Compilazione con MinGW GCC (GUI, no console)...
-%GCC% -Wall -O2  -I. -o docxview_new.exe docxview_new.c icon.o -L. -llitedocx -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32
+%GCC% -Wall -O2 -mwindows -I. -o docxview_new.exe docxview_new.c icon.o -L. -llitedocx -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32
 if errorlevel 1 goto :fail
 
 echo.
-echo Build OK: docxview_new.exe (GUI, no console)
+echo Build OK: docxview_new.exe (-mwindows per log in console)
 exit /b 0
 
 :fail
