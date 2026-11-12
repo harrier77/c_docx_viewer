@@ -37,7 +37,7 @@ if errorlevel 1 goto :fail
 copy /y "%HERE%litedocx\liblitedocx.a" "%HERE%liblitedocx.a" >nul
 if errorlevel 1 goto :fail
 
-%TCC% -Wall -I. -mconsole -o docxview_new.exe docxview_new.c litedocx.dll -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32
+%TCC% -Wall -I. -Ifunc_gdi -Ilitedocx/include -Itcc_winapi -mconsole -o docxview_new.exe docxview_new.c func_gdi\layout.c func_gdi\renderer_gdi.c func_gdi\renderer_d2d.c func_gdi\text_utf8.c func_gdi\document.c litedocx.dll -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32
 if errorlevel 1 goto :fail
 
 echo.

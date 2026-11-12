@@ -8,21 +8,31 @@
 
 #include <windows.h>
 #undef WINAPI_FAMILY_PARTITION
+/* COBJMACROS rende pubblici i metodi delle interfacce COM (ID2D1*, IDWrite*, …) */
+#define COBJMACROS
+#ifndef __TINYC__
+#include <dwrite.h>
+#endif
 #include <commdlg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 
+#include "layout.h"
+#include "renderer.h"
+#include "text_utf8.h"
+#include "document.h"
+
+/* Accesso allo stato di layout (vedi func_gdi/layout.h). */
+#define LAY layout_get()
+/* Alias storico: l'implementazione vive in func_gdi/text_utf8.c. */
+#define u8_to_w utf8_to_wide
 
 
 
-
-/*#define PAGE_MAX_W       960 */
-#define PAGE_MAX_W       800
-#define PAGE_DESK_MARGIN 24
-#define PAGE_TOP_GAP     20
-#define PAGE_SHADOW_OFF  4
+/* PAGE_MAX_W, PAGE_DESK_MARGIN, PAGE_TOP_GAP, PAGE_SHADOW_OFF
+ * sono definiti in func_gdi/layout.h. */
 
 /* ------------------------------------------------------------------
  * Master flag: set to 0 to disable ALL console (stderr) logging from
@@ -35,41 +45,24 @@
  * ------------------------------------------------------------------ */
 #define CONSOLE_LOGGING 1
 
-/* MAGIC VALUE!   depends from other layout parameters 
-padding TOTALE orizzontale per layout giustificazione  
-( 364, for PAGE_MAX_W=960  g_visual_padding_x = 70) 
-(206, if page_max_w 800  g_visual_padding = 18) 
-(final: 202, 800 e 18)
-MUST BE FIXED IN CASE OF ZOOM!
-*/
-static int      g_layout_padding_x = 202;     
-
-static int      g_visual_padding_x = 18;      /* <-- IMPOSTA QUI il padding da sinistra, può variare senza rompere il layout*/
-static int      g_visual_margin_y = 6;      /* margine visivo alto/basso (paint) */
+/* Padding: vedi LAYOUT_PADDING_X / LAYOUT_VISUAL_PADDING_X /
+ * LAYOUT_VISUAL_MARGIN_Y in func_gdi/layout.h. */
 
 static HWND   g_hwnd;
 static void  *g_doc;
-/* Zoom globals */
-static double g_zoom        = 1.0;
-static const double ZOOM_STEP = 0.1;
-static const double ZOOM_MIN  = 0.80;
-static const double ZOOM_MAX  = 2.0;
-static int    g_scroll_x = 0;
-static double g_page_left_doc = 0.0;
+static Renderer *g_renderer;
+#ifndef __TINYC__
+static IDWriteFactory *g_dwrite_factory = NULL;
+#endif
+
+typedef enum {
+    RENDERER_GDI = 0,
+    RENDERER_D2D
+} RendererKind;
+
+static RendererKind g_renderer_kind = RENDERER_GDI;
+
 static int    g_doc_h;               /* altezza layout, cache lato UI */
-static int    g_cw = 900, g_ch = 700;
-static int    g_scroll;
-static int    g_page_w = PAGE_MAX_W;
-static int    g_page_x;
-
-static HBRUSH g_br_desk;
-static HBRUSH g_br_shadow;
-static HBRUSH g_br_border;
-
-static HDC     g_memdc;
-static HBITMAP g_membmp;
-static HGDIOBJ g_memold;
-static int     g_memw, g_memh;
 
 static char      g_path[MAX_PATH];
 static char      g_title[300];
@@ -81,57 +74,6 @@ static char      g_log_path[MAX_PATH];
 static ld_callbacks g_cb;
 static int g_cb_init;
 
-static int page_top(void)
-{
-    return PAGE_TOP_GAP - g_scroll;
-}
-
-static void compute_page(void)
-{
-    int w = g_cw - 2 * PAGE_DESK_MARGIN;
-    if (w > PAGE_MAX_W)
-        w = PAGE_MAX_W;
-    if (w < 240)
-        w = g_cw;
-    if (w < 1)
-        w = 1;
-    g_page_w = w;
-    g_page_x = (g_cw - g_page_w) / 2;
-    if (g_page_x < 0)
-        g_page_x = 0;
-}
-
-static WCHAR *u8_to_w(const char *s)
-{
-    const unsigned char *p = (const unsigned char *)(s ? s : "");
-    size_t len = strlen((const char *)p), i = 0, o = 0;
-    WCHAR *out = (WCHAR *)malloc((len + 1) * sizeof(WCHAR));
-    if (!out)
-        return NULL;
-    while (i < len) {
-        unsigned c = p[i++], cp;
-        if (c < 0x80) cp = c;
-        else if ((c & 0xE0) == 0xC0 && i < len) cp = ((c & 0x1F) << 6) | (p[i++] & 0x3F);
-        else if ((c & 0xF0) == 0xE0 && i + 1 < len) {
-            cp = ((c & 0x0F) << 12) | ((p[i] & 0x3F) << 6) | (p[i + 1] & 0x3F);
-            i += 2;
-        } else if ((c & 0xF8) == 0xF0 && i + 2 < len) {
-            cp = ((c & 0x07) << 18) | ((p[i] & 0x3F) << 12) |
-                 ((p[i + 1] & 0x3F) << 6) | (p[i + 2] & 0x3F);
-            i += 3;
-        } else cp = '?';
-        if (cp >= 0x10000) {
-            cp -= 0x10000;
-            out[o++] = (WCHAR)(0xD800 + (cp >> 10));
-            out[o++] = (WCHAR)(0xDC00 + (cp & 0x3FF));
-        } else {
-            out[o++] = (WCHAR)cp;
-        }
-    }
-    out[o] = 0;
-    return out;
-}
-
 static void *cb_create_font(const char *fam, int size, int bold, int italic,
                             int underline, int strike, lh_font_metrics *fm)
 {
@@ -142,14 +84,14 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
 
     // CRITICAL: Font creation callback from litedocx.dll/litehtml.
     // The 'size' parameter is the CSS font-size in pixels (e.g., 16px).
-    // We MUST multiply by g_zoom to scale the font with zoom level.
+    // We MUST multiply by LAY->zoom to scale the font with zoom level.
     // lfHeight is negative for MatchCellHeight behavior in CreateFontIndirectW.
     // The litedocx.dll caches HFONTs by logical font_description (family, size, weight,
     // style, decoration) WITHOUT zoom. When zoom changes, the viewer calls
     // ld_invalidate_font_cache() which forces the DLL to clear its font cache and
-    // rebuild the render tree, so this callback is invoked again with the new g_zoom.
+    // rebuild the render tree, so this callback is invoked again with the new LAY->zoom.
     fprintf(stderr, "[FONT_CREATE] fam='%s' size=%d bold=%d italic=%d zoom=%.2f -> lfHeight=%d\n",
-            fam ? fam : "NULL", size, bold, italic, g_zoom, -(int)(size * g_zoom));
+            fam ? fam : "NULL", size, bold, italic, LAY->zoom, -(int)(size * LAY->zoom));
 
     ZeroMemory(&lf, sizeof(lf));
     w = u8_to_w(fam && fam[0] ? fam : "Aptos");
@@ -158,7 +100,7 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
         free(w);
     }
     if (size < 6) size = 6;
-    lf.lfHeight = -(int)(size * g_zoom);
+    lf.lfHeight = -(int)(size * LAY->zoom);
     lf.lfWeight = bold ? FW_BOLD : FW_NORMAL;
     lf.lfItalic = (BYTE)(italic ? 1 : 0);
     lf.lfUnderline = (BYTE)(underline ? 1 : 0);
@@ -177,7 +119,7 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
             SelectObject(dc, old);
             ReleaseDC(NULL, dc);
             //fm->font_size = size; to fix for zooming
-            fm->font_size   = (int)(size * g_zoom);
+            fm->font_size   = (int)(size * LAY->zoom);
             /* Word usa interlinea 1.15 di default (single spacing).
              * tm.tmHeight include ascent+descent+internal_leading.
              * Moltiplichiamo per 1.xx per approssimare lo spacing di Word. */
@@ -187,8 +129,8 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
             fm->x_height = tm.tmHeight / 2;
             fm->ch_width = tm.tmAveCharWidth;
             fm->draw_spaces = (italic || underline || strike) ? 1 : 0;
-            fm->sub_shift   = (int)(size * g_zoom) / 5;
-            fm->super_shift = (int)(size * g_zoom) / 3;
+            fm->sub_shift   = (int)(size * LAY->zoom) / 5;
+            fm->super_shift = (int)(size * LAY->zoom) / 3;
         }
     }
     return f;
@@ -289,38 +231,27 @@ static int cb_text_width(const char *text, void *font)
 static void cb_draw_text(void *hdc, const char *text, void *font, unsigned rgb, int x, int y, int w, int h)
 {
     // log_msg("[DRAW_TEXT] text='%s' at (%d,%d) w=%d h=%d\n", text ? text : "NULL", x, y, w, h);
-    HDC dc = (HDC)hdc;
-    if (!dc || !text || !text[0])
+    (void)hdc;
+    if (!text || !text[0])
         return;
     static int s_text_count = 0;
     if (s_text_count++ < 200)
         dbg_log("[TABLE] cb_draw_text text='%.60s' at (%d,%d) size=%dx%d\n", text, x, y, w, h);
-    fprintf(stderr, "[FONT_DRAW] text='%.30s' font=%p at (%d,%d) zoom=%.2f\n", text ? text : "NULL", font, x, y, g_zoom);
-    if (font)
-        SelectObject(dc, (HFONT)font);
-    SetTextColor(dc, RGB(GetRValue(rgb), GetGValue(rgb), GetBValue(rgb)));
-    SetBkMode(dc, TRANSPARENT);
-    {
-        WCHAR *w_str = u8_to_w(text);
-        if (w_str) {
-            TextOutW(dc, x, y, w_str, lstrlenW(w_str));
-            free(w_str);
-        }
-    }
+    fprintf(stderr, "[FONT_DRAW] text='%.30s' font=%p at (%d,%d) zoom=%.2f\n", text ? text : "NULL", font, x, y, LAY->zoom);
+    if (!g_renderer)
+        return;
+    g_renderer->vtbl->DrawText(g_renderer, text, font,
+                               RGB(GetRValue(rgb), GetGValue(rgb), GetBValue(rgb)),
+                               x, y, w, h);
 }
 
 static void cb_draw_solid_fill(void *hdc, int x, int y, int w, int h, unsigned rgb)
 {
-    HDC dc = (HDC)hdc;
-    RECT rc;
-    HBRUSH br;
-    rc.left = x;
-    rc.top = y;
-    rc.right = x + w;
-    rc.bottom = y + h;
-    br = CreateSolidBrush(RGB(GetRValue(rgb), GetGValue(rgb), GetBValue(rgb)));
-    FillRect(dc, &rc, br);
-    DeleteObject(br);
+    (void)hdc;
+    if (!g_renderer)
+        return;
+    g_renderer->vtbl->FillRect(g_renderer, x, y, w, h,
+                               RGB(GetRValue(rgb), GetGValue(rgb), GetBValue(rgb)));
 }
 
 static void cb_draw_borders(void *hdc, int x, int y, int w, int h, int left_w, int top_w, int right_w, int bottom_w,
@@ -338,6 +269,41 @@ static void cb_draw_borders(void *hdc, int x, int y, int w, int h, int left_w, i
     if (bottom_w > 0) {
         cb_draw_solid_fill(hdc, x, y + h - bottom_w, w, bottom_w, bottom_rgb);
     }
+}
+
+static int cb_draw_list_marker(void *target, int x, int y, int w, int h,
+                               int marker_type, unsigned rgb, const char *image)
+{
+    COLORREF col;
+
+    (void)target;
+    (void)image;
+
+    if (!g_renderer)
+        return 0; /* fallback GDI dentro litedocx */
+
+    col = RGB(GetRValue(rgb), GetGValue(rgb), GetBValue(rgb));
+    switch (marker_type) {
+    case LD_MARKER_SQUARE:
+        g_renderer->vtbl->DrawRect(g_renderer, x, y, w, h, col);
+        return 1;
+    case LD_MARKER_DISC:
+    case LD_MARKER_CIRCLE:
+        g_renderer->vtbl->DrawEllipse(g_renderer, x, y, w, h, col);
+        return 1;
+    default:
+        /* none / numbered / alpha: nessuna forma da disegnare qui. */
+        return 0;
+    }
+}
+
+static void cb_draw_image_bitmap(void *target, void *native_bitmap,
+                                 int src_w, int src_h, int x, int y, int w, int h)
+{
+    (void)target;
+    if (!g_renderer || !native_bitmap)
+        return;
+    g_renderer->vtbl->DrawImage(g_renderer, native_bitmap, src_w, src_h, x, y, w, h);
 }
 
 static void cb_set_caption(const char *caption) { /* log_msg("[CB] set_caption: %s\n", caption ? caption : "NULL"); */ }
@@ -367,26 +333,12 @@ static void init_callbacks(void)
     g_cb.lh.set_caption        = cb_set_caption;
     g_cb.lh.on_anchor_click    = cb_on_anchor_click;
     g_cb.lh.set_cursor         = cb_set_cursor;
+    /* Fase 4: modalita' renderer.  Con renderer NULL la DLL torna al
+     * comportamento GDI storico. */
+    g_cb.renderer              = g_renderer;
+    g_cb.draw_list_marker      = cb_draw_list_marker;
+    g_cb.draw_image_bitmap     = cb_draw_image_bitmap;
     g_cb_init = 1;
-}
-
-static void update_scrollbars(void)
-{
-    SCROLLINFO si;
-    int doc_h = g_doc_h;
-    int page_content_h = doc_h + 120;
-    int max_s = page_content_h - g_ch;
-    if (max_s < 0) max_s = 0;
-    if (g_scroll > max_s) g_scroll = max_s;
-
-    ZeroMemory(&si, sizeof(si));
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    si.nMin = 0;
-    si.nMax = page_content_h > 0 ? page_content_h - 1 : 0;
-    si.nPage = g_ch > 0 ? g_ch : 1;
-    si.nPos = g_scroll;
-    SetScrollInfo(g_hwnd, SB_VERT, &si, TRUE);
 }
 
 /* --------------------------- worker thread / jobs --------------------------- */
@@ -447,30 +399,15 @@ static int      g_layout_complete = 0;       /* layout completo dopo primo full 
 
 
 
-/* REGRESSION WARNING: content_width() = page_w - g_layout_padding_x is the
+/* REGRESSION WARNING: layout_content_width() = page_w - LAYOUT_PADDING_X is the
  * LAYOUT width passed to ld_render, while paint uses the full page width
- * (g_page_w - 2*g_visual_padding_x). The root-level line boxes get the
+ * (LAY->page_w - 2*LAYOUT_VISUAL_PADDING_X). The root-level line boxes get the
  * layout box centered inside the paint box (offset ~177px). This only works
  * because litehtml clamps line-box layout bounds to the containing block
  * width (see REGRESSION WARNING in litehtml render_inline_context.cpp).
  * If that clamp is removed or broken again, table-cell text of the first
  * column will render inside the second column. */
 
-
-
-/*static int content_width(void) fixed for zooming!
-{
-    int w = g_page_w - g_layout_padding_x; 
-    
-    dbg_log("[TABLE] content_width page_w=%d layout_padding_x=%d result=%d\n", g_page_w, g_layout_padding_x, w);
-    return w > 0 ? w : 1;
-}*/
-static int content_width(void)
-{
-    int w = (int)((g_page_w - g_layout_padding_x) * g_zoom + 1.5);
-    if (w < 1) w = 1;
-    return w;
-}
 static Job *alloc_job(JobKind kind)
 {
     Job *j = (Job *)calloc(1, sizeof(Job));
@@ -586,7 +523,7 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
             LOG_JOB(JOB_RENDER, "start ld_render");
             LOG_RENDER("ld_render called from JOB_RENDER");
             /* Essential trace: one line per full layout, shows the width
-             * contract between viewer and litedocx (see content_width()). */
+             * contract between viewer and litedocx (see layout_content_width()). */
 #if CONSOLE_LOGGING
             fprintf(stderr, "[RENDER] ld_render content_w=%d\n", j->content_w);
 #endif
@@ -650,7 +587,7 @@ static void request_render(int w)
     if (!g_doc || g_load_active)
         return;
 
-    fprintf(stderr, "[RENDER_REQ] w=%d g_render_busy=%d g_zoom=%.2f\n", w, g_render_busy, g_zoom);
+    fprintf(stderr, "[RENDER_REQ] w=%d g_render_busy=%d zoom=%.2f\n", w, g_render_busy, LAY->zoom);
 
     LOG_RENDER("request_render called");
     log_msg("[RENDER] request_render: w=%d g_render_busy=%d\n", w, g_render_busy);
@@ -660,8 +597,8 @@ static void request_render(int w)
         /* Fallback sincrono */
         ld_render(g_doc, w);
         g_doc_content_w = w;
-        g_doc_h = ld_height(g_doc);
-        update_scrollbars();
+        g_doc_h = document_height(g_doc);
+        layout_update_scrollbars(g_hwnd, g_doc_h);
         InvalidateRect(g_hwnd, NULL, FALSE);
         return;
     }
@@ -716,7 +653,7 @@ static void request_render_range(int first_page, int last_page)
     if (!g_worker_started)
     {
         /* Fallback sincrono */
-        ld_render_range(g_doc, first_page, g_ch, content_width());
+        ld_render_range(g_doc, first_page, LAY->ch, layout_content_width());
         {
             int page_count = ld_get_page_count(g_doc);
             if (page_count > 0)
@@ -724,8 +661,8 @@ static void request_render_range(int first_page, int last_page)
             else if (last_page > g_last_rendered_page)
                 g_last_rendered_page = last_page;
         }
-        g_doc_h = ld_height(g_doc);
-        update_scrollbars();
+        g_doc_h = document_height(g_doc);
+        layout_update_scrollbars(g_hwnd, g_doc_h);
         InvalidateRect(g_hwnd, NULL, FALSE);
         return;
     }
@@ -746,8 +683,8 @@ static void request_render_range(int first_page, int last_page)
     if (!j)
         return;
     j->doc = g_doc;
-    j->content_w = content_width();
-    j->viewport_h = g_ch;
+    j->content_w = layout_content_width();
+    j->viewport_h = LAY->ch;
     j->first_page = first_page;
     j->last_page = last_page;
     g_render_busy = 1;
@@ -789,10 +726,10 @@ static void apply_loaded_doc(unsigned id, void *doc)
         g_doc_content_w = g_load_content_w;
 
         /* Set visual padding so layout box is centered inside visual box */
-        ld_set_visual_padding(g_doc, g_visual_padding_x, g_visual_margin_y);
+        ld_set_visual_padding(g_doc, LAYOUT_VISUAL_PADDING_X, LAYOUT_VISUAL_MARGIN_Y);
         /* Set fixed justification width = paintable width (viewport - 2*visual_padding)
-         * This keeps justified text stable when g_layout_padding_x changes. */
-        int justification_w = g_page_w - 2 * g_visual_padding_x;
+         * This keeps justified text stable when LAYOUT_PADDING_X changes. */
+        int justification_w = LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X;
         if (justification_w > 0)
             ld_set_justification_width(g_doc, justification_w);
 
@@ -804,7 +741,7 @@ static void apply_loaded_doc(unsigned id, void *doc)
             sprintf(g_title, "docxview_new - %s", p ? p + 1 : g_load_path);
         }
         SetWindowTextA(g_hwnd, g_title);
-        g_scroll = 0;
+        LAY->scroll = 0;
 
         /* Stima altezza documento SENZA chiamare ld_get_page_height/count
          * (possono triggerare full render sul thread UI - vedi D7). */
@@ -818,18 +755,18 @@ static void apply_loaded_doc(unsigned id, void *doc)
         g_render_pending_width = -1;
         g_render_pending_first_page = -1;
         g_render_pending_last_page = -1;
-        request_render(content_width());
+        request_render(layout_content_width());
 
-        update_scrollbars();
+        layout_update_scrollbars(g_hwnd, g_doc_h);
         InvalidateRect(g_hwnd, NULL, TRUE);
     }
     else
     {
         sprintf(g_title, "docxview_new - [Errore apertura file]");
         SetWindowTextA(g_hwnd, g_title);
-        if (g_doc && content_width() != g_doc_content_w)
-            request_render(content_width());
-        update_scrollbars();
+        if (g_doc && layout_content_width() != g_doc_content_w)
+            request_render(layout_content_width());
+        layout_update_scrollbars(g_hwnd, g_doc_h);
         InvalidateRect(g_hwnd, NULL, TRUE);
     }
 }
@@ -839,7 +776,7 @@ static void on_render_done(void *doc, int used_w)
     if (g_shutdown)
         return;
 
-    fprintf(stderr, "[RENDER_DONE] used_w=%d g_render_busy=%d g_zoom=%.2f\n", used_w, g_render_busy, g_zoom);
+    fprintf(stderr, "[RENDER_DONE] used_w=%d g_render_busy=%d zoom=%.2f\n", used_w, g_render_busy, LAY->zoom);
 
     LOG_RENDER("on_render_done called");
     log_msg("[RENDER] on_render_done: used_w=%d g_render_busy=%d g_render_pending_width=%d g_render_pending_first=%d g_render_pending_last=%d\n",
@@ -852,7 +789,7 @@ static void on_render_done(void *doc, int used_w)
         return;
 
     g_doc_content_w = used_w;
-    g_doc_h = ld_height(doc);
+    g_doc_h = document_height(doc);
 
     /* ld_render_range oggi, al primo richiamo, fa full layout di tutto il
      * documento. Quindi dopo il primo RENDER_DONE possiamo considerare
@@ -888,7 +825,7 @@ static void on_render_done(void *doc, int used_w)
         /* Non processare pending range se c'era pending width */
         g_render_pending_first_page = -1;
         g_render_pending_last_page = -1;
-        update_scrollbars();
+        layout_update_scrollbars(g_hwnd, g_doc_h);
         InvalidateRect(g_hwnd, NULL, FALSE);
         return;
     }
@@ -908,7 +845,7 @@ static void on_render_done(void *doc, int used_w)
     g_render_pending_first_page = -1;
     g_render_pending_last_page = -1;
     g_render_used_w = -1;
-    update_scrollbars();
+    layout_update_scrollbars(g_hwnd, g_doc_h);
     InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
@@ -918,8 +855,7 @@ static void start_async_load(const char *path)
     int cw;
 
     init_callbacks();
-    compute_page();
-    cw = content_width();
+    cw = layout_content_width();
 
     lstrcpynA(g_load_path, path, sizeof(g_load_path));
     g_load_gen++;
@@ -935,7 +871,7 @@ static void start_async_load(const char *path)
     if (!g_worker_started)
     {
         /* Fallback sincrono: il worker non è disponibile. */
-        void *doc = ld_open_file(path, &g_cb, g_page_w, g_ch > 0 ? g_ch : 600);
+        void *doc = ld_open_file(path, &g_cb, LAY->page_w, LAY->ch > 0 ? LAY->ch : 600);
         /* D1: NON chiamare ld_render qui - apply_loaded_doc lancerà request_render */
         g_load_active = 0;
         apply_loaded_doc(g_load_gen, doc);
@@ -952,8 +888,8 @@ static void start_async_load(const char *path)
     j->id = g_load_gen;
     lstrcpynA(j->path, path, sizeof(j->path));
     j->content_w = cw;
-    j->viewport_w = g_page_w;
-    j->viewport_h = g_ch > 0 ? g_ch : 600;
+    j->viewport_w = LAY->page_w;
+    j->viewport_h = LAY->ch > 0 ? LAY->ch : 600;
     enqueue_job(j);
 }
 
@@ -969,152 +905,127 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE:
         // log_msg("[CREATE] WM_CREATE\n");
         g_hwnd = hwnd;
-        compute_page();
-        g_page_left_doc = (double)g_page_x;
-        g_br_desk = CreateSolidBrush(RGB(240, 240, 242));
-        g_br_shadow = CreateSolidBrush(RGB(190, 190, 195));
-        g_br_border = CreateSolidBrush(RGB(210, 210, 215));
+#ifdef __TINYC__
+        if (g_renderer_kind == RENDERER_D2D)
+            fprintf(stderr, "[RENDERER] d2d non disponibile su TCC, uso GDI\n");
+        g_renderer = renderer_gdi_create();
+#else
+        /* Crea IDWriteFactory per DirectWrite (text rendering migliorato).
+           DWriteCreateFactory non richiede CoInitialize quando si usa il
+           tipo SHARED; creiamo qui l'factory sul thread UI prima del renderer. */
+        {
+            static const GUID IID_IDWriteFactory = 
+                {0xb859ee5a, 0xd838, 0x4b5b, {0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48}};
+            if (SUCCEEDED(DWriteCreateFactory(
+                    DWRITE_FACTORY_TYPE_SHARED,
+                    &IID_IDWriteFactory,
+                    (IUnknown **)&g_dwrite_factory))) {
+                fprintf(stderr, "[DWRITE] factory created ok\n");
+            } else {
+                fprintf(stderr, "[DWRITE] factory creation failed, falling back to GDI text\n");
+                g_dwrite_factory = NULL;
+            }
+        }
+        if (g_renderer_kind == RENDERER_D2D) {
+            g_renderer = renderer_d2d_create(g_dwrite_factory,
+                    NULL, NULL);  /* resolver opzionale: NULL = usa GDI interop interno */
+            if (!g_renderer) {
+                fprintf(stderr, "[RENDERER] Fallito D2D, fallback a GDI\n");
+                g_renderer = renderer_gdi_create();
+            }
+        } else {
+            g_renderer = renderer_gdi_create();
+        }
+#endif
+        if (!g_renderer) {
+            MessageBoxA(hwnd, "Impossibile creare il renderer.", "Errore",
+                        MB_OK | MB_ICONERROR);
+            return -1;
+        }
         break;
 
     case WM_SIZE:
         // log_msg("[SIZE] WM_SIZE cw=%d ch=%d\n", LOWORD(lp), HIWORD(lp));
-        g_cw = LOWORD(lp);
-        g_ch = HIWORD(lp);
-        {
-            HDC hdc = GetDC(hwnd);
-            if (g_memold) SelectObject(g_memdc, g_memold);
-            if (g_membmp) DeleteObject(g_membmp);
-            if (g_memdc) DeleteDC(g_memdc);
-
-            g_memdc = CreateCompatibleDC(hdc);
-            g_membmp = CreateCompatibleBitmap(hdc, g_cw > 0 ? g_cw : 1, g_ch > 0 ? g_ch : 1);
-            g_memold = SelectObject(g_memdc, g_membmp);
-            g_memw = g_cw;
-            g_memh = g_ch;
-            ReleaseDC(hwnd, hdc);
-        }
-        compute_page();
-        g_page_left_doc = (double)g_page_x;
+        layout_resize(LOWORD(lp), HIWORD(lp));
+        if (g_renderer)
+            g_renderer->vtbl->BeginDraw(g_renderer, hwnd, LAY->cw, LAY->ch);
         if (g_doc && !g_load_active) {
             /* Update justification width on page size change */
-            int justification_w = g_page_w - 2 * g_visual_padding_x;
+            int justification_w = LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X;
             if (justification_w > 0)
                 ld_set_justification_width(g_doc, justification_w);
-            int content_w = content_width();
+            int content_w = layout_content_width();
             /* Il layout viene rifatto dal worker: la UI non si blocca.
              * Durante il render il paint mostra solo lo sfondo. */
             /* Soglia 2px per evitare render spuri su resize minimi (es. WM_SIZE iniziale) */
             if (abs(content_w - g_doc_content_w) > 2)
                 request_render(content_w);
         }
-        update_scrollbars();
+        layout_update_scrollbars(hwnd, g_doc_h);
         InvalidateRect(hwnd, NULL, FALSE);
         break;
 
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
-        RECT rc_all = {0, 0, g_cw, g_ch};
 
-        fprintf(stderr, "[PAINT] g_zoom=%.2f g_render_busy=%d g_doc=%p scroll=%d\n", g_zoom, g_render_busy, g_doc, g_scroll);
+        fprintf(stderr, "[PAINT] zoom=%.2f g_render_busy=%d g_doc=%p scroll=%d\n",
+                LAY->zoom, g_render_busy, g_doc, LAY->scroll);
 
-        if (!g_memdc) {
-            FillRect(hdc, &rc_all, g_br_desk);
+        if (!g_renderer ||
+            !g_renderer->vtbl->BeginDraw(g_renderer, hwnd, LAY->cw, LAY->ch)) {
+            RECT rc_all = {0, 0, LAY->cw, LAY->ch};
+            FillRect(hdc, &rc_all, (HBRUSH)(COLOR_WINDOW + 1));
             EndPaint(hwnd, &ps);
             break;
         }
 
-        FillRect(g_memdc, &rc_all, g_br_desk);
+        /* Sfondo scrivania */
+        g_renderer->vtbl->FillRect(g_renderer, 0, 0, LAY->cw, LAY->ch,
+                                   RGB(240, 240, 242));
 
-        /* Se un render è in corso il documento viene modificato dal worker:
-         * non chiamare ld_draw per evitare accessi concorrenti. */
-        if (g_doc && !g_render_busy) {
-            int pt = PAGE_TOP_GAP - g_scroll;
-            int pw = (int)(g_page_w * g_zoom);
-            int px = (int)(g_page_left_doc * g_zoom) - g_scroll_x;
-            int py = pt;
-            int ph = (int)((g_doc_h + 120) * g_zoom);
-            RECT rc_shd = {px + PAGE_SHADOW_OFF, py + PAGE_SHADOW_OFF,
-                           px + pw + PAGE_SHADOW_OFF, py + ph + PAGE_SHADOW_OFF};
-            RECT rc_page = {px, py, px + pw, py + ph};
+        /* Fase 3: la geometria di paint vive in func_gdi/document.c.
+         * Se un render e' in corso il documento viene modificato dal worker:
+         * document_draw non chiama ld_draw e mostra la pagina bianca. */
+        document_draw(g_doc, g_renderer, g_doc_h, g_render_busy);
 
-            FillRect(g_memdc, &rc_shd, g_br_shadow);
-            FillRect(g_memdc, &rc_page, (HBRUSH)GetStockObject(WHITE_BRUSH));
-            FrameRect(g_memdc, &rc_page, g_br_border);
-
-            /* Margini interni pagina: visual padding scalato per zoom */
-            double k = 1.0 + 1.18*(g_zoom-1.0) + 0.09*(g_zoom-1.0)*(g_zoom-1.0);
-            int page_margin_x = (int)(g_visual_padding_x * (g_zoom*k)+1.1);
-            int page_margin_y = (int)(g_visual_margin_y * (g_zoom*0.2));
-            int content_w = pw - 2 * page_margin_x;
-            int content_x = px + page_margin_x;
-            int content_y = py + page_margin_y;
-
-            /* Clip rect = intersezione area contenuto + viewport visibile */
-            RECT rc_content = {content_x, content_y, content_x + content_w, content_y + ph};
-            RECT rc_viewport = {0, 0, g_cw, g_ch};
-            RECT rc_clip;
-            IntersectRect(&rc_clip, &rc_content, &rc_viewport);
-            
-            fprintf(stderr, "[PAINT] calling ld_draw: content=(%d,%d,%d) clip=(%d,%d,%d,%d)\n",
-                    content_x, content_y, content_w, rc_clip.left, rc_clip.top, rc_clip.right - rc_clip.left, rc_clip.bottom - rc_clip.top);
-            
-            dbg_log("[TABLE] WM_PAINT page_w=%d page_x=%d layout_padding_x=%d content_w=%d content_x=%d content_y=%d clip=(%d,%d,%d,%d)\n",
-                    g_page_w, g_page_x, g_layout_padding_x, content_w, content_x, content_y,
-                    rc_clip.left, rc_clip.top, rc_clip.right, rc_clip.bottom);
-
-            ld_draw(g_doc, g_memdc, content_x, content_y,
-                    rc_clip.left, rc_clip.top, rc_clip.right - rc_clip.left, rc_clip.bottom - rc_clip.top);
-        } else if (g_doc && g_render_busy) {
-            /* Layout in corso: mostra la pagina bianca senza contenuto. */
-            int pt = PAGE_TOP_GAP - g_scroll;
-            int pw = (int)(g_page_w * g_zoom);
-            int px = (int)(g_page_left_doc * g_zoom) - g_scroll_x;
-            int py = pt;
-            int ph = (int)((g_doc_h + 120) * g_zoom);
-            RECT rc_page = {px, py, px + pw, py + ph};
-            FillRect(g_memdc, &rc_page, (HBRUSH)GetStockObject(WHITE_BRUSH));
-            FrameRect(g_memdc, &rc_page, g_br_border);
-            fprintf(stderr, "[PAINT] render busy, showing blank page\n");
-        }
-
-        BitBlt(hdc, 0, 0, g_cw, g_ch, g_memdc, 0, 0, SRCCOPY);
+        g_renderer->vtbl->Present(g_renderer, hdc, LAY->cw, LAY->ch);
         EndPaint(hwnd, &ps);
         break;
     }
 
     case WM_VSCROLL: {
         SCROLLINFO si;
-        int old_s = g_scroll;
+        int old_s = LAY->scroll;
         int doc_h = g_doc_h;
-        int max_s = (doc_h + 120) - g_ch;
+        int max_s = (doc_h + 120) - LAY->ch;
         if (max_s < 0) max_s = 0;
 
         switch (LOWORD(wp)) {
-        case SB_LINEUP:   g_scroll -= 30; break;
-        case SB_LINEDOWN: g_scroll += 30; break;
-        case SB_PAGEUP:   g_scroll -= g_ch / 2; break;
-        case SB_PAGEDOWN: g_scroll += g_ch / 2; break;
+        case SB_LINEUP:   LAY->scroll -= 30; break;
+        case SB_LINEDOWN: LAY->scroll += 30; break;
+        case SB_PAGEUP:   LAY->scroll -= LAY->ch / 2; break;
+        case SB_PAGEDOWN: LAY->scroll += LAY->ch / 2; break;
         case SB_THUMBTRACK:
             ZeroMemory(&si, sizeof(si));
             si.cbSize = sizeof(si);
             si.fMask = SIF_TRACKPOS;
             GetScrollInfo(hwnd, SB_VERT, &si);
-            g_scroll = si.nTrackPos;
+            LAY->scroll = si.nTrackPos;
             break;
         }
-        if (g_scroll < 0) g_scroll = 0;
-        if (g_scroll > max_s) g_scroll = max_s;
-        if (g_scroll != old_s) {
-            SetScrollPos(hwnd, SB_VERT, g_scroll, TRUE);
+        if (LAY->scroll < 0) LAY->scroll = 0;
+        if (LAY->scroll > max_s) LAY->scroll = max_s;
+        if (LAY->scroll != old_s) {
+            SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
             InvalidateRect(hwnd, NULL, FALSE);
             LOG_SCROLL("WM_VSCROLL scroll changed");
             log_msg("[SCROLL] WM_VSCROLL: scroll=%d g_layout_complete=%d g_last_rendered_page=%d\n",
-                    g_scroll, g_layout_complete, g_last_rendered_page);
+                    LAY->scroll, g_layout_complete, g_last_rendered_page);
             /* FASE 5/6: Trigger on-demand page rendering SOLO se layout non completo */
             if (g_doc && g_page_h_est > 0 && !g_layout_complete) {
-                int visible_first = g_scroll / g_page_h_est;
-                int visible_last = (g_scroll + g_ch) / g_page_h_est + 1; /* +1 lookahead */
+                int visible_first = LAY->scroll / g_page_h_est;
+                int visible_last = (LAY->scroll + LAY->ch) / g_page_h_est + 1; /* +1 lookahead */
                 int page_count = ld_get_page_count(g_doc);
                 if (visible_last >= page_count) visible_last = page_count - 1;
                 if (visible_first < 0) visible_first = 0;
@@ -1132,42 +1043,31 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         int delta = GET_WHEEL_DELTA_WPARAM(wp);
 
         if (wp & MK_CONTROL) {
-            double old_zoom = g_zoom;
+            double old_zoom = LAY->zoom;
+            double new_zoom;
 
             /* Aggiorna zoom */
             if (delta > 0)
-                g_zoom = (old_zoom + ZOOM_STEP < ZOOM_MAX) ? old_zoom + ZOOM_STEP : ZOOM_MAX;
+                new_zoom = (old_zoom + LAYOUT_ZOOM_STEP < LAYOUT_ZOOM_MAX)
+                               ? old_zoom + LAYOUT_ZOOM_STEP : LAYOUT_ZOOM_MAX;
             else
-                g_zoom = (old_zoom - ZOOM_STEP > ZOOM_MIN) ? old_zoom - ZOOM_STEP : ZOOM_MIN;
+                new_zoom = (old_zoom - LAYOUT_ZOOM_STEP > LAYOUT_ZOOM_MIN)
+                               ? old_zoom - LAYOUT_ZOOM_STEP : LAYOUT_ZOOM_MIN;
 
             fprintf(stderr, "[ZOOM] delta=%d old_zoom=%.2f new_zoom=%.2f cursor=(%d,%d) scroll=%d\n",
-                    delta, old_zoom, g_zoom, cx_, cy_, g_scroll);
+                    delta, old_zoom, new_zoom, cx_, cy_, LAY->scroll);
 
-            /* 1. Converti cursore da SCREEN a DOCUMENTO (con old_zoom) */
-            double page_scr_left = g_page_left_doc * old_zoom;
-            double doc_x = ((double)cx_ - page_scr_left) / old_zoom;
-            double doc_y = ((double)g_scroll + (double)cy_) / old_zoom;
+            /* Ancora il punto sotto il cursore, aggiorna scroll e page_left_doc. */
+            layout_zoom_at(new_zoom, cx_, cy_, g_doc_h);
+            layout_update_scrollbars(hwnd, g_doc_h);
 
-            /* 2. Clamp verticale */
-            int max_s = (g_doc_h + 120) - g_ch;
-            if (max_s < 0) max_s = 0;
-            int new_scroll = (int)(doc_y * g_zoom - (double)cy_);
-            if (new_scroll < 0) new_scroll = 0;
-            if (new_scroll > max_s) new_scroll = max_s;
-            g_scroll = new_scroll;
-            update_scrollbars();
-
-            /* 3. Aggiorna page_left_doc perché il punto documento resti fisso */
-            double new_page_scr_left = (double)cx_ - doc_x * g_zoom;
-            g_page_left_doc = new_page_scr_left / g_zoom;
-
-            fprintf(stderr, "[ZOOM] doc_pt=(%.1f,%.1f) new_scroll=%d page_left_doc=%.1f\n",
-                    doc_x, doc_y, g_scroll, g_page_left_doc);
+            fprintf(stderr, "[ZOOM] anchor=(%d,%d) new_scroll=%d page_left_doc=%.1f\n",
+                    cx_, cy_, LAY->scroll, LAY->page_left_doc);
 
             /* CRITICAL: Invalidate font cache in DLL so fonts are recreated at new zoom.
              * When zoom changes, litedocx.dll caches HFONTs by logical font_description
              * (family, size, weight, style, decoration) which does NOT include zoom.
-             * The viewer's cb_create_font() multiplies CSS size by g_zoom, but the DLL
+             * The viewer's cb_create_font() multiplies CSS size by the zoom, but the DLL
              * would return cached HFONTs created at old zoom. We must:
              * 1. Call ld_invalidate_font_cache() to set m_fonts_invalidated flag
              * 2. On next ld_render(), the DLL clears font cache, rebuilds render tree
@@ -1180,8 +1080,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             /* Re-render con nuove dimensioni font */
             if (g_doc && !g_load_active) {
-                fprintf(stderr, "[ZOOM] requesting render with content_width=%d\n", content_width());
-                request_render(content_width());
+                fprintf(stderr, "[ZOOM] requesting render with content_width=%d\n", layout_content_width());
+                request_render(layout_content_width());
             }
 
             InvalidateRect(hwnd, NULL, TRUE);
@@ -1190,20 +1090,20 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         /* Scroll verticale normale */
         int doc_h = g_doc_h;
-        int max_s = (doc_h + 120) - g_ch;
+        int max_s = (doc_h + 120) - LAY->ch;
         if (max_s < 0) max_s = 0;
-        g_scroll -= delta / 3;
-        if (g_scroll < 0) g_scroll = 0;
-        if (g_scroll > max_s) g_scroll = max_s;
-        SetScrollPos(hwnd, SB_VERT, g_scroll, TRUE);
+        LAY->scroll -= delta / 3;
+        if (LAY->scroll < 0) LAY->scroll = 0;
+        if (LAY->scroll > max_s) LAY->scroll = max_s;
+        SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
         InvalidateRect(hwnd, NULL, FALSE);
         LOG_SCROLL("WM_MOUSEWHEEL scroll changed");
         log_msg("[SCROLL] WM_MOUSEWHEEL: scroll=%d g_layout_complete=%d g_last_rendered_page=%d\n",
-                g_scroll, g_layout_complete, g_last_rendered_page);
+                LAY->scroll, g_layout_complete, g_last_rendered_page);
         /* FASE 5/6: Trigger on-demand page rendering SOLO se layout non completo */
         if (g_doc && g_page_h_est > 0 && !g_layout_complete) {
-            int visible_first = g_scroll / g_page_h_est;
-            int visible_last = (g_scroll + g_ch) / g_page_h_est + 1; /* +1 lookahead */
+            int visible_first = LAY->scroll / g_page_h_est;
+            int visible_last = (LAY->scroll + LAY->ch) / g_page_h_est + 1; /* +1 lookahead */
             int page_count = ld_get_page_count(g_doc);
             if (visible_last >= page_count) visible_last = page_count - 1;
             if (visible_first < 0) visible_first = 0;
@@ -1266,12 +1166,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             Job *q = alloc_job(JOB_QUIT);
             if (q) enqueue_job(q);
         }
-        if (g_memold) SelectObject(g_memdc, g_memold);
-        if (g_membmp) DeleteObject(g_membmp);
-        if (g_memdc) DeleteDC(g_memdc);
-        if (g_br_desk) DeleteObject(g_br_desk);
-        if (g_br_shadow) DeleteObject(g_br_shadow);
-        if (g_br_border) DeleteObject(g_br_border);
+        if (g_renderer) {
+            g_renderer->vtbl->Destroy(g_renderer);
+            g_renderer = NULL;
+        }
         if (g_log_file) {
             fclose(g_log_file);
             g_log_file = NULL;
@@ -1291,6 +1189,24 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     HWND hwnd;
     MSG msg;
     HMENU menu, filemenu;
+
+    {
+        char *env = getenv("DOCXVIEW_RENDERER");
+        if (env && _stricmp(env, "d2d") == 0) {
+            g_renderer_kind = RENDERER_D2D;
+        }
+    }
+    if (cmd && cmd[0]) {
+        char *p = strstr(cmd, "--renderer=");
+        if (p) {
+            if (_strnicmp(p + 11, "d2d", 3) == 0) {
+                g_renderer_kind = RENDERER_D2D;
+            } else if (_strnicmp(p + 11, "gdi", 3) == 0) {
+                g_renderer_kind = RENDERER_GDI;
+            }
+        }
+    }
+    fprintf(stderr, "[RENDERER] kind=%s\n", g_renderer_kind == RENDERER_D2D ? "d2d" : "gdi");
 
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);
@@ -1317,9 +1233,11 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     AppendMenuA(menu, MF_POPUP, (UINT_PTR)filemenu, "&File");
     AppendMenuA(menu, MF_STRING, 103, "&?");
 
+    layout_init(900, 700);
+
     hwnd = CreateWindowExW(0, L"DocxViewNewClass", L"docxview_new",
                            WS_OVERLAPPEDWINDOW | WS_VSCROLL,
-                           CW_USEDEFAULT, CW_USEDEFAULT, g_cw, g_ch,
+                           CW_USEDEFAULT, CW_USEDEFAULT, LAY->cw, LAY->ch,
                            NULL, menu, inst, NULL);
     if (!hwnd) return 1;
 

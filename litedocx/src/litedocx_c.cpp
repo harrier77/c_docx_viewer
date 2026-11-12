@@ -421,6 +421,11 @@ namespace
         litehtml::document::ptr doc;
         TextWidthCache       text_width_cache;
 
+        /* Renderer mode: the host owns the draw target.  In this mode the DLL
+         * must not assume an HDC: text is measured/drawn through the host
+         * callbacks and list markers are delegated when possible. */
+        bool has_renderer() const { return cb.renderer != nullptr; }
+
         void rebuild_table_cells()
         {
             table_cells.clear();
@@ -662,6 +667,22 @@ namespace
                 return static_cast<litehtml::pixel_t>(cached);
             }
 
+            /* Renderer mode: the host measures through its own engine so that
+             * layout and painting share the same metrics (D7).  No GDI DC is
+             * used here, which also keeps this call thread-safe on the worker. */
+            if(has_renderer())
+            {
+                if(cb.lh.text_width)
+                {
+                    int width = cb.lh.text_width(text ? text : "", reinterpret_cast<void*>(hFont));
+                    text_width_cache.put(text, hFont, width);
+                    return static_cast<litehtml::pixel_t>(width);
+                }
+                int fallback = static_cast<int>(std::strlen(text ? text : "") * 7 / 2);
+                text_width_cache.put(text, hFont, fallback);
+                return litehtml::pixel_t(fallback);
+            }
+
             if(cb.lh.text_width)
             {
                 if(!m_measure_dc)
@@ -698,7 +719,29 @@ namespace
             
             // Log start pixel for alignment debugging (justified text indent bug)
             log_start_pixel(static_cast<int>(pos.x), static_cast<int>(pos.y), static_cast<int>(pos.width), static_cast<int>(pos.height), text);
-            
+
+            /* Consistent rounding with the legacy measure DC (MM_TEXT uses
+             * integer coordinates).  Computed before both branches so the
+             * renderer and the GDI path receive identical geometry. */
+            int x = static_cast<int>(floor(pos.x + 0.5f));
+            int y = static_cast<int>(floor(pos.y + 0.5f));
+            int w_px = static_cast<int>(floor(pos.width + 0.5f));
+            int h_px = static_cast<int>(floor(pos.height + 0.5f));
+
+            if(has_renderer())
+            {
+                /* Delegate the whole text drawing to the host.  No SelectObject
+                 * or DrawTextW is performed here, so the host renderer (GDI
+                 * today, Direct2D later) is the only text engine. */
+                if(cb.lh.draw_text)
+                {
+                    cb.lh.draw_text(cb.renderer, text ? text : "",
+                                    reinterpret_cast<void*>(hFont),
+                                    to_cref(color), x, y, w_px, h_px);
+                }
+                return;
+            }
+
             if(cb.lh.draw_text)
             {
                 size_t wlen = 0;
@@ -707,11 +750,6 @@ namespace
                 {
                     return;
                 }
-                // Consistent rounding with measure DC (MM_TEXT uses integer coords)
-                int x = static_cast<int>(floor(pos.x + 0.5f));
-                int y = static_cast<int>(floor(pos.y + 0.5f));
-                int w_px = static_cast<int>(floor(pos.width + 0.5f));
-                int h_px = static_cast<int>(floor(pos.height + 0.5f));
                 RECT rc = {x, y, x + w_px, y + h_px};
                 HDC dc = reinterpret_cast<HDC>(hdc);
                 SetMapMode(dc, MM_TEXT);
@@ -745,17 +783,48 @@ namespace
 
         void draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) override
         {
-            HDC dc = reinterpret_cast<HDC>(hdc);
-            if(!dc)
-            {
-                return;
-            }
-
             const int x = static_cast<int>(marker.pos.x);
             const int y = static_cast<int>(marker.pos.y);
             const int w = static_cast<int>(marker.pos.width);
             const int h = static_cast<int>(marker.pos.height);
             if(w <= 0 || h <= 0)
+            {
+                return;
+            }
+
+            /* Renderer mode: let the host draw the marker.  If the callback
+             * declines (returns 0) we fall back to the legacy GDI code below,
+             * which still works when the target happens to be an HDC. */
+            if(has_renderer() && cb.draw_list_marker)
+            {
+                int type = LD_MARKER_OTHER;
+                switch(marker.marker_type)
+                {
+                    case litehtml::list_style_type_circle: type = LD_MARKER_CIRCLE; break;
+                    case litehtml::list_style_type_disc:   type = LD_MARKER_DISC;   break;
+                    case litehtml::list_style_type_square: type = LD_MARKER_SQUARE; break;
+                    case litehtml::list_style_type_none:   type = LD_MARKER_NONE;   break;
+                    default:                               type = LD_MARKER_OTHER;  break;
+                }
+                if(!marker.image.empty())
+                {
+                    type = LD_MARKER_IMAGE;
+                    CachedImage* img = get_image(marker.image, true);
+                    if(img && img->bmp && cb.draw_image_bitmap)
+                    {
+                        cb.draw_image_bitmap(cb.renderer, img->bmp, img->w, img->h, x, y, w, h);
+                        return;
+                    }
+                }
+                if(cb.draw_list_marker(cb.renderer, x, y, w, h, type,
+                                       to_cref(marker.color), marker.image.c_str()))
+                {
+                    return;
+                }
+            }
+
+            HDC dc = reinterpret_cast<HDC>(hdc);
+            if(!dc)
             {
                 return;
             }
@@ -826,7 +895,7 @@ namespace
                         const std::string&) override
         {
             HDC dc = reinterpret_cast<HDC>(hdc);
-            if(!dc || url.empty())
+            if(url.empty())
             {
                 return;
             }
@@ -848,10 +917,27 @@ namespace
 
             if(img->host && cb.draw_image_data)
             {
-                cb.draw_image_data(reinterpret_cast<void*>(hdc), img->host, x, y, w, h);
+                /* In renderer mode the target is the opaque renderer, not an
+                 * HDC.  The host owns both the image and the renderer. */
+                void* target = has_renderer() ? cb.renderer : reinterpret_cast<void*>(hdc);
+                cb.draw_image_data(target, img->host, x, y, w, h);
                 return;
             }
-            if(!img->bmp)
+            if(has_renderer())
+            {
+                /* No host image: hand the internally decoded bitmap to the
+                 * renderer.  There is deliberately no AlphaBlend fallback in
+                 * renderer mode: a non-GDI renderer must never touch an HDC. */
+                if(cb.draw_image_bitmap && img->bmp)
+                {
+                    cb.draw_image_bitmap(cb.renderer, reinterpret_cast<void*>(img->bmp),
+                                         img->w, img->h, x, y, w, h);
+                }
+                return;
+            }
+            /* Legacy GDI fallback: only possible when the draw target is a
+             * real HDC. */
+            if(!img->bmp || !dc)
             {
                 return;
             }
@@ -883,7 +969,8 @@ namespace
                 {
                     ld_table_cell_style style;
                     to_cell_style(*cell, &style);
-                    if(cb.draw_table_cell_bg(reinterpret_cast<void*>(hdc), x, y, w, h, &style))
+                    void* target = has_renderer() ? cb.renderer : reinterpret_cast<void*>(hdc);
+                    if(cb.draw_table_cell_bg(target, x, y, w, h, &style))
                     {
                         return; /* Custom drawing handled it */
                     }
@@ -892,7 +979,8 @@ namespace
             
             if(cb.lh.draw_solid_fill)
             {
-                cb.lh.draw_solid_fill(reinterpret_cast<void*>(hdc), x, y, w, h, to_cref(color));
+                void* target = has_renderer() ? cb.renderer : reinterpret_cast<void*>(hdc);
+                cb.lh.draw_solid_fill(target, x, y, w, h, to_cref(color));
                 return;
             }
 
@@ -936,7 +1024,8 @@ namespace
                 {
                     ld_table_cell_style style;
                     to_cell_style(*cell, &style);
-                    if(cb.draw_table_cell_borders(reinterpret_cast<void*>(hdc), x, y, w, h, &style))
+                    void* target = has_renderer() ? cb.renderer : reinterpret_cast<void*>(hdc);
+                    if(cb.draw_table_cell_borders(target, x, y, w, h, &style))
                     {
                         return; /* Custom drawing handled it */
                     }
@@ -945,7 +1034,8 @@ namespace
             
             if(cb.lh.draw_borders)
             {
-                cb.lh.draw_borders(reinterpret_cast<void*>(hdc), x, y, w, h,
+                void* target = has_renderer() ? cb.renderer : reinterpret_cast<void*>(hdc);
+                cb.lh.draw_borders(target, x, y, w, h,
                                 static_cast<int>(borders.left.width), static_cast<int>(borders.top.width),
                                 static_cast<int>(borders.right.width), static_cast<int>(borders.bottom.width),
                                 to_cref(borders.left.color), to_cref(borders.top.color), to_cref(borders.right.color),
@@ -1162,7 +1252,13 @@ namespace
         }
         container->viewport_w = viewport_width > 0 ? viewport_width : 800;
         container->viewport_h = viewport_height > 0 ? viewport_height : 600;
-        container->m_measure_dc = GetDC(nullptr);
+        /* Renderer mode: text measurement is delegated to the host, so the
+         * DLL never needs its own measure DC (and never touches GDI from the
+         * layout worker on the host's behalf). */
+        if(!container->cb.renderer)
+        {
+            container->m_measure_dc = GetDC(nullptr);
+        }
 
         if(h->com_initialized)
         {

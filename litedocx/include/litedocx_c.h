@@ -55,6 +55,17 @@ typedef struct ld_table_cell_style
     const char* valign;           /* "top", "middle", "bottom", or NULL */
 } ld_table_cell_style;
 
+/* List marker shapes passed to draw_list_marker. */
+typedef enum ld_list_marker_type
+{
+    LD_MARKER_NONE   = 0,  /* nothing to draw */
+    LD_MARKER_CIRCLE = 1,  /* hollow circle */
+    LD_MARKER_DISC   = 2,  /* filled disc (default bullet) */
+    LD_MARKER_SQUARE = 3,  /* filled square */
+    LD_MARKER_IMAGE  = 4,  /* image marker; 'image' is the media name */
+    LD_MARKER_OTHER  = 5   /* numbered / alpha / roman: text is drawn separately */
+} ld_list_marker_type;
+
 typedef struct ld_callbacks
 {
     lh_callbacks lh;
@@ -72,6 +83,28 @@ typedef struct ld_callbacks
                               const ld_table_cell_style* style);
     int (*draw_table_cell_borders)(void* hdc, int x, int y, int w, int h,
                                    const ld_table_cell_style* style);
+
+    /* Opaque host renderer (added at the end to preserve the layout of the
+     * previous fields).  When non-NULL, litedocx runs in "renderer mode":
+     * text measurement/drawing and list markers are delegated to the host
+     * callbacks instead of being done with GDI inside the DLL.
+     * Pass NULL to keep the legacy GDI behaviour. */
+    void* renderer;
+
+    /* Optional list marker hook (renderer mode).  Coordinates are in
+     * document space.  'image' is the marker image name, or NULL/empty.
+     * Return 1 if the marker was drawn, 0 to let litedocx fall back to the
+     * legacy GDI drawing for this marker. */
+    int (*draw_list_marker)(void* target, int x, int y, int w, int h,
+                            int marker_type, unsigned color, const char* image);
+
+    /* Optional bitmap hook (renderer mode).  When load_image_data is NULL,
+     * litedocx decodes the image itself and hands the native GDI bitmap to
+     * this callback; the host draws it through its renderer.  When both this
+     * and draw_image_data are NULL, images are skipped in renderer mode
+     * (no AlphaBlend fallback). */
+    void (*draw_image_bitmap)(void* target, void* native_bitmap,
+                              int src_w, int src_h, int x, int y, int w, int h);
 } ld_callbacks;
 
 /* Open a .docx from disk or from a complete ZIP image in memory. */
@@ -97,6 +130,10 @@ void ld_draw(void* doc, void* hdc, int x, int y, int clip_x, int clip_y, int cli
 
 int ld_width(void* doc);
 int ld_height(void* doc);
+/* Page-range / on-demand layout helpers */
+int ld_get_page_count(void* doc);
+int ld_get_page_height(void* doc, int page_idx);
+int ld_render_range(void* doc, int page_idx, int viewport_h, int max_width);
 
 /* Page size of the first/active section, in CSS pixels. 0 when unknown. */
 int ld_page_width(void* doc);
