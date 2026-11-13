@@ -45,6 +45,9 @@ Without arguments opens `File → Open` dialog.
 | Key / Action | Effect |
 |---|---|
 | Mouse wheel / ↑ ↓ / PgUp PgDn / Home End | Scroll |
+| Middle-drag | Pan (horizontal + vertical, layout space) |
+| `Shift` + wheel | Pan horizontal |
+| `Ctrl` + wheel | Zoom (GDI: re-layout; D2D: pure scale, no re-layout) |
 | `Ctrl+O` | Open another `.docx` |
 | `F5` | Reload current file |
 | `Esc` | Close |

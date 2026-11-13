@@ -74,11 +74,29 @@ static const float    G_ZOOM_D2D_MAX = 3.0f;
 
 static int    g_doc_h;               /* altezza layout, cache lato UI */
 
+/* Allinea il layout al fattore di scala effettivo di scroll/scroll_x.
+ * GDI: scroll e scroll_x sono gia' pixel schermo (lo zoom e' cotto in
+ * LAY->zoom e nei font) -> view_scale 1.0.
+ * D2D: il layout resta a zoom 1.0, scroll/scroll_x sono pixel di layout e
+ * il renderer li moltiplica per g_zoom_d2d -> view_scale = g_zoom_d2d.
+ * Da chiamare ad ogni cambio di zoom/dimensioni, prima di layout_pan() e
+ * layout_update_scrollbars(). */
+static void sync_view_scale(void)
+{
+    if (g_renderer_kind == RENDERER_D2D)
+        layout_set_view_scale(g_zoom_d2d > 0.0f ? (double)g_zoom_d2d : 1.0);
+    else
+        layout_set_view_scale(1.0);
+}
+
 static char      g_path[MAX_PATH];
 static char      g_title[300];
 /* g_url rimosso: serviva al vecchio docxview.c per aprire i link via
  * ShellExecute; ora cb_on_anchor_click riceve l'URL come parametro. */
 static char      g_cur[32] = "arrow";
+/* Pan con tasto centrale: ancora del drag (px schermo). */
+static int       g_pan_active;
+static int       g_pan_x, g_pan_y;
 static FILE     *g_log_file = NULL;
 #if ENABLE_FILE_LOGGING
 static char      g_log_path[MAX_PATH];
@@ -765,6 +783,9 @@ static void apply_loaded_doc(unsigned id, void *doc)
         }
         SetWindowTextA(g_hwnd, g_title);
         LAY->scroll = 0;
+        LAY->scroll_x = 0;
+        LAY->pan_rem_x = 0.0;
+        LAY->pan_rem_y = 0.0;
 
         /* Stima altezza documento SENZA chiamare ld_get_page_height/count
          * (possono triggerare full render sul thread UI - vedi D7). */
@@ -975,6 +996,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SIZE:
         // log_msg("[SIZE] WM_SIZE cw=%d ch=%d\n", LOWORD(lp), HIWORD(lp));
         layout_resize(LOWORD(lp), HIWORD(lp));
+        sync_view_scale();
         /* NON chiamare BeginDraw qui: in WM_SIZE non si disegna nulla.
          * Il back buffer viene (ri)allocato da BeginDraw in WM_PAINT, che e'
          * l'unico punto in cui viene bilanciato da Present/EndPaint.
@@ -1025,6 +1047,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
          * EndPaint, altrimenti la pagina resta vuota e si genera un loop
          * di repaint (EndPaint mai chiamato). */
         if (g_renderer_kind == RENDERER_D2D) {
+            /* Riallinea il pan orizzontale ai limiti della nuova scala:
+             * la larghezza del viewport in px di layout dipende dallo zoom. */
+            sync_view_scale();
+            layout_clamp_scroll_x();
             g_renderer->vtbl->SetTransform(g_renderer,
                                            g_zoom_d2d, 0.0f,
                                            0.0f, g_zoom_d2d,
@@ -1054,6 +1080,54 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         EndPaint(hwnd, &ps);
         break;
     }
+
+    /* ---- Pan con tasto centrale (o trascinamento col tasto destro non
+     * gestito altrove): sposta il contenuto via scroll_x/scroll, cioe' in
+     * coordinate di LAYOUT. Nessun re-render: clip, scrollbar e ancoraggio
+     * dello zoom restano coerenti, e vale identico per GDI e D2D. ---- */
+    case WM_SETCURSOR:
+        /* Cursore "sposta" durante il pan col tasto centrale. */
+        if (LOWORD(lp) == HTCLIENT && g_pan_active) {
+            SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+            return TRUE;
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+
+    case WM_MBUTTONDOWN:
+        if (g_doc) {
+            g_pan_active = 1;
+            g_pan_x = (short)LOWORD(lp);
+            g_pan_y = (short)HIWORD(lp);
+            SetCapture(hwnd);
+            SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+        }
+        return 0;
+
+    case WM_MOUSEMOVE:
+        if (g_pan_active) {
+            int x = (short)LOWORD(lp);
+            int y = (short)HIWORD(lp);
+
+            sync_view_scale();
+            layout_pan(x - g_pan_x, y - g_pan_y, g_doc_h);
+            g_pan_x = x;
+            g_pan_y = y;
+            SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+
+    case WM_MBUTTONUP:
+        if (g_pan_active) {
+            g_pan_active = 0;
+            ReleaseCapture();
+        }
+        return 0;
+
+    case WM_CAPTURECHANGED:
+        g_pan_active = 0;
+        return 0;
 
     case WM_VSCROLL: {
         SCROLLINFO si;
@@ -1122,6 +1196,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 fprintf(stderr, "[ZOOM-D2D] delta=%d old=%.2f new=%.2f cursor=(%d,%d)\n",
                         delta, old_zoom, new_zoom, cx_, cy_);
                 g_zoom_d2d = new_zoom;
+                /* La scala del renderer e' ancorata all'origine: senza questa
+                 * compensazione la pagina (centrata) trasla verso destra ad
+                 * ogni zoom. layout_zoom_view sposta solo scroll/scroll_x
+                 * (coordinate di layout): nessun re-render. */
+                sync_view_scale();
+                layout_zoom_view((double)old_zoom, (double)new_zoom, g_doc_h);
+                SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
@@ -1143,6 +1224,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             /* Ancora il punto sotto il cursore, aggiorna scroll e page_left_doc. */
             layout_zoom_at(new_zoom, cx_, cy_, g_doc_h);
+            sync_view_scale();
             layout_update_scrollbars(hwnd, g_doc_h);
 
             fprintf(stderr, "[ZOOM] anchor=(%d,%d) new_scroll=%d page_left_doc=%.1f\n",
@@ -1169,6 +1251,16 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
 
             InvalidateRect(hwnd, NULL, TRUE);
+            return 0;
+        }
+
+        /* Shift+rotella: pan orizzontale (stessa autorita' del pan: scroll_x).
+         * Non tocca il layout del documento: nessun re-render. */
+        if (wp & MK_SHIFT) {
+            sync_view_scale();
+            layout_pan(delta / 3, 0, g_doc_h);
+            SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
+            InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
 

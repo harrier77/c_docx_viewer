@@ -11,7 +11,9 @@ static Layout g_layout = {
     PAGE_MAX_W, 0,      /* page_w, page_x */
     1.0,                /* zoom */
     0, 0,               /* scroll, scroll_x */
-    0.0                 /* page_left_doc */
+    0.0,                /* page_left_doc */
+    1.0,                /* view_scale */
+    0.0, 0.0            /* pan_rem_x, pan_rem_y */
 };
 
 Layout *layout_get(void)
@@ -78,6 +80,141 @@ int layout_max_scroll(int doc_h)
     return max_s < 0 ? 0 : max_s;
 }
 
+void layout_set_view_scale(double scale)
+{
+    if (scale <= 0.0)
+        scale = 1.0;
+    g_layout.view_scale = scale;
+}
+
+/* Limiti di scroll_x nelle STESSE unita' di scroll_x, che sono:
+ *   GDI  : pixel schermo  (px = page_left_doc*zoom   - scroll_x)
+ *   D2D  : pixel di layout (px = page_left_doc*1.0    - scroll_x, poi il
+ *          renderer moltiplica per g_zoom_d2d)
+ * view_scale = px schermo per unita' di scroll (GDI: 1.0, D2D: zoom).
+ *
+ * Intervallo VOLUTAMENTE permissivo: la pagina puo' essere trascinata fino
+ * a lasciare 1 px visibile ai due bordi. Un intervallo "stretto" (bordi
+ * pagina a filo dei bordi viewport) sarebbe piu' elegante ma, con lo zoom
+ * D2D ancorato all'origine, il clamp farebbe SALTARE la pagina al primo
+ * pan dopo uno zoom. In piu' 0 (vista di default) e' sempre valido, cosi'
+ * resize/zoom non spostano mai il contenuto da soli. */
+static void layout_scroll_x_limits(int *lo, int *hi)
+{
+    double sc = g_layout.view_scale > 0.0 ? g_layout.view_scale : 1.0;
+    double view_w = (double)g_layout.cw / sc;       /* viewport in unita' di scroll */
+    double pl = g_layout.page_left_doc * g_layout.zoom;
+    double pw = (double)g_layout.page_w * g_layout.zoom;
+    double a = pl - view_w + 1.0;   /* pagina col bordo sinistro al bordo destro */
+    double b = pl + pw - 1.0;       /* pagina col bordo destro al bordo sinistro */
+    double t;
+
+    /* La vista di default (scroll_x = 0) non deve mai essere fuori range. */
+    if (a > 0.0)
+        a = 0.0;
+    if (b < 0.0)
+        b = 0.0;
+    if (b < a) {
+        t = a;
+        a = b;
+        b = t;
+    }
+    if (lo)
+        *lo = (int)(a < 0.0 ? a - 0.5 : a + 0.5);
+    if (hi)
+        *hi = (int)(b < 0.0 ? b - 0.5 : b + 0.5);
+}
+
+void layout_clamp_scroll_x(void)
+{
+    int lo = 0, hi = 0;
+
+    layout_scroll_x_limits(&lo, &hi);
+    if (g_layout.scroll_x < lo)
+        g_layout.scroll_x = lo;
+    if (g_layout.scroll_x > hi)
+        g_layout.scroll_x = hi;
+}
+
+/* Arrotondamento a intero con .5 lontano da zero (simmetrico). */
+static int round_i(double v)
+{
+    return (int)(v < 0.0 ? v - 0.5 : v + 0.5);
+}
+
+/* Applica un delta frazionario (in unita' di scroll) a *val, accumulando il
+ * resto in *rem: senza accumulatore, l'arrotondamento per evento farebbe
+ * muovere il contenuto piu' veloce del cursore quando view_scale != 1
+ * (zoom D2D). Il resto si scarta se si tocca un limite, altrimenti si
+ * accumulerebbe contro il bordo e farebbe saltare il contenuto al ritorno. */
+static int apply_scroll_delta(int *val, double *rem, double delta,
+                              int lo, int hi)
+{
+    int iv, want;
+
+    *rem += delta;
+    iv = round_i(*rem);
+    if (!iv)
+        return 0;
+    *rem -= (double)iv;
+    want = *val + iv;
+    if (want < lo)
+        want = lo;
+    if (want > hi)
+        want = hi;
+    if (want != *val + iv)
+        *rem = 0.0;
+    *val = want;
+    return 1;
+}
+
+void layout_pan(int dx_screen, int dy_screen, int doc_h)
+{
+    double sc = g_layout.view_scale > 0.0 ? g_layout.view_scale : 1.0;
+    int lo, hi;
+
+    if (dx_screen) {
+        /* Trascinando a destra il contenuto segue il mouse -> scroll_x cala. */
+        layout_scroll_x_limits(&lo, &hi);
+        apply_scroll_delta(&g_layout.scroll_x, &g_layout.pan_rem_x,
+                           -(double)dx_screen / sc, lo, hi);
+    }
+    if (dy_screen) {
+        apply_scroll_delta(&g_layout.scroll, &g_layout.pan_rem_y,
+                           -(double)dy_screen / sc, 0, layout_max_scroll(doc_h));
+    }
+}
+
+void layout_zoom_view(double z_old, double z_new, int doc_h)
+{
+    double r, pc, cy;
+    int lo, hi;
+
+    if (z_old <= 0.0)
+        z_old = 1.0;
+    if (z_new <= 0.0)
+        z_new = 1.0;
+    if (z_old == z_new)
+        return;
+
+    r = z_old / z_new;   /* fattore di posizione residuo della vecchia scala */
+
+    /* X: centro pagina invariato. page_left_screen = (pc - scroll_x) * z,
+     * quindi scroll_x_new = pc - (pc - scroll_x_old) * r. */
+    layout_scroll_x_limits(&lo, &hi);
+    pc = g_layout.page_left_doc * g_layout.zoom
+         + 0.5 * (double)g_layout.page_w * g_layout.zoom;
+    apply_scroll_delta(&g_layout.scroll_x, &g_layout.pan_rem_x,
+                       (pc - (double)g_layout.scroll_x) * (1.0 - r), lo, hi);
+
+    /* Y: resta fermo il contenuto al centro della vista.
+     * scroll_new = scroll_old + (ch/2) * (1/z_old - 1/z_new). */
+    cy = 0.5 * (double)g_layout.ch;
+    apply_scroll_delta(&g_layout.scroll, &g_layout.pan_rem_y,
+                       cy * (1.0 / z_old - 1.0 / z_new),
+                       0, layout_max_scroll(doc_h));
+}
+
 void layout_update_scrollbars(HWND hwnd, int doc_h)
 {
     SCROLLINFO si;
@@ -88,6 +225,10 @@ void layout_update_scrollbars(HWND hwnd, int doc_h)
         max_s = 0;
     if (g_layout.scroll > max_s)
         g_layout.scroll = max_s;
+
+    /* Il pan orizzontale segue le dimensioni della pagina/zoom: riallineato
+     * qui perche' questo e' il punto chiamato dopo resize e zoom. */
+    layout_clamp_scroll_x();
 
     ZeroMemory(&si, sizeof(si));
     si.cbSize = sizeof(si);
@@ -102,7 +243,9 @@ void layout_update_scrollbars(HWND hwnd, int doc_h)
 void layout_zoom_at(double new_zoom, int cursor_x, int cursor_y, int doc_h)
 {
     double old_zoom = g_layout.zoom;
-    double page_scr_left = g_layout.page_left_doc * old_zoom;
+    /* Posizione VISIBILE del bordo pagina: include il pan orizzontale.
+     * (Prima scroll_x veniva ignorato: con pan attivo l'ancora sbagliava.) */
+    double page_scr_left = g_layout.page_left_doc * old_zoom - g_layout.scroll_x;
     double doc_x = ((double)cursor_x - page_scr_left) / old_zoom;
     double doc_y = ((double)g_layout.scroll + (double)cursor_y) / old_zoom;
     int max_s = layout_max_scroll(doc_h);
@@ -119,7 +262,9 @@ void layout_zoom_at(double new_zoom, int cursor_x, int cursor_y, int doc_h)
     g_layout.zoom = new_zoom;
 
     new_page_scr_left = (double)cursor_x - doc_x * new_zoom;
-    g_layout.page_left_doc = new_page_scr_left / new_zoom;
+    /* Si toglie di nuovo scroll_x: page_left_doc e' riferito alla pagina
+     * non traslata dal pan (px = page_left_doc*zoom - scroll_x). */
+    g_layout.page_left_doc = (new_page_scr_left + g_layout.scroll_x) / new_zoom;
 }
 
 void layout_page_rect(int doc_h, RECT *page, RECT *shadow)
