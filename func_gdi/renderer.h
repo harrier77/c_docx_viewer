@@ -48,6 +48,14 @@ typedef struct RendererVtbl
     /* Target nativo per ld_draw (GDI: HDC del back buffer). */
     void *(*GetNativeTarget)(Renderer *r);
 
+    /* Transform: imposta la matrice di trasformazione sul render target D2D.
+     * (m11, m12, m21, m22, dx, dy) — formato row-major come D2D1_MATRIX_3X2_F.
+     * Le chiamate successive si sovrappongono (non sono cumulative).
+     * Chiama ResetTransform prima del prossimo frame se serve tornare all'identità.
+     * Funzione opzionale: NULL = comportamento pre-definito (GDI: no-op). */
+    void (*SetTransform)(Renderer *r, float m11, float m12, float m21, float m22, float dx, float dy);
+    void (*ResetTransform)(Renderer *r);
+
     void (*Destroy)(Renderer *r);
 } RendererVtbl;
 

@@ -235,6 +235,17 @@ static void *gdi_get_native_target(Renderer *r)
     return (void *)gdi_of(r)->memdc;
 }
 
+/* GDI: le trasformazioni vengono gestite nel font (cb_create_font) e nel
+ * layout (layout_zoom_at), non qui. Questi sono no-op. */
+static void gdi_set_transform(Renderer *r, float m11, float m12, float m21, float m22, float dx, float dy)
+{
+    (void)r; (void)m11; (void)m12; (void)m21; (void)m22; (void)dx; (void)dy;
+}
+static void gdi_reset_transform(Renderer *r)
+{
+    (void)r;
+}
+
 static void gdi_destroy(Renderer *r)
 {
     GdiRenderer *g = gdi_of(r);
@@ -266,6 +277,8 @@ static const RendererVtbl g_gdi_vtbl = {
     gdi_draw_image,
     gdi_draw_borders,
     gdi_get_native_target,
+    gdi_set_transform,
+    gdi_reset_transform,
     gdi_destroy
 };
 

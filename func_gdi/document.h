@@ -25,7 +25,12 @@ int document_content_width(void);
  *   r            renderer di destinazione
  *   doc_h        altezza layout memorizzata lato UI
  *   render_busy  1 = layout in corso, mostra solo la pagina bianca
+ *   clip_scale   1.0 = clip in coordinate schermo (GDI, invariato).
+ *                Il renderer D2D applica lo zoom al momento del disegno:
+ *                passando 1/zoom si espande l'area logica da disegnare a
+ *                quella che, scalata, copre il viewport (evita di lasciare
+ *                il fondo pagina bianco quando si zooma out).
  * Lascia intatto lo sfondo scrivania: lo riempie il chiamante. */
-void document_draw(void *doc, Renderer *r, int doc_h, int render_busy);
+void document_draw(void *doc, Renderer *r, int doc_h, int render_busy, float clip_scale);
 
 #endif /* DOCUMENT_H */

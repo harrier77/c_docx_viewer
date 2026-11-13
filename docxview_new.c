@@ -62,6 +62,16 @@ typedef enum {
 
 static RendererKind g_renderer_kind = RENDERER_GDI;
 
+/* Zoom D2D puro (solo renderer, nessun re-layout). Usato SOLO quando
+ * g_renderer_kind == RENDERER_D2D. Il valore 1.0f corrisponde a "nessuno zoom".
+ * Il layout resta SEMPRE a LAY->zoom = 1.0: lo zoom e' applicato dal renderer
+ * scalando coordinate e font al momento del disegno (vedi d2d_fill_rect /
+ * d2d_draw_text). Cosi' il root del blocco di testo non viene mai riposizionato
+ * (niente duplicazione/tosatura) e il range puo' essere ampio. */
+static float          g_zoom_d2d     = 1.0f;
+static const float    G_ZOOM_D2D_MIN = 0.3f;
+static const float    G_ZOOM_D2D_MAX = 3.0f;
+
 static int    g_doc_h;               /* altezza layout, cache lato UI */
 
 static char      g_path[MAX_PATH];
@@ -84,17 +94,22 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
     HFONT f;
     TEXTMETRICW tm;
     WCHAR *w;
+    float z;
 
     // CRITICAL: Font creation callback from litedocx.dll/litehtml.
     // The 'size' parameter is the CSS font-size in pixels (e.g., 16px).
-    // We MUST multiply by LAY->zoom to scale the font with zoom level.
     // lfHeight is negative for MatchCellHeight behavior in CreateFontIndirectW.
-    // The litedocx.dll caches HFONTs by logical font_description (family, size, weight,
-    // style, decoration) WITHOUT zoom. When zoom changes, the viewer calls
-    // ld_invalidate_font_cache() which forces the DLL to clear its font cache and
-    // rebuild the render tree, so this callback is invoked again with the new LAY->zoom.
+    //
+    // Zoom: in ENTRAMBI i renderer lo zoom e' cotto nelle metriche del font
+    // (lfHeight, fm->font_size, fm->sub_shift, fm->super_shift).
+    //   GDI : zoom di layout (LAY->zoom) + re-layout, come sempre.
+    //   D2D : il layout resta a zoom 1.0 e i font sono creati a taglia logica;
+    //         e' il renderer che li scala al momento del disegno
+    //         (d_zoom, vedi renderer_d2d.c). Nessun re-layout, nessuno
+    //         spostamento del root del blocco di testo.
+    z = (g_renderer_kind == RENDERER_D2D) ? 1.0f : (float)LAY->zoom;
     fprintf(stderr, "[FONT_CREATE] fam='%s' size=%d bold=%d italic=%d zoom=%.2f -> lfHeight=%d\n",
-            fam ? fam : "NULL", size, bold, italic, LAY->zoom, -(int)(size * LAY->zoom));
+            fam ? fam : "NULL", size, bold, italic, z, -(int)(size * z));
 
     ZeroMemory(&lf, sizeof(lf));
     w = u8_to_w(fam && fam[0] ? fam : "Aptos");
@@ -103,7 +118,7 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
         free(w);
     }
     if (size < 6) size = 6;
-    lf.lfHeight = -(int)(size * LAY->zoom);
+    lf.lfHeight = -(int)(size * z);
     lf.lfWeight = bold ? FW_BOLD : FW_NORMAL;
     lf.lfItalic = (BYTE)(italic ? 1 : 0);
     lf.lfUnderline = (BYTE)(underline ? 1 : 0);
@@ -122,18 +137,20 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
             SelectObject(dc, old);
             ReleaseDC(NULL, dc);
             //fm->font_size = size; to fix for zooming
-            fm->font_size   = (int)(size * LAY->zoom);
-            /* Word usa interlinea 1.15 di default (single spacing).
-             * tm.tmHeight include ascent+descent+internal_leading.
-             * Moltiplichiamo per 1.xx per approssimare lo spacing di Word. */
-            fm->height = (int)(tm.tmHeight * 1.15f);
-            fm->ascent = tm.tmAscent;
-            fm->descent = tm.tmDescent;
-            fm->x_height = tm.tmHeight / 2;
-            fm->ch_width = tm.tmAveCharWidth;
-            fm->draw_spaces = (italic || underline || strike) ? 1 : 0;
-            fm->sub_shift   = (int)(size * LAY->zoom) / 5;
-            fm->super_shift = (int)(size * LAY->zoom) / 3;
+            {
+                fm->font_size   = (int)(size * z);
+                /* Word usa interlinea 1.15 di default (single spacing).
+                 * tm.tmHeight include ascent+descent+internal_leading.
+                 * Moltiplichiamo per 1.xx per approssimare lo spacing di Word. */
+                fm->height = (int)(tm.tmHeight * 1.15f);
+                fm->ascent = tm.tmAscent;
+                fm->descent = tm.tmDescent;
+                fm->x_height = tm.tmHeight / 2;
+                fm->ch_width = tm.tmAveCharWidth;
+                fm->draw_spaces = (italic || underline || strike) ? 1 : 0;
+                fm->sub_shift   = (int)(size * z) / 5;
+                fm->super_shift = (int)(size * z) / 3;
+            }
         }
     }
     return f;
@@ -912,8 +929,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         // log_msg("[CREATE] WM_CREATE\n");
         g_hwnd = hwnd;
 #ifdef __TINYC__
-        if (g_renderer_kind == RENDERER_D2D)
+        if (g_renderer_kind == RENDERER_D2D) {
             fprintf(stderr, "[RENDERER] d2d non disponibile su TCC, uso GDI\n");
+            /* Allinea lo stato: senza renderer D2D niente zoom via renderer,
+             * quindi il viewer deve comportarsi esattamente come in GDI
+             * (zoom di layout, clip_scale = 1.0 in document_draw). */
+            g_renderer_kind = RENDERER_GDI;
+        }
         g_renderer = renderer_gdi_create();
 #else
         /* Crea IDWriteFactory per DirectWrite (text rendering migliorato).
@@ -953,8 +975,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SIZE:
         // log_msg("[SIZE] WM_SIZE cw=%d ch=%d\n", LOWORD(lp), HIWORD(lp));
         layout_resize(LOWORD(lp), HIWORD(lp));
-        if (g_renderer)
-            g_renderer->vtbl->BeginDraw(g_renderer, hwnd, LAY->cw, LAY->ch);
+        /* NON chiamare BeginDraw qui: in WM_SIZE non si disegna nulla.
+         * Il back buffer viene (ri)allocato da BeginDraw in WM_PAINT, che e'
+         * l'unico punto in cui viene bilanciato da Present/EndPaint.
+         * Per il renderer D2D una BeginDraw orfana lascia il render target
+         * con in_draw=1 e senza EndDraw (stato sporco). */
         if (g_doc && !g_load_active) {
             /* Update justification width on page size change */
             int justification_w = LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X;
@@ -986,16 +1011,46 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         }
 
+        /* D2D: zoom == sola trasformazione di scala applicata dal renderer.
+         * Stesso meccanismo dell'esempio di riferimento funzionante
+         * (esempio_zoom_d2d.c), SENZA lo spostamento (dx/dy) del root del
+         * blocco di testo: matrice puramente scalare, ancorata all'origine.
+         *   - il layout NON viene toccato (LAY->zoom resta 1.0): niente
+         *     re-render, niente riposizionamento del blocco, niente
+         *     duplicazione del testo;
+         *   - il renderer scala coordinate e font al momento del disegno
+         *     (d_zoom, vedi renderer_d2d.c: FillRect/FrameRect/DrawText/...).
+         * ATTENZIONE: questo ramo NON deve uscire da WM_PAINT: deve
+         * proseguire con document_draw -> Present (EndDraw + BitBlt) ->
+         * EndPaint, altrimenti la pagina resta vuota e si genera un loop
+         * di repaint (EndPaint mai chiamato). */
+        if (g_renderer_kind == RENDERER_D2D) {
+            g_renderer->vtbl->SetTransform(g_renderer,
+                                           g_zoom_d2d, 0.0f,
+                                           0.0f, g_zoom_d2d,
+                                           0.0f, 0.0f);
+        }
+
         /* Sfondo scrivania */
         g_renderer->vtbl->FillRect(g_renderer, 0, 0, LAY->cw, LAY->ch,
                                    RGB(240, 240, 242));
 
         /* Fase 3: la geometria di paint vive in func_gdi/document.c.
          * Se un render e' in corso il documento viene modificato dal worker:
-         * document_draw non chiama ld_draw e mostra la pagina bianca. */
-        document_draw(g_doc, g_renderer, g_doc_h, g_render_busy);
+         * document_draw non chiama ld_draw e mostra la pagina bianca.
+         * clip_scale = 1/zoom solo per D2D: il renderer scala il disegno, quindi
+         * l'area logica che copre il viewport e' piu' grande quando zoom < 1.
+         * In GDI vale 1.0f (rettangolo identico a prima). */
+        document_draw(g_doc, g_renderer, g_doc_h, g_render_busy,
+                      (g_renderer_kind == RENDERER_D2D)
+                          ? (g_zoom_d2d > 0.0f ? 1.0f / g_zoom_d2d : 1.0f)
+                          : 1.0f);
 
         g_renderer->vtbl->Present(g_renderer, hdc, LAY->cw, LAY->ch);
+        /* Riporta il renderer a scala 1.0 (la trasformata viene reimpostata
+         * a ogni WM_PAINT prima dei draw). No-op per il renderer GDI. */
+        if (g_renderer_kind == RENDERER_D2D)
+            g_renderer->vtbl->ResetTransform(g_renderer);
         EndPaint(hwnd, &ps);
         break;
     }
@@ -1049,6 +1104,29 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         int delta = GET_WHEEL_DELTA_WPARAM(wp);
 
         if (wp & MK_CONTROL) {
+            if (g_renderer_kind == RENDERER_D2D) {
+                /* Percorso D2D: zoom puro del renderer (sola scala, nessun pan,
+                 * nessun re-layout). Il layout e i font restano a scala logica:
+                 * il fattore viene applicato in fase di disegno da
+                 * renderer_d2d.c (d_zoom), quindi basta ridisegnare. */
+                float old_zoom = g_zoom_d2d;
+                float new_zoom;
+                const float step = 0.1f;
+                if (delta > 0)
+                    new_zoom = (old_zoom + step < G_ZOOM_D2D_MAX)
+                                   ? old_zoom + step : G_ZOOM_D2D_MAX;
+                else
+                    new_zoom = (old_zoom - step > G_ZOOM_D2D_MIN)
+                                   ? old_zoom - step : G_ZOOM_D2D_MIN;
+
+                fprintf(stderr, "[ZOOM-D2D] delta=%d old=%.2f new=%.2f cursor=(%d,%d)\n",
+                        delta, old_zoom, new_zoom, cx_, cy_);
+                g_zoom_d2d = new_zoom;
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+
+            /* Percorso GDI: zoom basato su LAY->zoom, con re-layout completo. */
             double old_zoom = LAY->zoom;
             double new_zoom;
 

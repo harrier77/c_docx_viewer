@@ -44,7 +44,7 @@ static void document_draw_blank_page(Renderer *r, int doc_h)
                        DOC_BORDER_COLOR);
 }
 
-void document_draw(void *doc, Renderer *r, int doc_h, int render_busy)
+void document_draw(void *doc, Renderer *r, int doc_h, int render_busy, float clip_scale)
 {
     RECT rc_page, rc_shd, rc_content, rc_clip;
 
@@ -59,6 +59,20 @@ void document_draw(void *doc, Renderer *r, int doc_h, int render_busy)
     }
 
     layout_paint_rects(doc_h, &rc_page, &rc_shd, &rc_content, &rc_clip);
+
+    /* D2D: il renderer scala il disegno di zoom, quindi l'area logica che
+     * finisce a schermo e' piu' grande quando si zooma out (clip_scale > 1).
+     * Con clip_scale == 1.0f (GDI) il rettangolo resta identico. */
+    if (clip_scale > 1.0f) {
+        LONG w = (LONG)((rc_clip.right - rc_clip.left) * clip_scale);
+        LONG h = (LONG)((rc_clip.bottom - rc_clip.top) * clip_scale);
+        rc_clip.right = rc_clip.left + w;
+        rc_clip.bottom = rc_clip.top + h;
+        if (rc_clip.right > rc_content.right)
+            rc_clip.right = rc_content.right;
+        if (rc_clip.bottom > rc_content.bottom)
+            rc_clip.bottom = rc_content.bottom;
+    }
 
     r->vtbl->FillRect(r,
                       rc_shd.left, rc_shd.top,
