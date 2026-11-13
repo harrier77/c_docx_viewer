@@ -23,6 +23,10 @@ EXPORTS
     ld_table_count
     ld_get_table_cells
     ld_free_table_cells
+    ld_paragraph_hit_test
+    ld_paragraph_get_text
+    ld_paragraph_set_text
+    ld_free_string
     ld_last_error
     ld_version
     ld_destroy

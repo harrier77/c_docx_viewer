@@ -14,6 +14,8 @@
 #include <wincodec.h>
 
 #include <litehtml.h>
+#include <litehtml/el_space.h>
+#include <litehtml/el_text.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -402,6 +404,208 @@ namespace
         // Logging disabled
     }
 
+    /* Plain-text extraction for the paragraph editing ABI.  html_tag::get_text
+     * concatenates el_text children but ignores <br>, and the builder encodes
+     * runs of spaces as U+00A0.  Walk the element tree explicitly so the text
+     * shown in the editor round-trips through ld_paragraph_set_text. */
+    static void collect_plain_text(const litehtml::element::ptr& el, std::string& out)
+    {
+        if(!el)
+        {
+            return;
+        }
+        if(el->is_break())
+        {
+            out.push_back('\n');
+            return;
+        }
+        if(el->is_text())
+        {
+            el->get_text(out);
+            return;
+        }
+        for(const auto& child : el->children())
+        {
+            collect_plain_text(child, out);
+        }
+    }
+
+    static void normalize_plain_text(std::string& text)
+    {
+        std::string out;
+        out.reserve(text.size());
+        for(size_t i = 0; i < text.size();)
+        {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
+            if(c == 0xC2 && i + 1 < text.size() && static_cast<unsigned char>(text[i + 1]) == 0xA0)
+            {
+                out.push_back(' ');
+                i += 2;
+            } else if(c == '\r')
+            {
+                ++i;
+            } else
+            {
+                out.push_back(static_cast<char>(c));
+                ++i;
+            }
+        }
+        /* Placeholder paragraphs are built with a single NBSP: expose them as
+         * empty text instead of a meaningless space. */
+        bool only_space = !out.empty();
+        for(char c : out)
+        {
+            if(c != ' ' && c != '\t' && c != '\n')
+            {
+                only_space = false;
+                break;
+            }
+        }
+        if(only_space)
+        {
+            out.clear();
+        }
+        text.swap(out);
+    }
+
+    /* Collect every element carrying a stable paragraph index, in DOM order.
+     * A plain tree walk is used instead of an attribute selector so the
+     * mapping does not depend on CSS selector support in litehtml. */
+    static void collect_indexed_paragraphs(const litehtml::element::ptr& el,
+                                           std::vector<litehtml::element::ptr>& out)
+    {
+        if(!el)
+        {
+            return;
+        }
+        if(el->get_attr("data-ld-paragraph-index"))
+        {
+            out.push_back(el);
+        }
+        for(const auto& child : el->children())
+        {
+            collect_indexed_paragraphs(child, out);
+        }
+    }
+
+    /* Run-level formatting in this builder lives on generated <span class="sN">
+     * elements (font-family/size/weight/color/...).  The paragraph class only
+     * carries block properties (alignment, margins, ...).  Replacing the
+     * children with bare text would therefore fall back to the body font.
+     * Pick a representative run span so the flattened replacement keeps the
+     * paragraph's dominant character formatting. */
+    static bool is_run_class_name(const char* cls)
+    {
+        return cls && cls[0] == 's' && cls[1] >= '0' && cls[1] <= '9';
+    }
+
+    static void find_run_style_source(const litehtml::element::ptr& el,
+                                      litehtml::element::ptr&       run,
+                                      litehtml::element::ptr&       fallback)
+    {
+        if(!el)
+        {
+            return;
+        }
+        const char* cls = el->get_attr("class");
+        if(cls && cls[0])
+        {
+            if(is_run_class_name(cls))
+            {
+                if(!run)
+                {
+                    run = el;
+                }
+            } else if(!fallback)
+            {
+                fallback = el;
+            }
+        } else if(!fallback)
+        {
+            const char* style = el->get_attr("style");
+            if(style && style[0])
+            {
+                fallback = el;
+            }
+        }
+        for(const auto& child : el->children())
+        {
+            find_run_style_source(child, run, fallback);
+        }
+    }
+
+    static void append_plain_text_children(const litehtml::element::ptr& para, const std::string& text)
+    {
+        if(!para)
+        {
+            return;
+        }
+        auto doc = para->get_document();
+        if(!doc)
+        {
+            return;
+        }
+
+        bool any = false;
+        size_t i = 0;
+        while(i < text.size())
+        {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
+            if(c == '\r')
+            {
+                ++i;
+                continue;
+            }
+            if(c == '\n')
+            {
+                para->appendChild(doc->create_element("br", litehtml::string_map()));
+                any = true;
+                ++i;
+                continue;
+            }
+            const bool space = (c == ' ' || c == '\t');
+            if(space)
+            {
+                const size_t start = i;
+                while(i < text.size() && (text[i] == ' ' || text[i] == '\t'))
+                {
+                    ++i;
+                }
+                const size_t len = i - start;
+                const bool edge = (start == 0 || i == text.size());
+                if(len > 1 || edge)
+                {
+                    std::string nbsp;
+                    nbsp.resize(len * 2);
+                    for(size_t k = 0; k < len; ++k)
+                    {
+                        nbsp[k * 2]     = '\xC2';
+                        nbsp[k * 2 + 1] = '\xA0';
+                    }
+                    para->appendChild(std::make_shared<litehtml::el_text>(nbsp.c_str(), doc));
+                } else
+                {
+                    para->appendChild(std::make_shared<litehtml::el_space>(" ", doc));
+                }
+                any = true;
+            } else
+            {
+                const size_t start = i;
+                while(i < text.size() && text[i] != ' ' && text[i] != '\t' && text[i] != '\r' && text[i] != '\n')
+                {
+                    ++i;
+                }
+                const std::string word(text.data() + start, i - start);
+                para->appendChild(std::make_shared<litehtml::el_text>(word.c_str(), doc));
+                any = true;
+            }
+        }
+        if(!any)
+        {
+            para->appendChild(std::make_shared<litehtml::el_text>("\xC2\xA0", doc));
+        }
+    }
+
     class ld_container : public litehtml::document_container
     {
       public:
@@ -420,6 +624,82 @@ namespace
         std::vector<TableCellInfo> table_cells;
         litehtml::document::ptr doc;
         TextWidthCache       text_width_cache;
+
+        /* Paragraph editing support.  Entries are rebuilt only after a
+         * completed layout; after an edit the cache is cleared so no stale
+         * element pointer or placement can be observed. */
+        struct ParagraphInfo
+        {
+            int                    index = 0;
+            litehtml::element::ptr element;
+            std::string            text;
+            int                    x = 0;
+            int                    y = 0;
+            int                    w = 0;
+            int                    h = 0;
+            bool                   has_geometry = false;
+        };
+        std::map<int, ParagraphInfo> paragraphs;
+        bool                         paragraphs_valid = false;
+
+        void clear_paragraphs()
+        {
+            paragraphs.clear();
+            paragraphs_valid = false;
+        }
+
+        void rebuild_paragraphs()
+        {
+            paragraphs.clear();
+            paragraphs_valid = false;
+            if(!doc || !doc->root())
+            {
+                return;
+            }
+
+            std::vector<litehtml::element::ptr> indexed;
+            collect_indexed_paragraphs(doc->root(), indexed);
+            for(auto& el : indexed)
+            {
+                if(!el)
+                {
+                    continue;
+                }
+                const char* attr = el->get_attr("data-ld-paragraph-index");
+                if(!attr || !attr[0])
+                {
+                    continue;
+                }
+                const int index = std::atoi(attr);
+                if(index < 0 || paragraphs.find(index) != paragraphs.end())
+                {
+                    continue;
+                }
+
+                ParagraphInfo info;
+                info.index = index;
+                info.element = el;
+                collect_plain_text(el, info.text);
+                normalize_plain_text(info.text);
+
+                const litehtml::position pos = el->get_placement();
+                info.x = static_cast<int>(pos.x);
+                info.y = static_cast<int>(pos.y);
+                info.w = static_cast<int>(pos.width);
+                info.h = static_cast<int>(pos.height);
+                info.has_geometry = (info.w > 0 && info.h > 0);
+
+                paragraphs.emplace(index, std::move(info));
+            }
+            paragraphs_valid = true;
+        }
+
+        const ParagraphInfo* find_paragraph(int index) const
+        {
+            auto it = paragraphs.find(index);
+            return it != paragraphs.end() ? &it->second : nullptr;
+        }
+
 
         /* Renderer mode: the host owns the draw target.  In this mode the DLL
          * must not assume an HDC: text is measured/drawn through the host
@@ -1203,6 +1483,7 @@ namespace
         int                     m_last_rendered_page = -1;  // Highest page laid out (pagination)
         bool                    m_full_layout_done = false; // Full document::render completed
         bool                    m_fonts_invalidated = false; // Font cache invalidated, need render tree rebuild
+        bool                    m_rebuild_needed = false;    // DOM changed (paragraph edit): rebuild render tree
     };
 
     void fire_redraw(void* user, const litehtml::position& pos)
@@ -1337,6 +1618,33 @@ namespace
         delete h;
         return nullptr;
     }
+
+    /* Bring the litehtml render tree in sync with the element tree before a
+     * layout pass.  Called only from the layout worker.  Both zoom changes
+     * (font cache) and paragraph edits need a full render-tree rebuild. */
+    static void prepare_render_tree(ld_doc* h)
+    {
+        if(!h || !h->doc)
+        {
+            return;
+        }
+        const bool fonts_invalidated = h->m_fonts_invalidated;
+        const bool content_changed   = h->m_rebuild_needed;
+        if(fonts_invalidated)
+        {
+            h->doc->clear_font_cache();
+            if(h->container)
+            {
+                h->container->text_width_cache.clear();
+            }
+        }
+        if(fonts_invalidated || content_changed)
+        {
+            h->doc->rebuild_render_tree();
+        }
+        h->m_fonts_invalidated = false;
+        h->m_rebuild_needed     = false;
+    }
 } // namespace
 
 extern "C" {
@@ -1375,23 +1683,10 @@ int ld_render(void* doc, int max_width)
         // CRITICAL: Font cache invalidation due to zoom change.
         // When the user changes zoom (Ctrl+mouse wheel), the viewer calls
         // ld_invalidate_font_cache() which sets m_fonts_invalidated flag.
-        // We must clear the font cache AND rebuild the render tree so that
-        // subsequent layout pass creates new HFONTs with size * g_zoom.
-        // Without rebuild_render_tree(), the old render tree would reuse
-        // stale font_metrics and text would not scale with zoom.
-        // This runs on the worker thread to avoid race with UI thread.
-        if (h->m_fonts_invalidated)
-        {
-            fprintf(stderr, "[LITEDOCX] ld_render: font cache invalidated flag set, clearing caches\n");
-            h->doc->clear_font_cache();
-            h->doc->rebuild_render_tree();
-            if (h->container)
-            {
-                h->container->text_width_cache.clear();
-            }
-            h->m_fonts_invalidated = false;
-            fprintf(stderr, "[LITEDOCX] ld_render: font cache cleared and render tree rebuilt due to zoom change\n");
-        }
+        // A paragraph edit sets m_rebuild_needed.  Both require a full
+        // render-tree rebuild before the layout pass.  This runs only on the
+        // worker thread, serialized with drawing and hit-testing by the host.
+        prepare_render_tree(h);
 
         // DO NOT overwrite viewport_w here! viewport_w should remain the visual page width
         // (set by ld_open_file/ld_open_memory) for media queries.
@@ -1407,6 +1702,8 @@ int ld_render(void* doc, int max_width)
         {
             h->container->doc = h->doc;
             h->container->rebuild_table_cells();
+            /* Geometry cache is valid only after the layout completed. */
+            h->container->rebuild_paragraphs();
         }
         // Full layout fatto: marca flag e invalida cache pagine per ricalcolo geometria reale
         h->m_full_layout_done = true;
@@ -1724,6 +2021,183 @@ void ld_free_table_cells(ld_table_cell_info* cells)
     }
 }
 
+/* ---- Paragraph editing ABI ---- */
+
+static char* ld_dup_utf8(const std::string& s)
+{
+    char* out = static_cast<char*>(malloc(s.size() + 1));
+    if(!out)
+    {
+        return nullptr;
+    }
+    memcpy(out, s.c_str(), s.size() + 1);
+    return out;
+}
+
+int ld_paragraph_hit_test(void* doc, int x, int y, ld_paragraph_hit* out_hit, char** out_text)
+{
+    if(out_text)
+    {
+        *out_text = nullptr;
+    }
+    if(out_hit)
+    {
+        memset(out_hit, 0, sizeof(*out_hit));
+        out_hit->index = -1;
+    }
+
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container || !h->container->paragraphs_valid)
+    {
+        return 0;
+    }
+
+    try
+    {
+        const ld_container::ParagraphInfo* best = nullptr;
+        long                               best_area = 0;
+        for(const auto& kv : h->container->paragraphs)
+        {
+            const ld_container::ParagraphInfo& p = kv.second;
+            if(!p.has_geometry || !p.element)
+            {
+                continue;
+            }
+            if(x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h)
+            {
+                const long area = static_cast<long>(p.w) * static_cast<long>(p.h);
+                if(!best || area < best_area)
+                {
+                    best      = &p;
+                    best_area = area;
+                }
+            }
+        }
+        if(!best)
+        {
+            return 0;
+        }
+
+        if(out_hit)
+        {
+            out_hit->index = best->index;
+            out_hit->x     = best->x;
+            out_hit->y     = best->y;
+            out_hit->w     = best->w;
+            out_hit->h     = best->h;
+        }
+        if(out_text)
+        {
+            *out_text = ld_dup_utf8(best->text);
+        }
+        return 1;
+    } catch(...)
+    {
+        set_error("errore durante l'hit-test del paragrafo");
+        return 0;
+    }
+}
+
+char* ld_paragraph_get_text(void* doc, int index)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container || !h->container->paragraphs_valid)
+    {
+        return nullptr;
+    }
+    try
+    {
+        const ld_container::ParagraphInfo* info = h->container->find_paragraph(index);
+        if(!info)
+        {
+            return nullptr;
+        }
+        return ld_dup_utf8(info->text);
+    } catch(...)
+    {
+        set_error("errore durante la lettura del paragrafo");
+        return nullptr;
+    }
+}
+
+int ld_paragraph_set_text(void* doc, int index, const char* text)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container || !text)
+    {
+        set_error("parametri modifica paragrafo non validi");
+        return 0;
+    }
+
+    try
+    {
+        ld_container* c = h->container;
+        const ld_container::ParagraphInfo* info = c->find_paragraph(index);
+        if(!info || !info->element)
+        {
+            set_error("indice paragrafo non valido");
+            return 0;
+        }
+
+        litehtml::element::ptr para = info->element;
+
+        /* Choose the run whose formatting is kept.  Crucially, the existing
+         * element is REUSED: litehtml applies class-based CSS only when the
+         * stylesheet is matched during document finalization.  A span created
+         * later would carry the class name but never receive its font rules,
+         * which is exactly why the text fell back to the body font.  Reusing
+         * an element that already matched the stylesheet keeps font-family,
+         * size, weight and colour. */
+        litehtml::element::ptr style_run;
+        litehtml::element::ptr style_fallback;
+        for(const auto& child : para->children())
+        {
+            find_run_style_source(child, style_run, style_fallback);
+        }
+        litehtml::element::ptr keep = style_run ? style_run : style_fallback;
+
+        /* Geometry and text snapshots are stale until the next completed
+         * layout.  Drop every cached pointer/placement and force a full
+         * layout (range rendering must not early-out on old pagination).
+         * Invalidate BEFORE mutating the DOM so an allocation failure can
+         * never leave a "valid" cache pointing at changed content. */
+        c->clear_paragraphs();
+        h->m_rebuild_needed    = true;
+        h->m_full_layout_done  = false;
+        h->m_page_heights.clear();
+        h->m_page_y_offsets.clear();
+        h->m_last_rendered_page = -1;
+
+        /* The paragraph element, its class and data-ld-paragraph-index stay
+         * untouched.  clearRecursive() also empties the kept run element while
+         * leaving its attributes and matched styles intact. */
+        para->clearRecursive();
+        litehtml::element::ptr target = para;
+        if(keep)
+        {
+            para->appendChild(keep);
+            target = keep;
+        }
+        append_plain_text_children(target, std::string(text));
+
+        set_error("");
+        return 1;
+    } catch(...)
+    {
+        set_error("errore durante la modifica del paragrafo");
+        return 0;
+    }
+}
+
+void ld_free_string(char* str)
+{
+    if(str)
+    {
+        free(str);
+    }
+}
+
+
 // ===== Paginated layout API (Fase 4) =====
 
 static void extract_page_geometry(ld_doc* h)
@@ -1824,17 +2298,33 @@ int ld_render_range(void* doc, int page_idx, int viewport_h, int max_width)
     if (h->m_last_rendered_page == -1)
     {
         LDLOG("ld_render_range: first call, doing full layout");
-        int w = max_width > 0 ? max_width : (h->container ? h->container->viewport_w : 800);
-        int rendered_w = static_cast<int>(h->doc->render(w));
-        if (h->container)
+        try
         {
-            h->container->doc = h->doc;
-            h->container->rebuild_table_cells();
+            prepare_render_tree(h);
+            int w = max_width > 0 ? max_width : (h->container ? h->container->viewport_w : 800);
+            if (h->container)
+            {
+                h->container->layout_width = w;
+            }
+            int rendered_w = static_cast<int>(h->doc->render(w));
+            h->m_full_layout_done = true;
+            if (h->container)
+            {
+                h->container->doc = h->doc;
+                h->container->rebuild_table_cells();
+                h->container->rebuild_paragraphs();
+            }
+            // Dopo il full layout, m_last_rendered_page viene settato da extract_page_geometry
+            // quando verrà chiamato da ld_get_page_count/height
+            h->m_page_heights.clear();
+            h->m_page_y_offsets.clear();
+            extract_page_geometry(h);
+            return rendered_w;
+        } catch(...)
+        {
+            set_error("errore durante il layout");
+            return 0;
         }
-        // Dopo il full layout, m_last_rendered_page viene settato da extract_page_geometry
-        // quando verrà chiamato da ld_get_page_count/height
-        extract_page_geometry(h);
-        return rendered_w;
     }
     
     LDLOG("ld_render_range: already laid out, returning width");

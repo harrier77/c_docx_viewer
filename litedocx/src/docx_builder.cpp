@@ -545,6 +545,10 @@ namespace litedocx
         litehtml::string_map attrs;
         if(!para_cls.empty()) attrs["class"] = para_cls;
         auto        para = make_element("p", std::string(), attrs);
+        /* Stable identity for the C ABI paragraph editor.  Only paragraphs
+         * that come from a source w:p are indexed; builder-only placeholders
+         * are left untagged on purpose. */
+        para->set_attr("data-ld-paragraph-index", std::to_string(m_paragraph_index++).c_str());
         parent->appendChild(para);
 
         bool content = false;

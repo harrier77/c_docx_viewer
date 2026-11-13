@@ -500,12 +500,47 @@ static void init_callbacks(void)
 
 #define WM_APP_DOC_READY    (WM_APP + 1)
 #define WM_APP_RENDER_DONE  (WM_APP + 3)
+#define WM_APP_HIT_RESULT   (WM_APP + 4)
+#define WM_APP_EDIT_APPLIED (WM_APP + 5)
+
+/* UI-side document state.  Transitions are made only on the UI thread and
+ * serialize mutually exclusive operations on the document tree. */
+typedef enum DocState
+{
+    DOC_STATE_IDLE = 0,
+    DOC_STATE_LOADING,
+    DOC_STATE_RENDERING,
+    DOC_STATE_HITTEST,
+    DOC_STATE_EDITOR,
+    DOC_STATE_APPLYING
+} DocState;
+
+typedef struct HitResult
+{
+    void    *doc;
+    unsigned gen;
+    unsigned epoch;
+    int      hit;
+    int      index;
+    char    *text;   /* UTF-8, owned by litedocx (free with ld_free_string) */
+} HitResult;
+
+typedef struct EditResult
+{
+    void    *doc;
+    unsigned gen;
+    unsigned token;
+    int      ok;
+    char     error[256];
+} EditResult;
 
 typedef enum JobKind
 {
     JOB_LOAD = 1,
     JOB_RENDER,
     JOB_RENDER_RANGE,
+    JOB_HIT_TEST,
+    JOB_APPLY_EDIT,
     JOB_DESTROY,
     JOB_QUIT
 } JobKind;
@@ -523,6 +558,14 @@ typedef struct Job
     void       *doc;
     int         first_page;
     int         last_page;
+    /* paragraph edit jobs */
+    unsigned    gen;
+    unsigned    epoch;
+    unsigned    token;
+    int         para_index;
+    int         doc_x;
+    int         doc_y;
+    char       *text;
 } Job;
 
 static CRITICAL_SECTION g_job_lock;
@@ -551,6 +594,33 @@ static int      g_first_rendered_page = -1;  /* prima pagina renderizzata */
 static int      g_last_rendered_page = -1;   /* ultima pagina renderizzata */
 static int      g_page_h_est = 0;            /* altezza stimata singola pagina */
 static int      g_layout_complete = 0;       /* layout completo dopo primo full render */
+
+/* Serialized UI document state and layout version.  g_layout_epoch is bumped
+ * every time the document geometry changes (load, completed layout, resize);
+ * asynchronous hit-test results carrying an older epoch are discarded. */
+static DocState g_doc_state = DOC_STATE_IDLE;
+static unsigned g_layout_epoch = 1;
+static unsigned g_apply_token;
+static unsigned g_pending_apply_token;
+
+/* ---- Editor di paragrafo (finestra modale creata dinamicamente) ---- */
+#define LD_PARA_EDIT_CLASS L"LdParagraphEditorClass"
+#define IDC_PARA_EDIT      2001
+#define IDC_PARA_APPLY     2002
+#define IDC_PARA_CANCEL    2003
+#define IDC_PARA_HINT      2004
+
+static HWND      g_edit_hwnd;          /* finestra editor aperta, NULL se chiusa */
+static HWND      g_edit_ctl;           /* controllo EDIT multilinea */
+static int       g_edit_index = -1;    /* indice paragrafo in editing */
+static int       g_edit_apply;         /* l'utente ha scelto Applica */
+static char     *g_edit_result_utf8;   /* testo confermato (UTF-8, malloc) */
+static HACCEL    g_edit_accel;
+static int       g_editor_class_registered;
+static int       g_justification_dirty;  /* larghezza giustificazione da riallineare */
+
+static void apply_pending_justification(void);
+
 
 
 
@@ -704,6 +774,62 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                              (WPARAM)j->content_w, (LPARAM)j->doc);
             break;
 
+        case JOB_HIT_TEST:
+        {
+            if (!g_shutdown && j->doc)
+            {
+                ld_paragraph_hit hit;
+                char *text = NULL;
+                int got = ld_paragraph_hit_test(j->doc, j->doc_x, j->doc_y, &hit, &text);
+                HitResult *r = (HitResult *)calloc(1, sizeof(HitResult));
+                if (r)
+                {
+                    r->doc = j->doc;
+                    r->gen = j->gen;
+                    r->epoch = j->epoch;
+                    r->hit = got;
+                    r->index = got ? hit.index : -1;
+                    r->text = text;
+                    PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, (LPARAM)r);
+                }
+                else
+                {
+                    ld_free_string(text);
+                    PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, 0);
+                }
+            }
+            break;
+        }
+
+        case JOB_APPLY_EDIT:
+        {
+            EditResult *r = (EditResult *)calloc(1, sizeof(EditResult));
+            int ok = 0;
+            if (!g_shutdown && j->doc && j->text)
+            {
+                ok = ld_paragraph_set_text(j->doc, j->para_index, j->text);
+            }
+            if (r)
+            {
+                r->doc = j->doc;
+                r->gen = j->gen;
+                r->token = j->token;
+                r->ok = ok;
+                if (!ok)
+                {
+                    const char *err = ld_last_error();
+                    lstrcpynA(r->error, err ? err : "", sizeof(r->error));
+                }
+                if (!g_shutdown)
+                    PostMessageA(j->hwnd, WM_APP_EDIT_APPLIED, 0, (LPARAM)r);
+                else
+                    free(r);
+            }
+            free(j->text);
+            j->text = NULL;
+            break;
+        }
+
         case JOB_DESTROY:
             if (j->doc)
                 ld_destroy(j->doc);
@@ -742,6 +868,16 @@ static void request_render(int w)
     if (!g_doc || g_load_active)
         return;
 
+    /* No new render jobs while the DOM is being read (hit-test) or edited.
+     * Remember the width and let the state transition flush it later. */
+    if (g_doc_state == DOC_STATE_HITTEST ||
+        g_doc_state == DOC_STATE_EDITOR ||
+        g_doc_state == DOC_STATE_APPLYING)
+    {
+        g_render_pending_width = w;
+        return;
+    }
+
     fprintf(stderr, "[RENDER_REQ] w=%d g_render_busy=%d zoom=%.2f\n", w, g_render_busy, g_zoom);
 
     LOG_RENDER("request_render called");
@@ -750,9 +886,12 @@ static void request_render(int w)
     if (!g_worker_started)
     {
         /* Fallback sincrono */
+        g_doc_state = DOC_STATE_RENDERING;
         ld_render(g_doc, w);
         g_doc_content_w = w;
         g_doc_h = document_height(g_doc);
+        g_layout_epoch++;
+        g_doc_state = DOC_STATE_IDLE;
         layout_update_scrollbars(g_hwnd, g_doc_h);
         InvalidateRect(g_hwnd, NULL, FALSE);
         return;
@@ -774,6 +913,7 @@ static void request_render(int w)
     g_render_doc = g_doc;
     g_render_used_w = w;
     g_render_pending_width = -1;
+    g_doc_state = DOC_STATE_RENDERING;
     dbg_log("[TABLE] request_render content_w=%d\n", w);
     enqueue_job(j);
     LOG_RENDER("JOB_RENDER enqueued");
@@ -788,6 +928,14 @@ static void request_render_range(int first_page, int last_page)
 
     if (!g_doc || g_load_active)
         return;
+
+    /* No range jobs while the DOM is being read/edited. */
+    if (g_doc_state == DOC_STATE_HITTEST ||
+        g_doc_state == DOC_STATE_EDITOR ||
+        g_doc_state == DOC_STATE_APPLYING)
+    {
+        return;
+    }
 
     if (first_page < 0)
         first_page = 0;
@@ -808,6 +956,7 @@ static void request_render_range(int first_page, int last_page)
     if (!g_worker_started)
     {
         /* Fallback sincrono */
+        g_doc_state = DOC_STATE_RENDERING;
         ld_render_range(g_doc, first_page, LAY->ch, layout_content_width());
         {
             int page_count = ld_get_page_count(g_doc);
@@ -817,6 +966,8 @@ static void request_render_range(int first_page, int last_page)
                 g_last_rendered_page = last_page;
         }
         g_doc_h = document_height(g_doc);
+        g_layout_epoch++;
+        g_doc_state = DOC_STATE_IDLE;
         layout_update_scrollbars(g_hwnd, g_doc_h);
         InvalidateRect(g_hwnd, NULL, FALSE);
         return;
@@ -847,6 +998,7 @@ static void request_render_range(int first_page, int last_page)
     g_render_used_w = last_page; /* reused as last_page for range jobs */
     g_render_pending_first_page = first_page;
     g_render_pending_last_page = last_page;
+    g_doc_state = DOC_STATE_RENDERING;
     enqueue_job(j);
     LOG_RENDER("JOB_RENDER_RANGE enqueued");
 }
@@ -871,7 +1023,22 @@ static void apply_loaded_doc(unsigned id, void *doc)
         return;
     }
 
+    /* Il cambio documento non deve mai avvenire mentre un indice di
+     * paragrafo e' in uso (editor aperto) o una modifica e' in volo. */
+    if (g_doc_state == DOC_STATE_EDITOR || g_doc_state == DOC_STATE_APPLYING)
+    {
+        g_load_active = 0;
+        if (doc)
+            dispose_doc(doc);
+        return;
+    }
+
     g_load_active = 0;
+    g_doc_state = DOC_STATE_IDLE;
+    /* Nuovo documento: ogni hit-test in volo appartiene alla generazione
+     * precedente e va scartato. */
+    g_layout_epoch++;
+    g_pending_apply_token = 0;
 
     if (doc)
     {
@@ -940,6 +1107,11 @@ static void on_render_done(void *doc, int used_w)
     log_msg("[RENDER] on_render_done: used_w=%d g_render_busy=%d g_render_pending_width=%d g_render_pending_first=%d g_render_pending_last=%d\n",
             used_w, g_render_busy, g_render_pending_width, g_render_pending_first_page, g_render_pending_last_page);
 
+    /* Un risultato di un render appartenente a un altro documento non deve
+     * azzerare il busy di un render corrente. */
+    if (g_render_doc && doc != g_render_doc)
+        return;
+
     g_render_busy = 0;
     g_render_doc = NULL;
 
@@ -948,6 +1120,9 @@ static void on_render_done(void *doc, int used_w)
 
     g_doc_content_w = used_w;
     g_doc_h = document_height(doc);
+    /* Geometria aggiornata: gli hit-test in volo con epoch precedente non
+     * sono piu' coerenti con il layout appena completato. */
+    g_layout_epoch++;
 
     /* ld_render_range oggi, al primo richiamo, fa full layout di tutto il
      * documento. Quindi dopo il primo RENDER_DONE possiamo considerare
@@ -972,6 +1147,9 @@ static void on_render_done(void *doc, int used_w)
 
     /* Layout completo dopo il primo full render */
     g_layout_complete = 1;
+    if (!g_load_active)
+        g_doc_state = DOC_STATE_IDLE;
+    apply_pending_justification();
     LOG_RENDER("layout complete flag set");
 
     /* Pending width (resize) ha priorità su pending range */
@@ -1012,6 +1190,18 @@ static void start_async_load(const char *path)
     Job *j;
     int cw;
 
+    /* Non cambiare documento mentre un paragrafo e' in editing o una
+     * modifica e' in applicazione. */
+    if (g_doc_state == DOC_STATE_HITTEST ||
+        g_doc_state == DOC_STATE_EDITOR ||
+        g_doc_state == DOC_STATE_APPLYING)
+    {
+        MessageBoxA(g_hwnd,
+                    "Attendere il completamento dell'operazione sul paragrafo.",
+                    "d2dview", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
     init_callbacks();
     cw = layout_content_width();
 
@@ -1019,6 +1209,9 @@ static void start_async_load(const char *path)
     g_load_gen++;
     g_load_active = 1;
     g_load_content_w = cw;
+    g_doc_state = DOC_STATE_LOADING;
+    g_layout_epoch++;
+    g_pending_apply_token = 0;
     g_render_pending_width = -1;
     g_render_pending_first_page = -1;
     g_render_pending_last_page = -1;
@@ -1055,6 +1248,521 @@ static void load_docx_file(const char *path)
 {
     if (!path || !path[0]) return;
     start_async_load(path);
+}
+
+/* ----------------------- paragrafi: coordinate / editor ----------------------- */
+
+/* Converte un punto client in coordinate documento.
+ * La trasformazione D2D e' puramente scalare e ancorata all'origine, e
+ * ld_draw riceve rc_content.left/top come origine logica:
+ *     screen = (rc_content.<x|y> + doc_<x|y>) * g_zoom
+ * quindi l'inversa e' doc = client / zoom - rc_content. */
+static void client_to_doc(int cx, int cy, int *doc_x, int *doc_y)
+{
+    RECT rc;
+    double z = (g_zoom > 0.0f) ? (double)g_zoom : 1.0;
+    layout_content_rect(g_doc_h, &rc);
+    if (doc_x)
+        *doc_x = (int)floor((double)cx / z - (double)rc.left + 0.5);
+    if (doc_y)
+        *doc_y = (int)floor((double)cy / z - (double)rc.top + 0.5);
+}
+
+/* Riallinea la larghezza di giustificazione quando il resize e' avvenuto
+ * mentre il worker usava il DOM.  Chiamata solo da stato IDLE. */
+static void apply_pending_justification(void)
+{
+    if (g_doc && g_justification_dirty)
+    {
+        int jw = LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X;
+        if (jw > 0)
+            ld_set_justification_width(g_doc, jw);
+        g_justification_dirty = 0;
+    }
+}
+
+/* Rilancia un render rimasto in sospeso durante hit-test/editor. */
+static void resume_pending_render(void)
+{
+    if (g_doc && !g_load_active && g_doc_state == DOC_STATE_IDLE && !g_render_busy)
+    {
+        apply_pending_justification();
+        if (g_render_pending_width >= 0)
+        {
+            int w = g_render_pending_width;
+            g_render_pending_width = -1;
+            request_render(w);
+        }
+    }
+}
+
+/* Il documento puo' essere sostituito solo quando nessun indice di
+ * paragrafo e' in uso e nessuna modifica e' in volo. */
+static int can_switch_document(void)
+{
+    return g_doc_state != DOC_STATE_HITTEST &&
+           g_doc_state != DOC_STATE_EDITOR &&
+           g_doc_state != DOC_STATE_APPLYING;
+}
+
+/* Esito di JOB_APPLY_EDIT.  Non libera r: lo fa il chiamante. */
+static void on_edit_applied(EditResult *r)
+{
+    if (!r)
+        return;
+
+    /* Solo il risultato del job corrente puo' chiudere la fase APPLYING. */
+    if (r->doc != g_doc || r->gen != g_load_gen || r->token != g_pending_apply_token)
+        return;
+
+    g_pending_apply_token = 0;
+    g_render_busy = 0;
+    g_render_doc = NULL;
+
+    if (r->ok)
+    {
+        /* Il testo e' cambiato: la cache dei paragrafi e la paginazione
+         * lato DLL sono gia' state invalidate.  Qui si invalida lo stato
+         * lato viewer e si forza un layout COMPLETO (ld_render), perche'
+         * ld_render_range potrebbe non rilanciare il layout. */
+        g_layout_complete = 0;
+        g_first_rendered_page = -1;
+        g_last_rendered_page = -1;
+        g_render_pending_width = -1;
+        g_render_pending_first_page = -1;
+        g_render_pending_last_page = -1;
+        g_doc_state = DOC_STATE_IDLE;
+        g_layout_epoch++;
+        apply_pending_justification();
+        request_render(layout_content_width());
+        InvalidateRect(g_hwnd, NULL, TRUE);
+    }
+    else
+    {
+        g_doc_state = DOC_STATE_IDLE;
+        MessageBoxA(g_hwnd,
+                    r->error[0] ? r->error : "Modifica non applicata.",
+                    "d2dview", MB_OK | MB_ICONERROR);
+        resume_pending_render();
+    }
+}
+
+/* Accoda la sostituzione del testo del paragrafo in editing.  g_render_busy
+ * viene impostato QUI, sul thread UI, prima di accodare il job. */
+static void request_paragraph_apply(const char *text)
+{
+    if (!g_doc || !text || g_edit_index < 0)
+    {
+        g_doc_state = DOC_STATE_IDLE;
+        return;
+    }
+
+    g_apply_token++;
+    g_doc_state = DOC_STATE_APPLYING;
+    g_pending_apply_token = g_apply_token;
+
+    if (!g_worker_started)
+    {
+        EditResult r;
+        ZeroMemory(&r, sizeof(r));
+        r.doc = g_doc;
+        r.gen = g_load_gen;
+        r.token = g_apply_token;
+        r.ok = ld_paragraph_set_text(g_doc, g_edit_index, text);
+        if (!r.ok)
+        {
+            const char *err = ld_last_error();
+            lstrcpynA(r.error, err ? err : "", sizeof(r.error));
+        }
+        on_edit_applied(&r);
+        return;
+    }
+
+    {
+        Job *j = alloc_job(JOB_APPLY_EDIT);
+        if (!j)
+        {
+            g_pending_apply_token = 0;
+            g_doc_state = DOC_STATE_IDLE;
+            return;
+        }
+        j->doc = g_doc;
+        j->gen = g_load_gen;
+        j->epoch = g_layout_epoch;
+        j->token = g_apply_token;
+        j->para_index = g_edit_index;
+        j->text = _strdup(text);
+        if (!j->text)
+        {
+            free(j);
+            g_pending_apply_token = 0;
+            g_doc_state = DOC_STATE_IDLE;
+            return;
+        }
+        g_render_busy = 1;
+        g_render_doc = g_doc;
+        enqueue_job(j);
+    }
+}
+
+static char *editor_text_utf8(void)
+{
+    int   len;
+    WCHAR *w;
+    int   bytes;
+    char *out;
+
+    if (!g_edit_ctl)
+        return NULL;
+    len = GetWindowTextLengthW(g_edit_ctl);
+    w = (WCHAR *)malloc((size_t)(len + 1) * sizeof(WCHAR));
+    if (!w)
+        return NULL;
+    GetWindowTextW(g_edit_ctl, w, len + 1);
+    bytes = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    out = NULL;
+    if (bytes > 0)
+    {
+        out = (char *)malloc((size_t)bytes);
+        if (out)
+            WideCharToMultiByte(CP_UTF8, 0, w, -1, out, bytes, NULL, NULL);
+    }
+    free(w);
+    return out;
+}
+
+static void commit_paragraph_editor(HWND hwnd)
+{
+    char *text = editor_text_utf8();
+    if (!text)
+    {
+        g_edit_apply = 0;
+        DestroyWindow(hwnd);
+        return;
+    }
+    free(g_edit_result_utf8);
+    g_edit_result_utf8 = text;
+    g_edit_apply = 1;
+    DestroyWindow(hwnd);
+}
+
+static LRESULT CALLBACK paragraph_editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_CREATE:
+        g_edit_hwnd = hwnd;
+        g_edit_ctl = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
+                ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL,
+            0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_EDIT,
+            GetModuleHandle(NULL), NULL);
+        CreateWindowExW(0, L"BUTTON", L"Applica",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_APPLY,
+            GetModuleHandle(NULL), NULL);
+        CreateWindowExW(0, L"BUTTON", L"Annulla",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_CANCEL,
+            GetModuleHandle(NULL), NULL);
+        CreateWindowExW(0, L"STATIC",
+            L"Modifica solo in memoria: il file DOCX non viene salvato. "
+            L"La formattazione dei singoli run viene uniformata.",
+            WS_CHILD | WS_VISIBLE,
+            0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_HINT,
+            GetModuleHandle(NULL), NULL);
+        if (g_edit_ctl)
+            SendMessageW(g_edit_ctl, WM_SETFONT,
+                         (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+        {
+            HWND hint = GetDlgItem(hwnd, IDC_PARA_HINT);
+            HWND ba = GetDlgItem(hwnd, IDC_PARA_APPLY);
+            HWND bc = GetDlgItem(hwnd, IDC_PARA_CANCEL);
+            if (hint) SendMessageW(hint, WM_SETFONT,
+                                   (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+            if (ba) SendMessageW(ba, WM_SETFONT,
+                                 (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+            if (bc) SendMessageW(bc, WM_SETFONT,
+                                 (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+        }
+        return 0;
+
+    case WM_SIZE:
+    {
+        RECT rc;
+        int  cw, ch, margin = 12, button_w = 90, button_h = 28, hint_h = 40;
+        int  edit_h;
+        GetClientRect(hwnd, &rc);
+        cw = rc.right - rc.left;
+        ch = rc.bottom - rc.top;
+        edit_h = ch - margin * 2 - hint_h - button_h - 8;
+        if (edit_h < 40)
+            edit_h = 40;
+        if (g_edit_ctl)
+            MoveWindow(g_edit_ctl, margin, margin,
+                       cw - margin * 2, edit_h, TRUE);
+        {
+            HWND hint = GetDlgItem(hwnd, IDC_PARA_HINT);
+            HWND ba = GetDlgItem(hwnd, IDC_PARA_APPLY);
+            HWND bc = GetDlgItem(hwnd, IDC_PARA_CANCEL);
+            int  hint_y = margin + edit_h + 6;
+            if (hint)
+                MoveWindow(hint, margin, hint_y,
+                           cw - margin * 2, hint_h, TRUE);
+            if (bc)
+                MoveWindow(bc, cw - margin - button_w, ch - margin - button_h,
+                           button_w, button_h, TRUE);
+            if (ba)
+                MoveWindow(ba, cw - margin * 2 - button_w * 2 + 8,
+                           ch - margin - button_h, button_w, button_h, TRUE);
+        }
+        return 0;
+    }
+
+    case WM_COMMAND:
+        switch (LOWORD(wp))
+        {
+        case IDC_PARA_APPLY:
+            commit_paragraph_editor(hwnd);
+            return 0;
+        case IDC_PARA_CANCEL:
+            g_edit_apply = 0;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+
+    case WM_CLOSE:
+        /* Chiusura con la X equivale ad Annulla. */
+        g_edit_apply = 0;
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        g_edit_hwnd = NULL;
+        g_edit_ctl = NULL;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void ensure_editor_class(void)
+{
+    WNDCLASSEXW wc;
+    if (g_editor_class_registered)
+        return;
+    ZeroMemory(&wc, sizeof(wc));
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = paragraph_editor_proc;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = LD_PARA_EDIT_CLASS;
+    RegisterClassExW(&wc);
+    g_editor_class_registered = 1;
+}
+
+/* Apre l'editor modale sul paragrafo index.  Ritorna dopo la chiusura; se
+ * l'utente ha applicato, accoda JOB_APPLY_EDIT. */
+static void show_paragraph_editor(int index, const char *utf8_text)
+{
+    static ACCEL accels[2];
+    WCHAR       *wtext;
+    RECT         rc_main;
+    int          w = 660, h = 440, x, y;
+    HWND         hwnd;
+    MSG          msg;
+    int          quit = 0;
+
+    if (index < 0 || g_edit_hwnd)
+        return;
+
+    ensure_editor_class();
+
+    g_edit_index = index;
+    g_edit_apply = 0;
+    free(g_edit_result_utf8);
+    g_edit_result_utf8 = NULL;
+
+    GetWindowRect(g_hwnd, &rc_main);
+    x = rc_main.left + ((rc_main.right - rc_main.left) - w) / 2;
+    y = rc_main.top + ((rc_main.bottom - rc_main.top) - h) / 2;
+
+    g_doc_state = DOC_STATE_EDITOR;
+    hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, LD_PARA_EDIT_CLASS,
+                           L"Modifica paragrafo",
+                           WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+                           x, y, w, h, g_hwnd, NULL,
+                           GetModuleHandle(NULL), NULL);
+    if (!hwnd)
+    {
+        g_edit_index = -1;
+        g_doc_state = DOC_STATE_IDLE;
+        return;
+    }
+
+    wtext = u8_to_w(utf8_text ? utf8_text : "");
+    if (wtext)
+    {
+        SetWindowTextW(g_edit_ctl, wtext);
+        free(wtext);
+    }
+
+    accels[0].fVirt = FVIRTKEY;
+    accels[0].key = VK_ESCAPE;
+    accels[0].cmd = IDC_PARA_CANCEL;
+    accels[1].fVirt = FVIRTKEY | FCONTROL;
+    accels[1].key = VK_RETURN;
+    accels[1].cmd = IDC_PARA_APPLY;
+    g_edit_accel = CreateAcceleratorTableW(accels, 2);
+
+    EnableWindow(g_hwnd, FALSE);
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    SetForegroundWindow(hwnd);
+    SetFocus(g_edit_ctl);
+    SendMessageW(g_edit_ctl, EM_SETSEL, 0, -1);
+
+    for (;;)
+    {
+        int r = GetMessageW(&msg, NULL, 0, 0);
+        if (r == 0)
+        {
+            /* WM_QUIT: chiude l'editor e lascia uscire anche il loop
+             * principale. */
+            quit = 1;
+            break;
+        }
+        if (r == -1)
+            break;
+        if (!g_edit_accel || !TranslateAcceleratorW(hwnd, g_edit_accel, &msg))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (!g_edit_hwnd)
+            break;
+    }
+
+    if (g_edit_hwnd)
+    {
+        g_edit_apply = 0;
+        DestroyWindow(g_edit_hwnd);
+        g_edit_hwnd = NULL;
+    }
+    if (g_edit_accel)
+    {
+        DestroyAcceleratorTable(g_edit_accel);
+        g_edit_accel = NULL;
+    }
+
+    EnableWindow(g_hwnd, TRUE);
+    SetForegroundWindow(g_hwnd);
+
+    if (quit)
+    {
+        g_edit_index = -1;
+        free(g_edit_result_utf8);
+        g_edit_result_utf8 = NULL;
+        g_doc_state = DOC_STATE_IDLE;
+        PostQuitMessage(0);
+        return;
+    }
+
+    if (g_edit_apply && g_edit_result_utf8)
+    {
+        request_paragraph_apply(g_edit_result_utf8);
+    }
+    else
+    {
+        g_doc_state = DOC_STATE_IDLE;
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        resume_pending_render();
+    }
+
+    g_edit_index = -1;
+    free(g_edit_result_utf8);
+    g_edit_result_utf8 = NULL;
+}
+
+/* Avvia l'hit-test sul worker (o in modo sincrono senza worker). */
+static void begin_paragraph_edit_at(int doc_x, int doc_y)
+{
+    if (!g_doc)
+        return;
+
+    if (!g_worker_started)
+    {
+        ld_paragraph_hit hit;
+        char            *text = NULL;
+        if (ld_paragraph_hit_test(g_doc, doc_x, doc_y, &hit, &text) && text)
+        {
+            show_paragraph_editor(hit.index, text);
+            ld_free_string(text);
+        }
+        return;
+    }
+
+    {
+        Job *j = alloc_job(JOB_HIT_TEST);
+        if (!j)
+            return;
+        j->doc   = g_doc;
+        j->gen   = g_load_gen;
+        j->epoch = g_layout_epoch;
+        j->doc_x = doc_x;
+        j->doc_y = doc_y;
+        g_doc_state = DOC_STATE_HITTEST;
+        enqueue_job(j);
+    }
+}
+
+/* Esito di JOB_HIT_TEST.  Libera sempre r. */
+static void handle_hit_result(HitResult *r)
+{
+    if (!r)
+    {
+        if (g_doc_state == DOC_STATE_HITTEST)
+            g_doc_state = DOC_STATE_IDLE;
+        resume_pending_render();
+        return;
+    }
+
+    /* Un editor gia' aperto ha la precedenza: il risultato non deve
+     * sovrascrivere lo stato EDITOR ne' aprire una seconda finestra. */
+    if (g_edit_hwnd)
+    {
+        ld_free_string(r->text);
+        free(r);
+        return;
+    }
+
+    /* Scarta hit-test obsoleti: documento, generazione e versione layout
+     * devono coincidere.  Nessun editor viene aperto. */
+    if (r->doc != g_doc || r->gen != g_load_gen || r->epoch != g_layout_epoch)
+    {
+        ld_free_string(r->text);
+        free(r);
+        if (g_doc_state == DOC_STATE_HITTEST)
+            g_doc_state = DOC_STATE_IDLE;
+        resume_pending_render();
+        return;
+    }
+
+    if (!r->hit || !r->text)
+    {
+        ld_free_string(r->text);
+        free(r);
+        g_doc_state = DOC_STATE_IDLE;
+        resume_pending_render();
+        return;
+    }
+
+    g_doc_state = DOC_STATE_IDLE;
+    show_paragraph_editor(r->index, r->text);
+    ld_free_string(r->text);
+    free(r);
 }
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -1095,16 +1803,31 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         // log_msg("[SIZE] WM_SIZE cw=%d ch=%d\n", LOWORD(lp), HIWORD(lp));
         layout_resize(LOWORD(lp), HIWORD(lp));
         sync_view_scale();
+        /* Ogni ridimensionamento invalida gli hit-test in volo. */
+        if (g_doc)
+            g_layout_epoch++;
         /* NON chiamare BeginDraw qui: in WM_SIZE non si disegna nulla.
          * Il back buffer viene (ri)allocato da BeginDraw in WM_PAINT, che e'
          * l'unico punto in cui viene bilanciato da Present/EndPaint.
          * Per il renderer D2D una BeginDraw orfana lascia il render target
          * con in_draw=1 e senza EndDraw (stato sporco). */
         if (g_doc && !g_load_active) {
-            /* Update justification width on page size change */
-            int justification_w = LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X;
-            if (justification_w > 0)
-                ld_set_justification_width(g_doc, justification_w);
+            /* Update justification width on page size change. Non toccare il
+             * documento se il worker lo sta leggendo/modificando: si rimanda
+             * all'uscita da HITTEST/EDITOR/APPLYING. */
+            if (g_doc_state == DOC_STATE_HITTEST ||
+                g_doc_state == DOC_STATE_EDITOR ||
+                g_doc_state == DOC_STATE_APPLYING)
+            {
+                g_justification_dirty = 1;
+            }
+            else
+            {
+                int justification_w = LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X;
+                if (justification_w > 0)
+                    ld_set_justification_width(g_doc, justification_w);
+                g_justification_dirty = 0;
+            }
             int content_w = layout_content_width();
             /* Il layout viene rifatto dal worker: la UI non si blocca.
              * Durante il render il paint mostra solo lo sfondo. */
@@ -1162,10 +1885,17 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         /* Fase 3: la geometria di paint vive in func_gdi/document.c.
          * Se un render e' in corso il documento viene modificato dal worker:
          * document_draw non chiama ld_draw e mostra la pagina bianca.
+         * Lo stesso vale mentre il worker legge il DOM per un hit-test o lo
+         * modifica per un apply: nessun ld_draw concorrente.
          * clip_scale = 1/zoom: il renderer scala il disegno, quindi l'area
          * logica che copre il viewport e' piu' grande quando zoom < 1. */
-        document_draw(g_doc, g_renderer, g_doc_h, g_render_busy,
-                      g_zoom > 0.0f ? 1.0f / g_zoom : 1.0f);
+        {
+            int dom_busy = g_render_busy ||
+                           g_doc_state == DOC_STATE_HITTEST ||
+                           g_doc_state == DOC_STATE_APPLYING;
+            document_draw(g_doc, g_renderer, g_doc_h, dom_busy,
+                          g_zoom > 0.0f ? 1.0f / g_zoom : 1.0f);
+        }
 
         g_renderer->vtbl->Present(g_renderer, hdc, LAY->cw, LAY->ch);
         /* Riporta il renderer a scala 1.0 (la trasformata viene reimpostata
@@ -1206,6 +1936,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             layout_pan(x - g_pan_x, y - g_pan_y, g_doc_h);
             g_pan_x = x;
             g_pan_y = y;
+            if (g_doc)
+                g_layout_epoch++;
             SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
@@ -1218,6 +1950,24 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ReleaseCapture();
         }
         return 0;
+
+    case WM_LBUTTONDBLCLK:
+    {
+        /* Doppio clic: unico punto di ingresso dell'editor di paragrafo.
+         * Solo quando il documento e' fermo e il layout e' completo (la
+         * cache dei paragrafi e' valida solo dopo un render completato). */
+        if (!g_doc || g_load_active || g_render_busy || !g_layout_complete ||
+            g_doc_state != DOC_STATE_IDLE)
+        {
+            return 0;
+        }
+        {
+            int dx, dy;
+            client_to_doc((short)LOWORD(lp), (short)HIWORD(lp), &dx, &dy);
+            begin_paragraph_edit_at(dx, dy);
+        }
+        return 0;
+    }
 
     case WM_CAPTURECHANGED:
         g_pan_active = 0;
@@ -1248,6 +1998,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (LAY->scroll != old_s) {
             SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
             InvalidateRect(hwnd, NULL, FALSE);
+            /* La mappatura client->documento e' cambiata: gli hit-test in
+             * volo non sono piu' validi. */
+            if (g_doc)
+                g_layout_epoch++;
             LOG_SCROLL("WM_VSCROLL scroll changed");
             log_msg("[SCROLL] WM_VSCROLL: scroll=%d g_layout_complete=%d g_last_rendered_page=%d\n",
                     LAY->scroll, g_layout_complete, g_last_rendered_page);
@@ -1296,6 +2050,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             sync_view_scale();
             layout_zoom_view((double)old_zoom, (double)new_zoom, g_doc_h);
             SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
+            if (g_doc)
+                g_layout_epoch++;
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
@@ -1306,6 +2062,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             sync_view_scale();
             layout_pan(delta / 3, 0, g_doc_h);
             SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
+            if (g_doc)
+                g_layout_epoch++;
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
@@ -1318,6 +2076,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (LAY->scroll < 0) LAY->scroll = 0;
         if (LAY->scroll > max_s) LAY->scroll = max_s;
         SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
+        if (g_doc)
+            g_layout_epoch++;
         InvalidateRect(hwnd, NULL, FALSE);
         LOG_SCROLL("WM_MOUSEWHEEL scroll changed");
         log_msg("[SCROLL] WM_MOUSEWHEEL: scroll=%d g_layout_complete=%d g_last_rendered_page=%d\n",
@@ -1344,11 +2104,27 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         on_render_done((void *)lp, (int)wp);
         return 0;
 
+    case WM_APP_HIT_RESULT:
+        handle_hit_result((HitResult *)lp);
+        return 0;
+
+    case WM_APP_EDIT_APPLIED:
+        on_edit_applied((EditResult *)lp);
+        free((EditResult *)lp);
+        return 0;
+
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case 100: {
             OPENFILENAMEA ofn;
             char szFile[MAX_PATH] = "";
+            if (!can_switch_document())
+            {
+                MessageBoxA(hwnd,
+                            "Attendere il completamento dell'operazione sul paragrafo.",
+                            "d2dview", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
             ZeroMemory(&ofn, sizeof(ofn));
             ofn.lStructSize = sizeof(ofn);
             ofn.hInstance = GetModuleHandle(NULL);
@@ -1363,6 +2139,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         case 101:
+            if (!can_switch_document())
+            {
+                MessageBoxA(hwnd,
+                            "Attendere il completamento dell'operazione sul paragrafo.",
+                            "d2dview", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
             if (g_path[0]) load_docx_file(g_path);
             return 0;
         case 102:
@@ -1376,6 +2159,17 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_DESTROY:
         // log_msg("[DESTROY] Cleaning up\n");
+        /* Un editor aperto viene annullato: nessuna modifica al documento. */
+        g_doc_state = DOC_STATE_IDLE;
+        g_pending_apply_token = 0;
+        g_edit_apply = 0;
+        if (g_edit_hwnd)
+        {
+            DestroyWindow(g_edit_hwnd);
+            g_edit_hwnd = NULL;
+        }
+        free(g_edit_result_utf8);
+        g_edit_result_utf8 = NULL;
         /* Tutte le distruzioni avvengono sul worker, lo stesso thread che ha
          * creato i documenti (COM/GDI hanno affinità di thread). Non si attende:
          * un layout in corso non deve bloccare la chiusura. */
@@ -1432,7 +2226,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
 
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);

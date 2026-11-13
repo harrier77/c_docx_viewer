@@ -175,6 +175,52 @@ typedef struct ld_table_cell_info
 int ld_get_table_cells(void* doc, int table_index, ld_table_cell_info** out_cells, int* out_count);
 void ld_free_table_cells(ld_table_cell_info* cells);
 
+/* ------------------------------------------------------------------
+ * Paragraph editing ABI (in-memory only)
+ *
+ * Every paragraph created from a source w:p gets a stable index for the
+ * lifetime of the open document.  Indices are assigned in document order
+ * and are valid for normal paragraphs, list paragraphs and paragraphs
+ * inside table cells.  Builder-only placeholder paragraphs (empty cells or
+ * an empty body) are intentionally not indexed and are not editable.
+ *
+ * Geometry is available only after a completed layout: before the first
+ * render, and after a text change until the next render, hit-testing fails
+ * cleanly instead of returning stale placements.
+ * ------------------------------------------------------------------ */
+
+typedef struct ld_paragraph_hit
+{
+    int index;      /* stable paragraph index (>= 0) */
+    int x, y, w, h; /* paragraph box in document coordinates */
+} ld_paragraph_hit;
+
+/* Hit-test a point in document coordinates.
+ * Returns 1 when a paragraph with valid post-layout geometry contains the
+ * point and fills out_hit.  If out_text is not NULL it receives a
+ * null-terminated UTF-8 copy of the paragraph text; the caller must free it
+ * with ld_free_string() (it is set to NULL when nothing is hit).
+ * Returns 0 when no editable paragraph is hit. */
+int ld_paragraph_hit_test(void* doc, int x, int y,
+                          ld_paragraph_hit* out_hit, char** out_text);
+
+/* Return a newly allocated UTF-8 copy of a paragraph's plain text.
+ * The caller must free it with ld_free_string().  Returns NULL if the index
+ * is invalid or the paragraph cache is not valid yet (before the first
+ * completed layout, or while waiting for the relayout after an edit). */
+char* ld_paragraph_get_text(void* doc, int index);
+
+/* Replace the plain text of a paragraph.  text is UTF-8; '\n' becomes a
+ * line break.  Only the paragraph's children are rebuilt: the element, its
+ * class and its data-ld-paragraph-index attribute are preserved, so
+ * paragraph-level formatting is kept.  Character-level run formatting is
+ * flattened.  The change is in memory only and is NOT written to the DOCX
+ * file.  Returns 1 on success, 0 on invalid index or failure. */
+int ld_paragraph_set_text(void* doc, int index, const char* text);
+
+/* Free a string returned by litedocx (ld_paragraph_get_text / hit-test). */
+void ld_free_string(char* str);
+
 const char* ld_last_error(void);
 const char* ld_version(void);
 
