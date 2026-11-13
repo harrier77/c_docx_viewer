@@ -43,7 +43,7 @@
  * NOTE: this flag covers the viewer only; the DLL has its own switch
  * (LITEDOCX_CONSOLE_LOG in litedocx_c.cpp).
  * ------------------------------------------------------------------ */
-#define CONSOLE_LOGGING 1
+#define CONSOLE_LOGGING 0
 
 /* Padding: vedi LAYOUT_PADDING_X / LAYOUT_VISUAL_PADDING_X /
  * LAYOUT_VISUAL_MARGIN_Y in func_gdi/layout.h. */

@@ -12,6 +12,9 @@
 #include "renderer.h"
 #include "text_utf8.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
 
 #ifdef __TINYC__
 
@@ -26,6 +29,31 @@ Renderer *renderer_d2d_create(void)
 #include <dwrite.h>
 #include <stdlib.h>
 #include <math.h>
+
+/* Renderer-internal font cache entry */
+typedef struct FontCacheEntryR {
+    char        *family;
+    int          size;
+    int          bold;
+    int          italic;
+    int          underline;
+    int          strike;
+    IDWriteTextFormat *format;
+    struct FontCacheEntryR *next;
+} FontCacheEntryR;
+
+/* Font handle structure (matches d2dview.c's DwFontHandle) */
+typedef struct DwFontHandle {
+    IDWriteTextFormat *format;
+    DWRITE_FONT_METRICS metrics;
+    float        x_height;
+    int          underline;
+    int          strike;
+    int          size_px;
+    float        ascent;
+    float        descent;
+    float        line_gap;
+} DwFontHandle;
 
 typedef struct D2dRenderer
 {
@@ -42,17 +70,12 @@ typedef struct D2dRenderer
     /* DirectWrite */
     IDWriteFactory        *dw_factory;
 
-    /* Zoom/pan trasformato accumulato tramite SetTransform.
-     * Questo valore viene usato per scalare TUTTE le chiamate di disegno
-     * (FillRect, FrameRect, DrawText, ecc.) prima che raggiungano il render target,
-     * così da trattare uniformemente anche i draw GDI (testo via interop DC).
-     * d_zoom == 1.0f => nessuna trasformazione (comportamento standard). */
+    /* Font cache for this renderer instance */
+    FontCacheEntryR       *font_cache;
+
+    /* Current transform matrix */
     D2D1_MATRIX_3X2_F    current_transform;
     int                  current_transform_valid;
-
-    /* Zoom uniforme: fattore di scala applicato a x,y,w,h prima di ogni draw.
-     * Usato solo perhit-testing futuro; i draw effettivi usano le coordinate giá scalate. */
-    float                d_zoom;
 } D2dRenderer;
 
 static D2dRenderer *d2d_of(Renderer *r)
@@ -158,12 +181,10 @@ static int d2d_begin_draw(Renderer *r, HWND hwnd, int w, int h)
         ID2D1DCRenderTarget_Clear(d->renderTarget, &clear_col);
     }
 
-    /* NOTA: la matrice di trasformazione D2D non viene applicata qui.
-     * Lo zoom viene invece applicato scalarmente alle coordinate intere
-     * dentro ogni funzione di disegno (FillRect, DrawText, ecc.):
-     * l'unico modo perche' funzioni anche per il testo e le immagini
-     * disegnati via GDI interop DC, che non risentono di SetTransform.
-     * d_zoom vale 1.0 quando non c'e' zoom (= trasformata identita'). */
+    /* Reapply transform if one was set */
+    if (d->current_transform_valid) {
+        ID2D1DCRenderTarget_SetTransform(d->renderTarget, &d->current_transform);
+    }
 
     d->in_draw = 1;
     return 1;
@@ -204,16 +225,6 @@ static D2D1_COLOR_F color_to_d2d(COLORREF c)
 static void d2d_fill_rect(Renderer *r, int x, int y, int w, int h, COLORREF color)
 {
     D2dRenderer *d = d2d_of(r);
-    /* Zoom: scala le coordinate intere prima di passare a D2D.
-     * Questo garantisce che anche i draw GDI (via interop DC) risentano
-     * della stessa trasformazione, evitando discrepanze testo/bordi. */
-    float z = d->d_zoom;
-    if (z != 1.0f) {
-        x = (int)(x * z + 0.5f);
-        y = (int)(y * z + 0.5f);
-        w = (int)(w * z + 0.5f);
-        h = (int)(h * z + 0.5f);
-    }
     D2D1_RECT_F rc;
     D2D1_COLOR_F col;
 
@@ -233,13 +244,6 @@ static void d2d_fill_rect(Renderer *r, int x, int y, int w, int h, COLORREF colo
 static void d2d_frame_rect(Renderer *r, int x, int y, int w, int h, COLORREF color)
 {
     D2dRenderer *d = d2d_of(r);
-    float z = d->d_zoom;
-    if (z != 1.0f) {
-        x = (int)(x * z + 0.5f);
-        y = (int)(y * z + 0.5f);
-        w = (int)(w * z + 0.5f);
-        h = (int)(h * z + 0.5f);
-    }
     D2D1_RECT_F rc;
     D2D1_COLOR_F col;
 
@@ -259,13 +263,6 @@ static void d2d_frame_rect(Renderer *r, int x, int y, int w, int h, COLORREF col
 static void d2d_draw_ellipse(Renderer *r, int x, int y, int w, int h, COLORREF color)
 {
     D2dRenderer *d = d2d_of(r);
-    float z = d->d_zoom;
-    if (z != 1.0f) {
-        x = (int)(x * z + 0.5f);
-        y = (int)(y * z + 0.5f);
-        w = (int)(w * z + 0.5f);
-        h = (int)(h * z + 0.5f);
-    }
     D2D1_ELLIPSE el;
     D2D1_COLOR_F col;
 
@@ -292,151 +289,50 @@ static void d2d_draw_text(Renderer *r, const char *utf8, void *font, COLORREF co
                           int x, int y, int w, int h)
 {
     D2dRenderer *d = d2d_of(r);
+    DwFontHandle *handle = (DwFontHandle *)font;
     WCHAR *ws;
-    HFONT drawFont = (HFONT)font;
-    int   own_font = 0;
-    float z;
+    IDWriteTextLayout *layout = NULL;
+    IDWriteTextFormat *format = NULL;
+    D2D1_COLOR_F col;
+    HRESULT hr;
 
-    if (!d->renderTarget || !utf8 || !utf8[0])
+    if (!d->renderTarget || !utf8 || !utf8[0] || !handle || !handle->format)
         return;
-
-    /* Zoom: come per le altre primitive (d2d_fill_rect & co.) le coordinate
-     * vanno scalate a mano, perche' il DC di interop GDI non risente della
-     * trasformata D2D. Qui va scalato anche il font: l'HFONT arriva dal
-     * layout a scala logica (zoom 1.0) e il testo e' reso via GDI (DrawTextW),
-     * quindi senza questo passaggio lo zoom sposterebbe il testo senza
-     * ingrandirlo. Non si tocca il layout: nessun re-render, nessuna
-     * duplicazione del blocco di testo. */
-    z = d->d_zoom;
-    if (z != 1.0f) {
-        x = (int)(x * z + 0.5f);
-        y = (int)(y * z + 0.5f);
-        w = (int)(w * z + 0.5f);
-        h = (int)(h * z + 0.5f);
-        if (font) {
-            LOGFONTW lfz;
-            if (GetObjectW((HGDIOBJ)font, sizeof(LOGFONTW), &lfz) == sizeof(LOGFONTW)) {
-                lfz.lfHeight = (LONG)(lfz.lfHeight * z); /* negativo: sale in modulo */
-                if (lfz.lfWidth)
-                    lfz.lfWidth = (LONG)(lfz.lfWidth * z);
-                drawFont = CreateFontIndirectW(&lfz);
-                if (drawFont)
-                    own_font = 1;
-                else
-                    drawFont = (HFONT)font;
-            }
-        }
-    }
 
     ws = utf8_to_wide(utf8);
-    if (!ws) {
-        if (own_font)
-            DeleteObject(drawFont);
+    if (!ws)
+        return;
+
+    format = handle->format;
+    IDWriteTextFormat_AddRef(format);
+
+    /* Create text layout for measuring and drawing */
+    hr = IDWriteFactory_CreateTextLayout(d->dw_factory, ws, lstrlenW(ws),
+        format, (FLOAT)w, (FLOAT)h, &layout);
+    free(ws);
+    
+    if (FAILED(hr) || !layout) {
+        if (format) IDWriteTextFormat_Release(format);
         return;
     }
 
-    /* --- DirectWrite path (requires dw_factory + valid HFONT) --- */
-    if (d->dw_factory && drawFont) {
-        LOGFONTW lf;
-        DWRITE_FONT_WEIGHT weight;
-        DWRITE_FONT_STYLE style;
-        IDWriteTextFormat *fmt = NULL;
-        IDWriteTextLayout *layout = NULL;
-        HRESULT hr;
+    /* Configure layout - no word wrapping for single line */
+    IDWriteTextLayout_SetWordWrapping(layout, DWRITE_WORD_WRAPPING_NO_WRAP);
 
-        ZeroMemory(&lf, sizeof(lf));
-        if (GetObjectW((HGDIOBJ)drawFont, sizeof(LOGFONTW), &lf) == sizeof(LOGFONTW)) {
-            float px_size = (float)(-lf.lfHeight); /* positive pixel-size */
-            switch (lf.lfWeight) {
-            case FW_BOLD:
-            case FW_EXTRABOLD:
-                weight = DWRITE_FONT_WEIGHT_BOLD;
-                break;
-            default:
-                weight = DWRITE_FONT_WEIGHT_NORMAL;
-                break;
-            }
-            style = (lf.lfItalic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL);
+    /* Set up color brush */
+    col.r = GetRValue(color) / 255.0f;
+    col.g = GetGValue(color) / 255.0f;
+    col.b = GetBValue(color) / 255.0f;
+    col.a = 1.0f;
+    ID2D1SolidColorBrush_SetColor(d->brush, &col);
 
-            hr = IDWriteFactory_CreateTextFormat(d->dw_factory, lf.lfFaceName,
-                NULL, weight, style, DWRITE_FONT_STRETCH_NORMAL,
-                px_size, L"en-US", &fmt);
-            if (SUCCEEDED(hr) && fmt) {
-                UINT32 len = lstrlenW(ws);
-                RECT rc = { x, y, x + w, y + h };
+    /* Draw using DirectWrite text layout - this uses the render target's transform */
+    D2D1_POINT_2F origin = { (FLOAT)x, (FLOAT)y };
+    ID2D1DCRenderTarget_DrawTextLayout(d->renderTarget,
+        origin, layout, (ID2D1Brush *)d->brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
 
-                hr = IDWriteFactory_CreateTextLayout(
-                    d->dw_factory, ws, len, fmt,
-                    (FLOAT)w, (FLOAT)h, &layout);
-                if (SUCCEEDED(hr) && layout) {
-                    IDWriteTextLayout_SetWordWrapping(layout, DWRITE_WORD_WRAPPING_NO_WRAP);
-                    /* Draw text via GDI-interop DC so the output lands on the
-                       same D2D-rendered back buffer used by the rest of the renderer. */
-                    ID2D1GdiInteropRenderTarget *gdiInterop = NULL;
-                    HDC dc = NULL;
-                    HGDIOBJ old_font = NULL;
-
-                    if (SUCCEEDED(ID2D1DCRenderTarget_QueryInterface(
-                            d->renderTarget, &IID_ID2D1GdiInteropRenderTarget,
-                            (void **)&gdiInterop))) {
-                        if (SUCCEEDED(ID2D1GdiInteropRenderTarget_GetDC(
-                                gdiInterop, D2D1_DC_INITIALIZE_MODE_COPY, &dc))) {
-                            SetMapMode(dc, MM_TEXT);
-                            SetTextColor(dc, color);
-                            SetBkMode(dc, TRANSPARENT);
-                            old_font = SelectObject(dc, drawFont);
-                            DrawTextW(dc, ws, (int)len, &rc,
-                                      DT_SINGLELINE | DT_NOPREFIX | DT_NOCLIP);
-                            if (old_font)
-                                SelectObject(dc, old_font);
-                            ID2D1GdiInteropRenderTarget_ReleaseDC(gdiInterop, NULL);
-                        }
-                        ID2D1GdiInteropRenderTarget_Release(gdiInterop);
-                    }
-                    IDWriteTextLayout_Release(layout);
-                }
-                IDWriteTextFormat_Release(fmt);
-            }
-        }
-        goto done_free_ws;
-    }
-
-    /* --- Fallback: pure GDI interop (no DirectWrite) --- */
-    {
-        ID2D1GdiInteropRenderTarget *gdiInterop = NULL;
-        HDC dc = NULL;
-        HGDIOBJ old = NULL;
-        RECT rc;
-
-        if (SUCCEEDED(ID2D1DCRenderTarget_QueryInterface(d->renderTarget,
-                        &IID_ID2D1GdiInteropRenderTarget, (void **)&gdiInterop))) {
-            if (SUCCEEDED(ID2D1GdiInteropRenderTarget_GetDC(gdiInterop,
-                            D2D1_DC_INITIALIZE_MODE_COPY, &dc))) {
-                if (drawFont)
-                    old = SelectObject(dc, drawFont);
-                SetMapMode(dc, MM_TEXT);
-                SetTextColor(dc, color);
-                SetBkMode(dc, TRANSPARENT);
-
-                rc.left = x;
-                rc.top = y;
-                rc.right = x + w;
-                rc.bottom = y + h;
-                DrawTextW(dc, ws, lstrlenW(ws), &rc,
-                          DT_SINGLELINE | DT_NOPREFIX | DT_NOCLIP);
-
-                if (font)
-                    SelectObject(dc, old);
-                ID2D1GdiInteropRenderTarget_ReleaseDC(gdiInterop, NULL);
-            }
-            ID2D1GdiInteropRenderTarget_Release(gdiInterop);
-        }
-    }
-
-done_free_ws:
-    if (own_font)
-        DeleteObject(drawFont);
-    free(ws);
+    IDWriteTextLayout_Release(layout);
+    IDWriteTextFormat_Release(format);
 }
 
 static void d2d_draw_image(Renderer *r, void *native_bitmap, int src_w, int src_h,
@@ -446,20 +342,9 @@ static void d2d_draw_image(Renderer *r, void *native_bitmap, int src_w, int src_
     HDC mem;
     HGDIOBJ old;
     BLENDFUNCTION bf;
-    float z = d->d_zoom;
 
     if (!d->memdc || !native_bitmap || src_w <= 0 || src_h <= 0 || w <= 0 || h <= 0)
         return;
-
-    /* Zoom: stesse coordinate scalate a mano usate dalle altre primitive. */
-    if (z != 1.0f) {
-        x = (int)(x * z + 0.5f);
-        y = (int)(y * z + 0.5f);
-        w = (int)(w * z + 0.5f);
-        h = (int)(h * z + 0.5f);
-        if (w <= 0 || h <= 0)
-            return;
-    }
 
     mem = CreateCompatibleDC(d->memdc);
     if (!mem)
@@ -530,19 +415,38 @@ static void d2d_set_transform(Renderer *r, float m11, float m12, float m21, floa
     d->current_transform._31 = dx;
     d->current_transform._32 = dy;
     d->current_transform_valid = 1;
-    /* Estrai il fattore di scala uniforme dalla diagonale (usato dai draw).
-     * Se la matrice ha scale non uniformi (m11 != m22), usiamo media. */
-    d->d_zoom = 0.5f * (fabsf(m11) + fabsf(m22));
-    if (d->d_zoom < 0.001f) d->d_zoom = 1.0f;
-    fprintf(stderr, "[D2D_TRANSFORM] stored m11=%f m12=%f m21=%f m22=%f dx=%f dy=%f => zoom=%.3f\n",
-            m11, m12, m21, m22, dx, dy, d->d_zoom);
+    fprintf(stderr, "[D2D_TRANSFORM] set m11=%f m12=%f m21=%f m22=%f dx=%f dy=%f\n",
+            m11, m12, m21, m22, dx, dy);
+
+    /* Apply transform immediately if we're in a draw frame */
+    if (d->renderTarget && d->in_draw) {
+        ID2D1DCRenderTarget_SetTransform(d->renderTarget, &d->current_transform);
+    }
 }
 
 static void d2d_reset_transform(Renderer *r)
 {
     D2dRenderer *d = d2d_of(r);
     d->current_transform_valid = 0;
-    d->d_zoom = 1.0f;
+
+    /* Reset to identity */
+    D2D1_MATRIX_3X2_F identity = { { { 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f } } };
+
+    if (d->renderTarget && d->in_draw) {
+        ID2D1DCRenderTarget_SetTransform(d->renderTarget, &identity);
+    }
+}
+
+static void d2d_destroy_font_cache(FontCacheEntryR *cache)
+{
+    FontCacheEntryR *e = cache;
+    while (e) {
+        FontCacheEntryR *next = e->next;
+        if (e->format) IDWriteTextFormat_Release(e->format);
+        free(e->family);
+        free(e);
+        e = next;
+    }
 }
 
 static void d2d_destroy(Renderer *r)
@@ -573,6 +477,9 @@ static void d2d_destroy(Renderer *r)
         DeleteDC(d->memdc);
         d->memdc = NULL;
     }
+    /* Free font cache */
+    d2d_destroy_font_cache(d->font_cache);
+    d->font_cache = NULL;
     free(d);
 }
 
@@ -612,6 +519,8 @@ Renderer *renderer_d2d_create(IDWriteFactory *dw_factory,
     }
 
     d->dw_factory = dw_factory;
+    d->font_cache = NULL;
+    d->current_transform_valid = 0;
     d->base.vtbl = &g_d2d_vtbl;
     return &d->base;
 }

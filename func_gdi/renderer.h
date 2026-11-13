@@ -4,6 +4,11 @@
  * Operazioni in coordinate intere: la resa GDI attuale deve restare
  * pixel-identica. Il renderer possiede il proprio back buffer; Present()
  * lo copia sul DC della finestra.
+ *
+ * FONT HANDLE: In Direct2D mode, the font handle is an opaque pointer
+ * to a DwFontHandle struct containing IDWriteTextFormat and metrics.
+ * It is NOT an HFONT. The layout/DLL creates it via cb_create_font and
+ * the renderer uses it directly for native DirectWrite text rendering.
  */
 #ifndef RENDERER_H
 #define RENDERER_H
@@ -31,7 +36,9 @@ typedef struct RendererVtbl
     void (*DrawEllipse)(Renderer *r, int x, int y, int w, int h, COLORREF color);
     void (*DrawRect)(Renderer *r, int x, int y, int w, int h, COLORREF color);
 
-    /* font: handle opaco restituito da cb_create_font (oggi HFONT). */
+    /* font: handle opaco restituito da cb_create_font.
+     * In D2D mode: pointer to DwFontHandle with IDWriteTextFormat (NOT HFONT).
+     * In GDI mode: HFONT (legacy). */
     void (*DrawText)(Renderer *r, const char *utf8, void *font, COLORREF color,
                      int x, int y, int w, int h);
 
@@ -71,6 +78,8 @@ Renderer *renderer_gdi_create(void);
    informazioni che DirectWrite puo' usare per creare IDWriteTextFormat.
    Ritorna 0 in caso di successo, !=0 altrimenti.
    Se il resolver e' NULL, il renderer non attivava DirectWrite per il testo.
+   NOTE: With native DirectWrite, the font handle is already an IDWriteTextFormat
+   wrapper (DwFontHandle), so no resolver is needed.
 */
 typedef int (*D2dFontResolver)(void *ctx, void *hfont, wchar_t *family, int *size_px,
                                int *bold, int *italic, int *underline);
