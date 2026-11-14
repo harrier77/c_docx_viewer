@@ -125,6 +125,11 @@ static char      g_log_path[MAX_PATH];
 static ld_callbacks g_cb;
 static int g_cb_init;
 
+/* Forward declarations for XML paragraph editing */
+static int g_edit_is_xml;
+static void show_paragraph_editor_xml(int index, const char *xml_utf8);
+static void request_paragraph_apply_xml(const char *xml);
+
 /* Find or create a cached font entry */
 static FontCacheEntry *font_cache_find(const char *family, int size, int bold,
                                        int italic, int underline, int strike)
@@ -502,6 +507,7 @@ static void init_callbacks(void)
 #define WM_APP_RENDER_DONE  (WM_APP + 3)
 #define WM_APP_HIT_RESULT   (WM_APP + 4)
 #define WM_APP_EDIT_APPLIED (WM_APP + 5)
+#define WM_APP_PARA_XML_READY (WM_APP + 6)
 
 /* UI-side document state.  Transitions are made only on the UI thread and
  * serialize mutually exclusive operations on the document tree. */
@@ -534,6 +540,18 @@ typedef struct EditResult
     char     error[256];
 } EditResult;
 
+/* Result for JOB_GET_PARA_XML */
+typedef struct ParaXmlResult
+{
+    void    *doc;
+    unsigned gen;
+    unsigned epoch;
+    int       ok;
+    int       index;
+    char     *xml;      /* UTF-8 XML del paragrafo (w:p...), owned by litedocx */
+    char      error[256];
+} ParaXmlResult;
+
 typedef enum JobKind
 {
     JOB_LOAD = 1,
@@ -541,6 +559,7 @@ typedef enum JobKind
     JOB_RENDER_RANGE,
     JOB_HIT_TEST,
     JOB_APPLY_EDIT,
+    JOB_GET_PARA_XML,
     JOB_DESTROY,
     JOB_QUIT
 } JobKind;
@@ -565,7 +584,8 @@ typedef struct Job
     int         para_index;
     int         doc_x;
     int         doc_y;
-    char       *text;
+    char       *text;        /* plain text for ld_paragraph_set_text */
+    char       *xml_text;    /* XML for ld_paragraph_get_xml / ld_paragraph_set_xml */
 } Job;
 
 static CRITICAL_SECTION g_job_lock;
@@ -774,40 +794,70 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                              (WPARAM)j->content_w, (LPARAM)j->doc);
             break;
 
-        case JOB_HIT_TEST:
-        {
-            if (!g_shutdown && j->doc)
-            {
-                ld_paragraph_hit hit;
-                char *text = NULL;
-                int got = ld_paragraph_hit_test(j->doc, j->doc_x, j->doc_y, &hit, &text);
-                HitResult *r = (HitResult *)calloc(1, sizeof(HitResult));
-                if (r)
-                {
-                    r->doc = j->doc;
-                    r->gen = j->gen;
-                    r->epoch = j->epoch;
-                    r->hit = got;
-                    r->index = got ? hit.index : -1;
-                    r->text = text;
-                    PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, (LPARAM)r);
-                }
-                else
-                {
-                    ld_free_string(text);
-                    PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, 0);
-                }
-            }
-            break;
-        }
+       case JOB_HIT_TEST:
+           {
+               if (!g_shutdown && j->doc)
+               {
+                   ld_paragraph_hit hit;
+                   char *text = NULL;
+                   int got = ld_paragraph_hit_test(j->doc, j->doc_x, j->doc_y, &hit, &text);
+                   HitResult *r = (HitResult *)calloc(1, sizeof(HitResult));
+                   if (r)
+                   {
+                       r->doc = j->doc;
+                       r->gen = j->gen;
+                       r->epoch = j->epoch;
+                       r->hit = got;
+                       r->index = got ? hit.index : -1;
+                       r->text = text;
+                       PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, (LPARAM)r);
+                   }
+                   else
+                   {
+                       ld_free_string(text);
+                       PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, 0);
+                   }
+               }
+               break;
+           }
 
-        case JOB_APPLY_EDIT:
+           case JOB_GET_PARA_XML:
+           {
+               if (!g_shutdown && j->doc && j->para_index >= 0)
+               {
+                   ParaXmlResult *r = (ParaXmlResult *)calloc(1, sizeof(ParaXmlResult));
+                   if (r)
+                   {
+                       r->doc = j->doc;
+                       r->gen = j->gen;
+                       r->epoch = j->epoch;
+                       r->index = j->para_index;
+                       r->ok = ld_paragraph_get_xml(j->doc, j->para_index, &r->xml);
+                       if (!r->ok)
+                       {
+                           const char *err = ld_last_error();
+                           lstrcpynA(r->error, err ? err : "", sizeof(r->error));
+                       }
+                       PostMessageA(j->hwnd, WM_APP_PARA_XML_READY, 0, (LPARAM)r);
+                   }
+               }
+               break;
+           }
+
+           case JOB_APPLY_EDIT:
         {
             EditResult *r = (EditResult *)calloc(1, sizeof(EditResult));
             int ok = 0;
-            if (!g_shutdown && j->doc && j->text)
+            if (!g_shutdown && j->doc)
             {
-                ok = ld_paragraph_set_text(j->doc, j->para_index, j->text);
+                if (j->xml_text)
+                {
+                    ok = ld_paragraph_set_xml(j->doc, j->para_index, j->xml_text);
+                }
+                else if (j->text)
+                {
+                    ok = ld_paragraph_set_text(j->doc, j->para_index, j->text);
+                }
             }
             if (r)
             {
@@ -827,6 +877,8 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
             }
             free(j->text);
             j->text = NULL;
+            free(j->xml_text);
+            j->xml_text = NULL;
             break;
         }
 
@@ -1698,6 +1750,7 @@ static void begin_paragraph_edit_at(int doc_x, int doc_y)
         char            *text = NULL;
         if (ld_paragraph_hit_test(g_doc, doc_x, doc_y, &hit, &text) && text)
         {
+            /* Usa direttamente l'editor di testo plain (XML editor disabilitato) */
             show_paragraph_editor(hit.index, text);
             ld_free_string(text);
         }
@@ -1713,6 +1766,8 @@ static void begin_paragraph_edit_at(int doc_x, int doc_y)
         j->epoch = g_layout_epoch;
         j->doc_x = doc_x;
         j->doc_y = doc_y;
+        /* Flag: para_index = -1 significa "dopo hit-test, richiedi XML" (disabilitato: usa testo plain) */
+        j->para_index = -1;
         g_doc_state = DOC_STATE_HITTEST;
         enqueue_job(j);
     }
@@ -1759,10 +1814,249 @@ static void handle_hit_result(HitResult *r)
         return;
     }
 
+    /* XML editor disabilitato: usa direttamente l'editor di testo plain */
     g_doc_state = DOC_STATE_IDLE;
+    g_edit_is_xml = 0;
     show_paragraph_editor(r->index, r->text);
     ld_free_string(r->text);
     free(r);
+}
+
+/* ---------------------------------------------------------------
+ * NUOVO: Gestione edit XML paragrafo
+ * --------------------------------------------------------------- */
+
+/* Esito di JOB_GET_PARA_XML. Apre l'editor con l'XML. */
+static void handle_para_xml_ready(ParaXmlResult *r)
+{
+    if (!r)
+    {
+        if (g_doc_state == DOC_STATE_HITTEST)
+            g_doc_state = DOC_STATE_IDLE;
+        resume_pending_render();
+        return;
+    }
+
+    if (g_edit_hwnd)
+    {
+        ld_free_string(r->xml);
+        free(r);
+        return;
+    }
+
+    if (r->doc != g_doc || r->gen != g_load_gen || r->epoch != g_layout_epoch)
+    {
+        ld_free_string(r->xml);
+        free(r);
+        if (g_doc_state == DOC_STATE_HITTEST)
+            g_doc_state = DOC_STATE_IDLE;
+        resume_pending_render();
+        return;
+    }
+
+    if (!r->ok || !r->xml)
+    {
+        MessageBoxA(g_hwnd,
+                    r->error[0] ? r->error : "Errore lettura XML paragrafo",
+                    "Errore", MB_OK | MB_ICONERROR);
+        g_doc_state = DOC_STATE_IDLE;
+        resume_pending_render();
+        ld_free_string(r->xml);
+        free(r);
+        return;
+    }
+
+    g_doc_state = DOC_STATE_IDLE;
+    g_edit_is_xml = 1;
+    show_paragraph_editor_xml(r->index, r->xml);
+    ld_free_string(r->xml);
+    free(r);
+}
+
+/* Editor per XML: simile a show_paragraph_editor ma con hint diverso. */
+static void show_paragraph_editor_xml(int index, const char *xml_utf8)
+{
+    static ACCEL accels[2];
+    WCHAR       *wtext;
+    RECT         rc_main;
+    int          w = 660, h = 440, x, y;
+    HWND         hwnd;
+    MSG          msg;
+    int          quit = 0;
+
+    if (index < 0 || g_edit_hwnd)
+        return;
+
+    ensure_editor_class();
+
+    g_edit_index = index;
+    g_edit_apply = 0;
+    free(g_edit_result_utf8);
+    g_edit_result_utf8 = NULL;
+
+    GetWindowRect(g_hwnd, &rc_main);
+    x = rc_main.left + ((rc_main.right - rc_main.left) - w) / 2;
+    y = rc_main.top + ((rc_main.bottom - rc_main.top) - h) / 2;
+
+    g_doc_state = DOC_STATE_EDITOR;
+    hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, LD_PARA_EDIT_CLASS,
+                           L"Modifica XML paragrafo",
+                           WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+                           x, y, w, h, g_hwnd, NULL,
+                           GetModuleHandle(NULL), NULL);
+    if (!hwnd)
+    {
+        g_edit_index = -1;
+        g_edit_is_xml = 0;
+        g_doc_state = DOC_STATE_IDLE;
+        return;
+    }
+
+    wtext = u8_to_w(xml_utf8 ? xml_utf8 : "");
+    if (wtext)
+    {
+        SetWindowTextW(g_edit_ctl, wtext);
+        free(wtext);
+    }
+
+    /* Aggiorna hint per XML */
+    HWND hint = GetDlgItem(hwnd, IDC_PARA_HINT);
+    if (hint)
+        SetWindowTextW(hint,
+            L"Modifica l'XML w:p del paragrafo. Attenzione: XML malformato corrompe il documento.\nIl file DOCX su disco NON viene modificato (solo in memoria).");
+
+    accels[0].fVirt = FVIRTKEY;
+    accels[0].key = VK_ESCAPE;
+    accels[0].cmd = IDC_PARA_CANCEL;
+    accels[1].fVirt = FVIRTKEY | FCONTROL;
+    accels[1].key = VK_RETURN;
+    accels[1].cmd = IDC_PARA_APPLY;
+    g_edit_accel = CreateAcceleratorTableW(accels, 2);
+
+    EnableWindow(g_hwnd, FALSE);
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    SetForegroundWindow(hwnd);
+    SetFocus(g_edit_ctl);
+    SendMessageW(g_edit_ctl, EM_SETSEL, 0, -1);
+
+    for (;;)
+    {
+        int r = GetMessageW(&msg, NULL, 0, 0);
+        if (r == 0)
+        {
+            quit = 1;
+            break;
+        }
+        if (r == -1)
+            break;
+        if (!g_edit_accel || !TranslateAcceleratorW(hwnd, g_edit_accel, &msg))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (!g_edit_hwnd)
+            break;
+    }
+
+    if (g_edit_hwnd)
+    {
+        g_edit_apply = 0;
+        DestroyWindow(g_edit_hwnd);
+        g_edit_hwnd = NULL;
+    }
+    if (g_edit_accel)
+    {
+        DestroyAcceleratorTable(g_edit_accel);
+        g_edit_accel = NULL;
+    }
+
+    EnableWindow(g_hwnd, TRUE);
+    SetForegroundWindow(g_hwnd);
+
+    if (quit)
+    {
+        g_edit_index = -1;
+        g_edit_is_xml = 0;
+        free(g_edit_result_utf8);
+        g_edit_result_utf8 = NULL;
+        g_doc_state = DOC_STATE_IDLE;
+        PostQuitMessage(0);
+        return;
+    }
+
+    if (g_edit_apply && g_edit_result_utf8)
+    {
+        request_paragraph_apply_xml(g_edit_result_utf8);
+    }
+    else
+    {
+        g_edit_is_xml = 0;
+        g_doc_state = DOC_STATE_IDLE;
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        resume_pending_render();
+    }
+
+    g_edit_index = -1;
+    g_edit_is_xml = 0;
+    free(g_edit_result_utf8);
+    g_edit_result_utf8 = NULL;
+}
+
+/* Accoda applicazione XML paragrafo. */
+static void request_paragraph_apply_xml(const char *xml)
+{
+    if (!g_doc || !xml || g_edit_index < 0)
+    {
+        g_doc_state = DOC_STATE_IDLE;
+        return;
+    }
+
+    g_apply_token++;
+    g_doc_state = DOC_STATE_APPLYING;
+    g_pending_apply_token = g_apply_token;
+
+    if (!g_worker_started)
+    {
+        EditResult r;
+        ZeroMemory(&r, sizeof(r));
+        r.doc = g_doc;
+        r.gen = g_load_gen;
+        r.token = g_apply_token;
+        r.ok = ld_paragraph_set_xml(g_doc, g_edit_index, xml);
+        if (!r.ok)
+        {
+            const char *err = ld_last_error();
+            lstrcpynA(r.error, err ? err : "", sizeof(r.error));
+        }
+        on_edit_applied(&r);
+        return;
+    }
+
+    {
+        Job *j = alloc_job(JOB_APPLY_EDIT);
+        if (!j)
+        {
+            g_pending_apply_token = 0;
+            g_doc_state = DOC_STATE_IDLE;
+            return;
+        }
+        j->doc = g_doc;
+        j->gen = g_load_gen;
+        j->epoch = g_layout_epoch;
+        j->token = g_apply_token;
+        j->para_index = g_edit_index;
+        j->xml_text = _strdup(xml);
+        if (!j->xml_text)
+        {
+            free(j);
+            g_pending_apply_token = 0;
+            g_doc_state = DOC_STATE_IDLE;
+            return;
+        }
+        g_render_busy = 1;
+        g_render_doc = g_doc;
+        enqueue_job(j);
+    }
 }
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -2109,9 +2403,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_APP_EDIT_APPLIED:
-        on_edit_applied((EditResult *)lp);
-        free((EditResult *)lp);
-        return 0;
+           on_edit_applied((EditResult *)lp);
+           free((EditResult *)lp);
+           return 0;
+
+    case WM_APP_PARA_XML_READY:
+           handle_para_xml_ready((ParaXmlResult *)lp);
+           return 0;
 
     case WM_COMMAND:
         switch (LOWORD(wp)) {

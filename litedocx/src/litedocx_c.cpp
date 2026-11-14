@@ -2385,5 +2385,287 @@ void ld_destroy(void* doc)
     }
     delete h;
 }
+/* ---------------------------------------------------------------
+ * Paragraph HTML API (Opzione B: edit litehtml DOM)
+ * --------------------------------------------------------------- */
 
+// Serialize inner HTML of a paragraph (children only)
+static std::string serialize_paragraph_inner_html(const litehtml::element::ptr& para)
+{
+    std::string out;
+    for(const auto& child : para->children())
+    {
+        if(child->is_text())
+        {
+            std::string txt;
+            child->get_text(txt);
+            // Escape for text content
+            for(char c : txt)
+            {
+                switch(c)
+                {
+                    case '&':  out += "&"; break;
+                    case '<':  out += "<"; break;
+                    case '>':  out += ">"; break;
+                    default:   out.push_back(c);
+                }
+            }
+        }
+        else
+        {
+            const char* tag = child->get_tagName();
+            if(tag && tag[0])
+            {
+                out.push_back('<');
+                out += tag;
+                auto attrs = child->dump_get_attrs();
+                for(const auto& kv : attrs)
+                {
+                    out.push_back(' ');
+                    out += std::get<0>(kv);
+                    out += "=\"";
+                    std::string val = std::get<1>(kv);
+                    std::string escaped;
+                    for(char c : val)
+                    {
+                        switch(c)
+                        {
+                            case '&':  escaped += "&"; break;
+                            case '<':  escaped += "<"; break;
+                            case '>':  escaped += ">"; break;
+                            case '"':  escaped += "\""; break;
+                            default:   escaped.push_back(c);
+                        }
+                    }
+                    out += escaped;
+                    out.push_back('"');
+                }
+                out.push_back('>');
+
+                for(const auto& gc : child->children())
+                {
+                    // Recursively serialize - only handle text grandchildren
+                    if(gc->is_text())
+                    {
+                        std::string txt;
+                        gc->get_text(txt);
+                        for(char c : txt)
+                        {
+                            switch(c)
+                            {
+                                case '&':  out += "&"; break;
+                                case '<':  out += "<"; break;
+                                case '>':  out += ">"; break;
+                                default:   out.push_back(c);
+                            }
+                        }
+                    }
+                }
+
+                static const char* void_tags[] = {"br", "img", "hr", "input", "meta", "link", nullptr};
+                bool is_void = false;
+                for(int i = 0; void_tags[i]; ++i)
+                {
+                    if(strcmp(tag, void_tags[i]) == 0)
+                    {
+                        is_void = true;
+                        break;
+                    }
+                }
+                if(!is_void)
+                {
+                    out += "</";
+                    out += tag;
+                    out.push_back('>');
+                }
+            }
+        }
+    }
+    return out;
+}
+
+int ld_paragraph_get_xml(void* doc, int index, char** out_xml)
+{
+    if(!out_xml) return 0;
+    *out_xml = nullptr;
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container || !h->container->paragraphs_valid)
+    {
+        return 0;
+    }
+    try
+    {
+        const ld_container::ParagraphInfo* info = h->container->find_paragraph(index);
+        if(!info || !info->element)
+        {
+            return 0;
+        }
+        std::string html = serialize_paragraph_inner_html(info->element);
+        *out_xml = ld_dup_utf8(html.c_str());
+        return 1;
+    } catch(...)
+    {
+        set_error("errore durante la serializzazione XML paragrafo");
+        return 0;
+    }
+}
+
+int ld_paragraph_set_xml(void* doc, int index, const char* xml)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container || !xml)
+    {
+        set_error("parametri modifica XML paragrafo non validi");
+        return 0;
+    }
+
+    try
+    {
+        ld_container* c = h->container;
+        const ld_container::ParagraphInfo* info = c->find_paragraph(index);
+        if(!info || !info->element)
+        {
+            set_error("indice paragrafo non valido");
+            return 0;
+        }
+
+        litehtml::element::ptr para = info->element;
+
+        // Find a run to keep for style
+        litehtml::element::ptr style_run;
+        litehtml::element::ptr style_fallback;
+        for(const auto& child : para->children())
+        {
+            find_run_style_source(child, style_run, style_fallback);
+        }
+        litehtml::element::ptr keep = style_run ? style_run : style_fallback;
+
+        // Invalidate layout
+        c->clear_paragraphs();
+        h->m_rebuild_needed    = true;
+        h->m_full_layout_done  = false;
+        h->m_page_heights.clear();
+        h->m_page_y_offsets.clear();
+        h->m_last_rendered_page = -1;
+
+        // Clear paragraph
+        para->clearRecursive();
+        litehtml::element::ptr target = para;
+        if(keep)
+        {
+            para->appendChild(keep);
+            target = keep;
+        }
+
+        // Parse HTML fragment and append children
+        // Wrap in a div to parse as fragment
+        std::string wrapped = "<div>" + std::string(xml) + "</div>";
+        auto temp_doc = litehtml::document::createFromString(wrapped.c_str(), nullptr, nullptr);
+        if(temp_doc && temp_doc->root())
+        {
+            for(const auto& child : temp_doc->root()->children())
+            {
+                if(child && strcmp(child->get_tagName(), "div") == 0)
+                {
+                    for(const auto& gc : child->children())
+                    {
+                        std::string child_html;
+                        // Serialize this child
+                        if(gc->is_text())
+                        {
+                            std::string txt;
+                            gc->get_text(txt);
+                            child_html = txt;
+                        }
+                        else
+                        {
+                            const char* tag = gc->get_tagName();
+                            if(tag && tag[0])
+                            {
+                                child_html.push_back('<');
+                                child_html += tag;
+                                auto attrs = gc->dump_get_attrs();
+                                for(const auto& kv : attrs)
+                                {
+                                    child_html.push_back(' ');
+                                    child_html += std::get<0>(kv);
+                                    child_html += "=\"";
+                                    std::string val = std::get<1>(kv);
+                                    std::string escaped;
+                                    for(char c : val)
+                                    {
+                                        switch(c)
+                                        {
+                                            case '&':  escaped += "&"; break;
+                                            case '<':  escaped += "<"; break;
+                                            case '>':  escaped += ">"; break;
+                                            case '"':  escaped += "\""; break;
+                                            default:   escaped.push_back(c);
+                                        }
+                                    }
+                                    child_html += escaped;
+                                    child_html.push_back('"');
+                                }
+                                child_html.push_back('>');
+                                for(const auto& ggc : gc->children())
+                                {
+                                    if(ggc->is_text())
+                                    {
+                                        std::string txt;
+                                        ggc->get_text(txt);
+                                        for(char c : txt)
+                                        {
+                                            switch(c)
+                                            {
+                                                case '&':  child_html += "&"; break;
+                                                case '<':  child_html += "<"; break;
+                                                case '>':  child_html += ">"; break;
+                                                default:   child_html.push_back(c);
+                                            }
+                                        }
+                                    }
+                                }
+                                static const char* void_tags[] = {"br", "img", "hr", "input", "meta", "link", nullptr};
+                                bool is_void = false;
+                                for(int i = 0; void_tags[i]; ++i)
+                                {
+                                    if(strcmp(tag, void_tags[i]) == 0)
+                                    {
+                                        is_void = true;
+                                        break;
+                                    }
+                                }
+                                if(!is_void)
+                                {
+                                    child_html += "</";
+                                    child_html += tag;
+                                    child_html.push_back('>');
+                                }
+                            }
+                        }
+                        if(!child_html.empty())
+                        {
+                            auto parsed = litehtml::document::createFromString(child_html.c_str(), h->container, nullptr);
+                            if(parsed && parsed->root())
+                            {
+                                for(const auto& pc : parsed->root()->children())
+                                {
+                                    target->appendChild(pc);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        set_error("");
+        return 1;
+    } catch(...)
+    {
+        set_error("errore durante la modifica XML paragrafo");
+        return 0;
+    }
+}
 } // extern "C"

@@ -218,6 +218,21 @@ char* ld_paragraph_get_text(void* doc, int index);
  * file.  Returns 1 on success, 0 on invalid index or failure. */
 int ld_paragraph_set_text(void* doc, int index, const char* text);
 
+/* Return the paragraph's inner HTML (litehtml DOM) as UTF-8 string.
+ * The caller must free it with ld_free_string().  Returns NULL if the index
+ * is invalid or the paragraph cache is not valid yet.  The HTML contains
+ * <span class="sN"> elements with run-level formatting and <br> for line breaks.
+ * This is the in-memory representation, NOT the original OOXML w:p. */
+int ld_paragraph_get_xml(void* doc, int index, char** out_xml);
+
+/* Replace the paragraph's inner HTML with the given XML/HTML fragment.
+ * xml is UTF-8; a subset of HTML is supported: <span class="sN">, <b>, <i>,
+ * <u>, <strike>, <br>, and plain text.  The paragraph element, its class,
+ * and data-ld-paragraph-index are preserved.  A representative run span is
+ * kept to maintain dominant character formatting.  The change is in memory
+ * only and is NOT written to the DOCX file.  Returns 1 on success, 0 on failure. */
+int ld_paragraph_set_xml(void* doc, int index, const char* xml);
+
 /* Free a string returned by litedocx (ld_paragraph_get_text / hit-test). */
 void ld_free_string(char* str);
 
