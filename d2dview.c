@@ -588,6 +588,7 @@ typedef struct Job
     int         doc_y;
     char       *text;        /* plain text for ld_paragraph_set_text */
     char       *xml_text;    /* XML for ld_paragraph_get_xml / ld_paragraph_set_xml */
+    int         ooxml;       /* 1 = xml_text is raw OOXML (ld_paragraph_set_ooxml) */
 } Job;
 
 static CRITICAL_SECTION g_job_lock;
@@ -861,10 +862,13 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
             {
                 if (j->xml_text)
                 {
-                    fprintf(stderr, "[XML][WORKER-APPLY] idx=%d bytes=%d\n",
-                            j->para_index, (int)strlen(j->xml_text));
+                    fprintf(stderr, "[XML][WORKER-APPLY] idx=%d bytes=%d ooxml=%d\n",
+                            j->para_index, (int)strlen(j->xml_text), j->ooxml);
                     log_xml_block("WORKER-APPLY", j->para_index, j->xml_text);
-                    ok = ld_paragraph_set_xml(j->doc, j->para_index, j->xml_text);
+                    if (j->ooxml)
+                        ok = ld_paragraph_set_ooxml(j->doc, j->para_index, j->xml_text);
+                    else
+                        ok = ld_paragraph_set_xml(j->doc, j->para_index, j->xml_text);
                     fprintf(stderr, "[XML][WORKER-APPLY] ok=%d err='%s'\n",
                             ok, ok ? "" : ld_last_error());
                 }
@@ -1570,14 +1574,13 @@ static void commit_paragraph_editor(HWND hwnd)
         log_xml_block("COMMIT-EDITED", g_edit_index, xml);
         if (!strings_equal_ignore_cr(xml, g_edit_xml_original))
         {
-            fprintf(stderr, "[XML][COMMIT] OOXML modificato: applicazione non ancora supportata\n");
-            MessageBoxW(hwnd,
-                    L"La modifica dell'OOXML non e' ancora applicabile.\n\n"
-                    L"Per ora il tab XML mostra l'XML originale del paragrafo "
-                    L"(w:p / w:r / w:t) ed e' utile per ispezione.",
-                    L"Modifica XML", MB_OK | MB_ICONINFORMATION);
-            free(xml);
-            return; /* lascia l'editor aperto */
+            fprintf(stderr, "[XML][COMMIT] OOXML modificato: applico via ld_paragraph_set_ooxml\n");
+            free(g_edit_result_utf8);
+            g_edit_result_utf8 = xml;
+            g_edit_is_xml = 1;
+            g_edit_apply = 1;
+            DestroyWindow(hwnd);
+            return;
         }
         fprintf(stderr, "[XML][COMMIT] OOXML invariato: applico il testo\n");
         free(xml);
@@ -2214,8 +2217,8 @@ static void request_paragraph_apply_xml(const char *xml)
         r.doc = g_doc;
         r.gen = g_load_gen;
         r.token = g_apply_token;
-        r.ok = ld_paragraph_set_xml(g_doc, g_edit_index, xml);
-        fprintf(stderr, "[XML][APPLY-SYNC] ok=%d err='%s'\n",
+        r.ok = ld_paragraph_set_ooxml(g_doc, g_edit_index, xml);
+        fprintf(stderr, "[XML][APPLY-SYNC-OOXML] ok=%d err='%s'\n",
                 r.ok, r.ok ? "" : ld_last_error());
         if (!r.ok)
         {
@@ -2240,6 +2243,7 @@ static void request_paragraph_apply_xml(const char *xml)
         j->token = g_apply_token;
         j->para_index = g_edit_index;
         j->xml_text = _strdup(xml);
+        j->ooxml = 1;
         if (!j->xml_text)
         {
             free(j);

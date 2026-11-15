@@ -166,6 +166,7 @@ namespace litedocx
                 {
                     if(xml_local_name(stack[i]->name) == local)
                     {
+                        stack[i]->src_end = static_cast<size_t>(scan.p - data);
                         stack.resize(i);
                         break;
                     }
@@ -175,6 +176,11 @@ namespace litedocx
 
             auto node = std::unique_ptr<XmlNode>(new XmlNode());
             node->name = std::string_view(tok.name, tok.name_len);
+            node->src_begin = static_cast<size_t>((tok.name > data ? tok.name - 1 : tok.name) - data);
+            if(tok.self_closing)
+            {
+                node->src_end = static_cast<size_t>(scan.p - data);
+            }
             parse_attrs(tok.attrs, tok.attrs_len, node->attrs);
 
             XmlNode* raw = node.get();

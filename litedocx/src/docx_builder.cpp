@@ -553,6 +553,10 @@ namespace litedocx
         /* Keep the original OOXML for this paragraph so the host can display
          * and (in the future) re-apply the real DOCX markup. */
         m_paragraph_ooxml[para_index] = xml_serialize(*p);
+        if(p->src_end > p->src_begin)
+        {
+            m_paragraph_ranges[para_index] = std::make_pair(p->src_begin, p->src_end);
+        }
         parent->appendChild(para);
 
         bool content = false;

@@ -645,6 +645,9 @@ namespace
         /* Raw OOXML <w:p> source for each paragraph, captured while building
          * the litehtml DOM.  Keyed by the same stable index. */
         std::map<int, std::string>   paragraph_ooxml;
+        /* Byte range of each <w:p> inside model->document_xml, so an edit can
+         * replace exactly that slice and rebuild. */
+        std::map<int, std::pair<size_t, size_t>> paragraph_ranges;
 
         void clear_paragraphs()
         {
@@ -1601,6 +1604,7 @@ namespace
             container->owned_model = std::move(model);
             container->doc = doc;
             container->paragraph_ooxml = builder.paragraph_ooxml();
+            container->paragraph_ranges = builder.paragraph_ranges();
             set_error("");
             return h;
         } catch(const std::exception& ex)
@@ -2707,6 +2711,133 @@ int ld_paragraph_get_ooxml(void* doc, int index, char** out_xml)
         set_error("memoria insufficiente");
         return 0;
     }
+    set_error("");
+    return 1;
+}
+
+/* ld_paragraph_set_ooxml: replace the raw OOXML <w:p> of a paragraph and
+ * rebuild the document.
+ *
+ * Implementation follows a plain "find the original slice and replace it"
+ * strategy: the parser records the byte range of every <w:p> in
+ * model->document_xml, so we splice the new fragment in exactly where the old
+ * one was and let DocxBuilder rebuild the whole litehtml tree.  This reuses
+ * the normal style/list/table/image pipeline and keeps indices stable as long
+ * as the fragment still contains exactly one <w:p>.
+ *
+ * The caller must later run a full ld_render() to get new layout/pagination.
+ * Returns 1 on success, 0 on failure (document left untouched). */
+int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->container || !h->container->owned_model || !ooxml)
+    {
+        set_error("parametri ld_paragraph_set_ooxml non validi");
+        return 0;
+    }
+
+    ld_container* c     = h->container;
+    litedocx::DocxModel* model = c->owned_model.get();
+
+    const size_t len = std::strlen(ooxml);
+    if(len == 0)
+    {
+        set_error("OOXML del paragrafo vuoto");
+        return 0;
+    }
+    if(len > (size_t)1 << 20) // 1 MiB: un singolo paragrafo non dovrebbe mai essere cosi' grande
+    {
+        set_error("OOXML del paragrafo troppo grande");
+        return 0;
+    }
+
+    /* Validate the fragment: exactly one <w:p> and nothing else around it. */
+    {
+        std::unique_ptr<litedocx::XmlNode> frag = litedocx::xml_parse(ooxml, len);
+        if(!frag || !frag->is("p"))
+        {
+            set_error("l'OOXML deve contenere un singolo elemento w:p");
+            return 0;
+        }
+        if(frag->src_end <= frag->src_begin)
+        {
+            set_error("OOXML non bilanciato (tag w:p non chiuso)");
+            return 0;
+        }
+        for(size_t i = frag->src_end; i < len; ++i)
+        {
+            const char ch = ooxml[i];
+            if(ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')
+            {
+                set_error("l'OOXML deve contenere un solo w:p (trovato markup extra)");
+                return 0;
+            }
+        }
+    }
+
+    auto range = c->paragraph_ranges.find(index);
+    if(range == c->paragraph_ranges.end())
+    {
+        set_error("nessun intervallo OOXML per questo paragrafo");
+        return 0;
+    }
+    const size_t begin = range->second.first;
+    const size_t end   = range->second.second;
+    if(begin >= end || end > model->document_xml.size())
+    {
+        set_error("intervallo OOXML non valido per questo paragrafo");
+        return 0;
+    }
+
+    /* Splice the new fragment in place, remembering the old source so the
+     * operation can be rolled back if the rebuild fails. */
+    const std::string old_document_xml = model->document_xml;
+    std::string new_document_xml;
+    new_document_xml.reserve(old_document_xml.size() - (end - begin) + len);
+    new_document_xml.append(old_document_xml, 0, begin);
+    new_document_xml.append(ooxml, len);
+    new_document_xml.append(old_document_xml, end, std::string::npos);
+
+    litehtml::document::ptr new_doc;
+    try
+    {
+        model->document_xml = std::move(new_document_xml);
+        litedocx::DocxBuilder builder(*model, c);
+        new_doc = builder.build();
+        if(!new_doc)
+        {
+            model->document_xml = old_document_xml;
+            set_error(builder.error().empty() ? "ricostruzione del documento fallita" : builder.error());
+            return 0;
+        }
+
+        /* Swap the render tree in one shot. */
+        c->clear_paragraphs();
+        c->doc = new_doc;
+        h->doc = new_doc;
+        c->paragraph_ooxml  = builder.paragraph_ooxml();
+        c->paragraph_ranges = builder.paragraph_ranges();
+
+        h->page_w = builder.page_width();
+        h->page_h = builder.page_height();
+        h->m_page_height_px = builder.page_height();
+        h->m_rebuild_needed     = true;
+        h->m_full_layout_done   = false;
+        h->m_page_heights.clear();
+        h->m_page_y_offsets.clear();
+        h->m_last_rendered_page = -1;
+    } catch(const std::exception& ex)
+    {
+        model->document_xml = old_document_xml;
+        set_error(ex.what());
+        return 0;
+    } catch(...)
+    {
+        model->document_xml = old_document_xml;
+        set_error("errore durante la ricostruzione del paragrafo OOXML");
+        return 0;
+    }
+
     set_error("");
     return 1;
 }
