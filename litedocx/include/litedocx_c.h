@@ -233,6 +233,14 @@ int ld_paragraph_get_xml(void* doc, int index, char** out_xml);
  * only and is NOT written to the DOCX file.  Returns 1 on success, 0 on failure. */
 int ld_paragraph_set_xml(void* doc, int index, const char* xml);
 
+/* Return the original OOXML <w:p>...</w:p> fragment of the paragraph, exactly
+ * as captured from word/document.xml while loading (re-serialized from the
+ * parsed XML DOM).  This is the real DOCX markup (w:p, w:r, w:t, w:pPr...),
+ * NOT the litehtml serialization returned by ld_paragraph_get_xml().
+ * The caller must free the string with ld_free_string().
+ * Returns 1 on success, 0 if the index has no stored OOXML. */
+int ld_paragraph_get_ooxml(void* doc, int index, char** out_xml);
+
 /* Free a string returned by litedocx (ld_paragraph_get_text / hit-test). */
 void ld_free_string(char* str);
 

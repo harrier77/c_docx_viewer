@@ -548,7 +548,11 @@ namespace litedocx
         /* Stable identity for the C ABI paragraph editor.  Only paragraphs
          * that come from a source w:p are indexed; builder-only placeholders
          * are left untagged on purpose. */
-        para->set_attr("data-ld-paragraph-index", std::to_string(m_paragraph_index++).c_str());
+        const int para_index = m_paragraph_index++;
+        para->set_attr("data-ld-paragraph-index", std::to_string(para_index).c_str());
+        /* Keep the original OOXML for this paragraph so the host can display
+         * and (in the future) re-apply the real DOCX markup. */
+        m_paragraph_ooxml[para_index] = xml_serialize(*p);
         parent->appendChild(para);
 
         bool content = false;

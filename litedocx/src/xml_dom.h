@@ -39,6 +39,13 @@ namespace litedocx
     // Parse a UTF-8 XML document.  Returns the document element, or nullptr.
     std::unique_ptr<XmlNode> xml_parse(const char* data, size_t len);
 
+    // Serialize an XmlNode subtree back to a UTF-8 XML fragment.
+    // Text and attribute values are re-escaped; names keep their prefix
+    // (e.g. "w:p").  The result is not byte-identical to the original source
+    // (entity spelling and inter-element whitespace are normalized) but it is
+    // a valid, complete XML representation of the subtree.
+    std::string xml_serialize(const XmlNode& node);
+
 } // namespace litedocx
 
 #endif // LITEDOCX_XML_DOM_H

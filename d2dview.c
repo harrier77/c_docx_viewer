@@ -11,6 +11,7 @@
 #include "litedocx_c.h"
 
 #include <windows.h>
+#include <commctrl.h>
 #undef WINAPI_FAMILY_PARTITION
 /* COBJMACROS rende pubblici i metodi delle interfacce COM (ID2D1*, IDWrite*, …) */
 #define COBJMACROS
@@ -129,6 +130,7 @@ static int g_cb_init;
 static int g_edit_is_xml;
 static void show_paragraph_editor_xml(int index, const char *xml_utf8);
 static void request_paragraph_apply_xml(const char *xml);
+static void log_xml_block(const char *tag, int index, const char *xml);
 
 /* Find or create a cached font entry */
 static FontCacheEntry *font_cache_find(const char *family, int size, int bold,
@@ -629,9 +631,16 @@ static unsigned g_pending_apply_token;
 #define IDC_PARA_APPLY     2002
 #define IDC_PARA_CANCEL    2003
 #define IDC_PARA_HINT      2004
+#define IDC_PARA_TAB       2005
+#define IDC_PARA_EDIT_XML  2006
 
 static HWND      g_edit_hwnd;          /* finestra editor aperta, NULL se chiusa */
-static HWND      g_edit_ctl;           /* controllo EDIT multilinea */
+static HWND      g_edit_ctl;           /* controllo EDIT multilinea (tab Testo) */
+static HWND      g_edit_tab;           /* SysTabControl32: Testo / XML */
+static HWND      g_edit_ctl_xml;       /* controllo EDIT multilinea (tab XML) */
+static int       g_edit_tab_index;     /* 0 = Testo, 1 = XML */
+static char     *g_edit_xml_original;  /* XML letto all'apertura: serve a capire
+                                        * se l'utente l'ha davvero modificato */
 static int       g_edit_index = -1;    /* indice paragrafo in editing */
 static int       g_edit_apply;         /* l'utente ha scelto Applica */
 static char     *g_edit_result_utf8;   /* testo confermato (UTF-8, malloc) */
@@ -852,7 +861,12 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
             {
                 if (j->xml_text)
                 {
+                    fprintf(stderr, "[XML][WORKER-APPLY] idx=%d bytes=%d\n",
+                            j->para_index, (int)strlen(j->xml_text));
+                    log_xml_block("WORKER-APPLY", j->para_index, j->xml_text);
                     ok = ld_paragraph_set_xml(j->doc, j->para_index, j->xml_text);
+                    fprintf(stderr, "[XML][WORKER-APPLY] ok=%d err='%s'\n",
+                            ok, ok ? "" : ld_last_error());
                 }
                 else if (j->text)
                 {
@@ -1363,9 +1377,17 @@ static void on_edit_applied(EditResult *r)
     if (!r)
         return;
 
+    fprintf(stderr, "[XML][APPLY-DONE] doc=%p gen=%u token=%u pending=%u ok=%d err='%s'\n",
+            r->doc, r->gen, r->token, g_pending_apply_token, r->ok,
+            r->error[0] ? r->error : "");
+
     /* Solo il risultato del job corrente puo' chiudere la fase APPLYING. */
     if (r->doc != g_doc || r->gen != g_load_gen || r->token != g_pending_apply_token)
+    {
+        fprintf(stderr, "[XML][APPLY-DONE] scartato (stale): doc_match=%d gen_match=%d token_match=%d\n",
+                r->doc == g_doc, r->gen == g_load_gen, r->token == g_pending_apply_token);
         return;
+    }
 
     g_pending_apply_token = 0;
     g_render_busy = 0;
@@ -1457,20 +1479,20 @@ static void request_paragraph_apply(const char *text)
     }
 }
 
-static char *editor_text_utf8(void)
+static char *control_text_utf8(HWND ctl)
 {
     int   len;
     WCHAR *w;
     int   bytes;
     char *out;
 
-    if (!g_edit_ctl)
+    if (!ctl)
         return NULL;
-    len = GetWindowTextLengthW(g_edit_ctl);
+    len = GetWindowTextLengthW(ctl);
     w = (WCHAR *)malloc((size_t)(len + 1) * sizeof(WCHAR));
     if (!w)
         return NULL;
-    GetWindowTextW(g_edit_ctl, w, len + 1);
+    GetWindowTextW(ctl, w, len + 1);
     bytes = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
     out = NULL;
     if (bytes > 0)
@@ -1483,17 +1505,96 @@ static char *editor_text_utf8(void)
     return out;
 }
 
+/* Confronto che ignora i CR: il controllo EDIT converte i newline in CRLF,
+ * quindi il testo riletto non e' byte-identico a quello impostato. */
+static int strings_equal_ignore_cr(const char *a, const char *b)
+{
+    if (!a || !b)
+        return a == b;
+    for (;;)
+    {
+        while (*a == '\r') a++;
+        while (*b == '\r') b++;
+        if (*a != *b)
+            return 0;
+        if (!*a)
+            return 1;
+        a++;
+        b++;
+    }
+}
+
+/* Log diagnostico dell'XML: dimensione + contenuto (troncato se enorme).
+ * Serve a capire se stiamo applicando il markup vero del paragrafo o la
+ * serializzazione HTML prodotta da litehtml. */
+#define XML_LOG_LIMIT 4000
+static void log_xml_block(const char *tag, int index, const char *xml)
+{
+    if (!xml)
+    {
+        fprintf(stderr, "[XML][%s] idx=%d (null)\n", tag, index);
+        return;
+    }
+    {
+        int len = (int)strlen(xml);
+        fprintf(stderr, "[XML][%s] idx=%d bytes=%d\n------8<------\n", tag, index, len);
+        if (len > XML_LOG_LIMIT)
+            fprintf(stderr, "%.*s\n[...troncato, altri %d byte...]\n",
+                    XML_LOG_LIMIT, xml, len - XML_LOG_LIMIT);
+        else
+            fprintf(stderr, "%s\n", xml);
+        fprintf(stderr, "------>8------\n");
+    }
+}
+
 static void commit_paragraph_editor(HWND hwnd)
 {
-    char *text = editor_text_utf8();
+    char *text;
+
+    fprintf(stderr, "[XML][COMMIT] tab=%d (%s) has_original=%d\n",
+            g_edit_tab_index, g_edit_tab_index == 0 ? "Testo" : "XML",
+            g_edit_xml_original ? 1 : 0);
+
+    /* Se il tab XML e' attivo e il testo XML e' stato modificato, applichiamo
+     * l'XML; altrimenti applichiamo il testo semplice (comportamento storico). */
+    if (g_edit_tab_index == 1 && g_edit_ctl_xml && g_edit_xml_original)
+    {
+        char *xml = control_text_utf8(g_edit_ctl_xml);
+        if (!xml)
+        {
+            g_edit_apply = 0;
+            DestroyWindow(hwnd);
+            return;
+        }
+        log_xml_block("COMMIT-ORIGINAL", g_edit_index, g_edit_xml_original);
+        log_xml_block("COMMIT-EDITED", g_edit_index, xml);
+        if (!strings_equal_ignore_cr(xml, g_edit_xml_original))
+        {
+            fprintf(stderr, "[XML][COMMIT] OOXML modificato: applicazione non ancora supportata\n");
+            MessageBoxW(hwnd,
+                    L"La modifica dell'OOXML non e' ancora applicabile.\n\n"
+                    L"Per ora il tab XML mostra l'XML originale del paragrafo "
+                    L"(w:p / w:r / w:t) ed e' utile per ispezione.",
+                    L"Modifica XML", MB_OK | MB_ICONINFORMATION);
+            free(xml);
+            return; /* lascia l'editor aperto */
+        }
+        fprintf(stderr, "[XML][COMMIT] OOXML invariato: applico il testo\n");
+        free(xml);
+        /* XML invariato: applica il testo del tab Testo. */
+    }
+
+    text = control_text_utf8(g_edit_ctl);
     if (!text)
     {
         g_edit_apply = 0;
         DestroyWindow(hwnd);
         return;
     }
+    log_xml_block("COMMIT-TEXT", g_edit_index, text);
     free(g_edit_result_utf8);
     g_edit_result_utf8 = text;
+    g_edit_is_xml = 0;
     g_edit_apply = 1;
     DestroyWindow(hwnd);
 }
@@ -1504,11 +1605,33 @@ static LRESULT CALLBACK paragraph_editor_proc(HWND hwnd, UINT msg, WPARAM wp, LP
     {
     case WM_CREATE:
         g_edit_hwnd = hwnd;
+        g_edit_tab = CreateWindowExW(0, WC_TABCONTROLW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_TAB,
+            GetModuleHandle(NULL), NULL);
+        if (g_edit_tab)
+        {
+            TCITEMW tie;
+            ZeroMemory(&tie, sizeof(tie));
+            tie.mask = TCIF_TEXT;
+            tie.pszText = L"Testo";
+            SendMessageW(g_edit_tab, TCM_INSERTITEMW, 0, (LPARAM)&tie);
+            tie.pszText = L"XML";
+            SendMessageW(g_edit_tab, TCM_INSERTITEMW, 1, (LPARAM)&tie);
+            TabCtrl_SetCurSel(g_edit_tab, 0);
+        }
+        g_edit_tab_index = 0;
         g_edit_ctl = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
                 ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL,
             0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_EDIT,
+            GetModuleHandle(NULL), NULL);
+        g_edit_ctl_xml = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_TABSTOP | WS_VSCROLL |
+                ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL,
+            0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_EDIT_XML,
             GetModuleHandle(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Applica",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
@@ -1519,13 +1642,17 @@ static LRESULT CALLBACK paragraph_editor_proc(HWND hwnd, UINT msg, WPARAM wp, LP
             0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_CANCEL,
             GetModuleHandle(NULL), NULL);
         CreateWindowExW(0, L"STATIC",
-            L"Modifica solo in memoria: il file DOCX non viene salvato. "
-            L"La formattazione dei singoli run viene uniformata.",
+            L"Modifica solo in memoria: il file DOCX non viene salvato.\n"
+            L"Tab Testo: sostituisce il testo (formattazione dei run uniformata). "
+            L"Tab XML: modifica il markup del paragrafo.",
             WS_CHILD | WS_VISIBLE,
             0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_HINT,
             GetModuleHandle(NULL), NULL);
         if (g_edit_ctl)
             SendMessageW(g_edit_ctl, WM_SETFONT,
+                         (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+        if (g_edit_ctl_xml)
+            SendMessageW(g_edit_ctl_xml, WM_SETFONT,
                          (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
         {
             HWND hint = GetDlgItem(hwnd, IDC_PARA_HINT);
@@ -1543,22 +1670,28 @@ static LRESULT CALLBACK paragraph_editor_proc(HWND hwnd, UINT msg, WPARAM wp, LP
     case WM_SIZE:
     {
         RECT rc;
-        int  cw, ch, margin = 12, button_w = 90, button_h = 28, hint_h = 40;
-        int  edit_h;
+        int  cw, ch, margin = 12, button_w = 90, button_h = 28, hint_h = 48;
+        int  tab_h = 26, edit_y, edit_h;
         GetClientRect(hwnd, &rc);
         cw = rc.right - rc.left;
         ch = rc.bottom - rc.top;
-        edit_h = ch - margin * 2 - hint_h - button_h - 8;
+        if (g_edit_tab)
+            MoveWindow(g_edit_tab, margin, margin, cw - margin * 2, tab_h, TRUE);
+        edit_y = margin + tab_h + 4;
+        edit_h = ch - edit_y - hint_h - button_h - 8;
         if (edit_h < 40)
             edit_h = 40;
         if (g_edit_ctl)
-            MoveWindow(g_edit_ctl, margin, margin,
+            MoveWindow(g_edit_ctl, margin, edit_y,
+                       cw - margin * 2, edit_h, TRUE);
+        if (g_edit_ctl_xml)
+            MoveWindow(g_edit_ctl_xml, margin, edit_y,
                        cw - margin * 2, edit_h, TRUE);
         {
             HWND hint = GetDlgItem(hwnd, IDC_PARA_HINT);
             HWND ba = GetDlgItem(hwnd, IDC_PARA_APPLY);
             HWND bc = GetDlgItem(hwnd, IDC_PARA_CANCEL);
-            int  hint_y = margin + edit_h + 6;
+            int  hint_y = edit_y + edit_h + 6;
             if (hint)
                 MoveWindow(hint, margin, hint_y,
                            cw - margin * 2, hint_h, TRUE);
@@ -1571,6 +1704,21 @@ static LRESULT CALLBACK paragraph_editor_proc(HWND hwnd, UINT msg, WPARAM wp, LP
         }
         return 0;
     }
+
+    case WM_NOTIFY:
+        if (((LPNMHDR)lp)->code == TCN_SELCHANGE && (HWND)((LPNMHDR)lp)->hwndFrom == g_edit_tab)
+        {
+            int sel = TabCtrl_GetCurSel(g_edit_tab);
+            g_edit_tab_index = (sel < 0) ? 0 : sel;
+            if (g_edit_ctl && g_edit_ctl_xml)
+            {
+                ShowWindow(g_edit_ctl, g_edit_tab_index == 0 ? SW_SHOW : SW_HIDE);
+                ShowWindow(g_edit_ctl_xml, g_edit_tab_index == 0 ? SW_HIDE : SW_SHOW);
+                SetFocus(g_edit_tab_index == 0 ? g_edit_ctl : g_edit_ctl_xml);
+            }
+            return 0;
+        }
+        break;
 
     case WM_COMMAND:
         switch (LOWORD(wp))
@@ -1594,6 +1742,10 @@ static LRESULT CALLBACK paragraph_editor_proc(HWND hwnd, UINT msg, WPARAM wp, LP
     case WM_DESTROY:
         g_edit_hwnd = NULL;
         g_edit_ctl = NULL;
+        g_edit_ctl_xml = NULL;
+        g_edit_tab = NULL;
+        free(g_edit_xml_original);
+        g_edit_xml_original = NULL;
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -1662,6 +1814,38 @@ static void show_paragraph_editor(int index, const char *utf8_text)
         free(wtext);
     }
 
+    /* Carica nel tab XML il markup del paragrafo.  g_edit_xml_original viene
+     * usato per capire se l'utente ha davvero modificato l'XML: se non lo ha
+     * fatto, Applica si comporta come prima (testo semplice). */
+    free(g_edit_xml_original);
+    g_edit_xml_original = NULL;
+    if (g_edit_ctl_xml)
+    {
+        static const char *XML_UNAVAILABLE = "<!-- OOXML del paragrafo non disponibile -->";
+        char *xml = NULL;
+        const char *load = XML_UNAVAILABLE;
+        int got = ld_paragraph_get_ooxml(g_doc, index, &xml);
+        fprintf(stderr, "[XML][GET-OOXML] idx=%d ok=%d xml=%p\n", index, got, (void *)xml);
+        if (!got)
+            fprintf(stderr, "[XML][GET-OOXML] errore ld_last_error='%s'\n", ld_last_error());
+        if (got && xml && xml[0])
+            load = xml;
+        else
+            fprintf(stderr, "[XML][GET-OOXML] nessun OOXML utile: uso placeholder\n");
+        log_xml_block("GET-OOXML", index, load);
+        g_edit_xml_original = _strdup(load);
+        {
+            WCHAR *wx = u8_to_w(load);
+            if (wx)
+            {
+                SetWindowTextW(g_edit_ctl_xml, wx);
+                free(wx);
+            }
+        }
+        if (xml)
+            ld_free_string(xml);
+    }
+
     accels[0].fVirt = FVIRTKEY;
     accels[0].key = VK_ESCAPE;
     accels[0].cmd = IDC_PARA_CANCEL;
@@ -1724,10 +1908,14 @@ static void show_paragraph_editor(int index, const char *utf8_text)
 
     if (g_edit_apply && g_edit_result_utf8)
     {
-        request_paragraph_apply(g_edit_result_utf8);
+        if (g_edit_is_xml)
+            request_paragraph_apply_xml(g_edit_result_utf8);
+        else
+            request_paragraph_apply(g_edit_result_utf8);
     }
     else
     {
+        g_edit_is_xml = 0;
         g_doc_state = DOC_STATE_IDLE;
         InvalidateRect(g_hwnd, NULL, FALSE);
         resume_pending_render();
@@ -2005,8 +2193,12 @@ static void show_paragraph_editor_xml(int index, const char *xml_utf8)
 /* Accoda applicazione XML paragrafo. */
 static void request_paragraph_apply_xml(const char *xml)
 {
+    fprintf(stderr, "[XML][APPLY-REQ] idx=%d worker=%d\n", g_edit_index, g_worker_started);
+    log_xml_block("APPLY-REQ", g_edit_index, xml);
     if (!g_doc || !xml || g_edit_index < 0)
     {
+        fprintf(stderr, "[XML][APPLY-REQ] parametri non validi: doc=%p xml=%p idx=%d\n",
+                g_doc, (const void *)xml, g_edit_index);
         g_doc_state = DOC_STATE_IDLE;
         return;
     }
@@ -2023,6 +2215,8 @@ static void request_paragraph_apply_xml(const char *xml)
         r.gen = g_load_gen;
         r.token = g_apply_token;
         r.ok = ld_paragraph_set_xml(g_doc, g_edit_index, xml);
+        fprintf(stderr, "[XML][APPLY-SYNC] ok=%d err='%s'\n",
+                r.ok, r.ok ? "" : ld_last_error());
         if (!r.ok)
         {
             const char *err = ld_last_error();
@@ -2053,6 +2247,8 @@ static void request_paragraph_apply_xml(const char *xml)
             g_doc_state = DOC_STATE_IDLE;
             return;
         }
+        fprintf(stderr, "[XML][APPLY-ASYNC] enqueued idx=%d bytes=%d token=%u\n",
+                g_edit_index, (int)strlen(xml), g_apply_token);
         g_render_busy = 1;
         g_render_doc = g_doc;
         enqueue_job(j);
@@ -2521,6 +2717,13 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     HMENU menu, filemenu;
 
     fprintf(stderr, "[RENDERER] kind=d2d\n");
+
+    {
+        INITCOMMONCONTROLSEX icc;
+        icc.dwSize = sizeof(icc);
+        icc.dwICC = ICC_TAB_CLASSES;
+        InitCommonControlsEx(&icc);
+    }
 
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);

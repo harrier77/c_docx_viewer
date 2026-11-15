@@ -642,6 +642,10 @@ namespace
         std::map<int, ParagraphInfo> paragraphs;
         bool                         paragraphs_valid = false;
 
+        /* Raw OOXML <w:p> source for each paragraph, captured while building
+         * the litehtml DOM.  Keyed by the same stable index. */
+        std::map<int, std::string>   paragraph_ooxml;
+
         void clear_paragraphs()
         {
             paragraphs.clear();
@@ -1596,6 +1600,7 @@ namespace
             // remains valid for the whole document lifetime.
             container->owned_model = std::move(model);
             container->doc = doc;
+            container->paragraph_ooxml = builder.paragraph_ooxml();
             set_error("");
             return h;
         } catch(const std::exception& ex)
@@ -2667,5 +2672,42 @@ int ld_paragraph_set_xml(void* doc, int index, const char* xml)
         set_error("errore durante la modifica XML paragrafo");
         return 0;
     }
+}
+
+/* ld_paragraph_get_ooxml: raw OOXML <w:p> captured while loading the DOCX.
+ * This is the real DOCX markup (w:p / w:r / w:t ...), not the litehtml
+ * serialization returned by ld_paragraph_get_xml(). The caller must free the
+ * string with ld_free_string(). Returns 1 on success. */
+int ld_paragraph_get_ooxml(void* doc, int index, char** out_xml)
+{
+    if(!out_xml)
+    {
+        return 0;
+    }
+    *out_xml = nullptr;
+
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->container)
+    {
+        set_error("parametri ld_paragraph_get_ooxml non validi");
+        return 0;
+    }
+
+    const auto& map = h->container->paragraph_ooxml;
+    auto        it  = map.find(index);
+    if(it == map.end() || it->second.empty())
+    {
+        set_error("nessun OOXML originale per questo paragrafo");
+        return 0;
+    }
+
+    *out_xml = ld_dup_utf8(it->second);
+    if(!*out_xml)
+    {
+        set_error("memoria insufficiente");
+        return 0;
+    }
+    set_error("");
+    return 1;
 }
 } // extern "C"
