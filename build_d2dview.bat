@@ -13,7 +13,7 @@ copy /y ".\litedocx\litedocx.dll" . >nul
 copy /y ".\litedocx\liblitedocx.a" . >nul
 
 rem NOTA: niente renderer_gdi.c: il viewer usa solo Direct2D.
-%GCC% -Wall -Os -s -ffunction-sections -fdata-sections -Wl,--gc-sections  -I. -Ifunc_gdi -Ilitedocx/include -o d2dview.exe d2dview.c func_gdi\layout.c func_gdi\renderer_d2d.c func_gdi\text_utf8.c func_gdi\document.c icon.o -L. -llitedocx -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32 -ld2d1 -ldwrite -lcomctl32
+%GCC% -Wall -Os -s -ffunction-sections -fdata-sections -Wl,--gc-sections  -I. -Ifunc_gdi -Ilitedocx/include -o d2dview.exe d2dview.c miniz.c func_gdi\layout.c func_gdi\renderer_d2d.c func_gdi\text_utf8.c func_gdi\document.c icon.o -L. -llitedocx -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32 -ld2d1 -ldwrite -lcomctl32
 if errorlevel 1 goto :fail
 
 echo.

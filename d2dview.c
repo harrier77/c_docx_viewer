@@ -27,6 +27,7 @@
 #include "renderer.h"
 #include "text_utf8.h"
 #include "document.h"
+#include "miniz.h"
 
 /* Accesso allo stato di layout (vedi func_gdi/layout.h). */
 #define LAY layout_get()
@@ -1318,6 +1319,388 @@ static void load_docx_file(const char *path)
 {
     if (!path || !path[0]) return;
     start_async_load(path);
+}
+
+static void save_docx_file(const char *path)
+{
+    fprintf(stderr, "[SAVE_DEBUG] 1. save_docx_file called with path='%s', g_doc=%p\n", path ? path : "NULL", g_doc);
+    if (!path || !path[0] || !g_doc)
+    {
+        fprintf(stderr, "[SAVE_DEBUG] ERROR: Invalid path or NULL g_doc\n");
+        MessageBoxA(g_hwnd, "Nessun documento da salvare.", "d2dview", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    /* Raccogli l'OOXML modificato da tutti i paragrafi e salva il DOCX.
+     * Un DOCX è un archivio ZIP: modifichiamo word/document.xml con i nuovi
+     * paragrafi e ripackiamo l'archivio. */
+    {
+        int page_count = ld_get_page_count(g_doc);
+        fprintf(stderr, "[SAVE_DEBUG] 2. Page count = %d\n", page_count);
+        log_msg("[SAVE] Attempting to save document to: %s\n", path);
+
+        /* Ottieni l'OOXML dai paragrafi modificati */
+        int i;
+        char *para_xml = NULL;
+        int total_para_len = 0;
+        int paragraph_count = 0;
+
+        fprintf(stderr, "[SAVE_DEBUG] 3. Starting paragraph OOXML loop (0 to 99)...\n");
+        /* Accumula l'OOXML di tutti i paragrafi */
+        for (i = 0; i < 100; i++) /* limite sicuro */
+        {
+            char *xml = NULL;
+            int got = ld_paragraph_get_ooxml(g_doc, i, &xml);
+            fprintf(stderr, "[SAVE_DEBUG]   - Paragraph %d: ld_paragraph_get_ooxml returned %d, xml=%p\n", i, got, (void *)xml);
+            if (got && xml)
+            {
+                int xml_len = (int)strlen(xml);
+                fprintf(stderr, "[SAVE_DEBUG]     paragraph %d len = %d bytes\n", i, xml_len);
+                if (xml_len > 0)
+                {
+                    /* Separa i paragrafi con un marker: il vecchio <w:body> viene
+                     * rimpiazzato con la loro concatenazione. */
+                    total_para_len += (paragraph_count > 0 ? 1 : 0) + xml_len;
+
+                    /* Libera la memoria precedente se ne abbiamo accumulati */
+                    if (para_xml)
+                    {
+                        char *tmp = (char *)realloc(para_xml, total_para_len + 1);
+                        if (!tmp) { 
+                            fprintf(stderr, "[SAVE_DEBUG]     ERROR: realloc failed for para_xml at size %d\n", total_para_len + 1);
+                            free(para_xml); 
+                            para_xml = NULL; 
+                            break; 
+                        }
+                        para_xml = tmp;
+                        if (paragraph_count > 0)
+                        {
+                            char *w = para_xml + strlen(para_xml);
+                            *w++ = '|';
+                        }
+                        strcat(para_xml, xml);
+                    }
+                    else
+                    {
+                        para_xml = (char *)malloc(total_para_len + 1);
+                        if (!para_xml) {
+                            fprintf(stderr, "[SAVE_DEBUG]     ERROR: malloc failed for para_xml at size %d\n", total_para_len + 1);
+                            break;
+                        }
+                        para_xml[0] = '\0';
+                        strcat(para_xml, xml);
+                    }
+                }
+                ld_free_string(xml);
+                paragraph_count++;
+            }
+            else
+            {
+                fprintf(stderr, "[SAVE_DEBUG]   - Paragraph %d: no more OOXML or end reached\n", i);
+                break;
+            }
+        }
+        fprintf(stderr, "[SAVE_DEBUG] 4. Loop finished. total_para_len=%d, para_xml=%p, paragraph_count=%d\n", total_para_len, (void *)para_xml, paragraph_count);
+
+        if (!para_xml || total_para_len == 0)
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: No OOXML collected from paragraphs\n");
+            MessageBoxA(g_hwnd,
+                        "Nessun OOXML dei paragrafi trovato da salvare.",
+                        "d2dview - Salva", MB_OK | MB_ICONINFORMATION);
+            if (para_xml) free(para_xml);
+            return;
+        }
+
+        /* === Ricostruzione di word/document.xml riutilizzando lo scheletro del vecchio documento ===
+         * miniz non sa rimuovere file in-place, quindi l'archivio viene ricostruito su un
+         * file temporaneo. Per word/document.xml non basta concatenare i paragrafi (il
+         * risultato mancherebbe di dichiarazioni XML e namespace): si prende il vecchio
+         * file, se ne estrae lo scheletro (tutto cio' che sta fuori dal <w:body>) e vi si
+         * sostituisce il contenuto del body con i nuovi paragrafi. */
+        fprintf(stderr, "[SAVE_DEBUG] 5. Rebuilding DOCX archive with new document.xml\n");
+
+        char *tmp_path = malloc(strlen(path) + 8);
+        if (!tmp_path)
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: malloc failed for tmp path\n");
+            free(para_xml);
+            return;
+        }
+        strcpy(tmp_path, path);
+        strcat(tmp_path, ".tmp");
+
+        mz_zip_archive src, dst;
+        mz_zip_zero_struct(&src);
+        mz_zip_zero_struct(&dst);
+
+        if (!mz_zip_reader_init_file(&src, path, 0))
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: mz_zip_reader_init_file failed\n");
+            free(tmp_path);
+            free(para_xml);
+            return;
+        }
+
+        /* Estrai il vecchio word/document.xml */
+        int doc_index = mz_zip_reader_locate_file(&src, "word/document.xml", NULL, 0);
+        if (doc_index < 0)
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: word/document.xml not found in archive\n");
+            mz_zip_reader_end(&src);
+            remove(tmp_path);
+            free(tmp_path);
+            free(para_xml);
+            return;
+        }
+
+        mz_zip_archive_file_stat doc_stat;
+        if (!mz_zip_reader_file_stat(&src, doc_index, &doc_stat))
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: mz_zip_reader_file_stat failed\n");
+            mz_zip_reader_end(&src);
+            remove(tmp_path);
+            free(tmp_path);
+            free(para_xml);
+            return;
+        }
+
+        char *old_xml = (char *)malloc(doc_stat.m_uncomp_size + 1);
+        if (!old_xml)
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: malloc failed for old document.xml\n");
+            mz_zip_reader_end(&src);
+            remove(tmp_path);
+            free(tmp_path);
+            free(para_xml);
+            return;
+        }
+        if (!mz_zip_reader_extract_to_mem(&src, doc_index, old_xml, doc_stat.m_uncomp_size + 1, 0))
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: mz_zip_reader_extract_to_mem failed\n");
+            mz_zip_reader_end(&src);
+            remove(tmp_path);
+            free(tmp_path);
+            free(old_xml);
+            free(para_xml);
+            return;
+        }
+        old_xml[doc_stat.m_uncomp_size] = '\0';
+        /* Normalizza il line ending a \n per la ricerca dei marcatori */
+        for (size_t b = 0; b < doc_stat.m_uncomp_size; b++)
+            if (old_xml[b] == '\r')
+                old_xml[b] = '\n';
+
+        /* === Trova i confini del body e prepara la nuova document.xml ===
+         * Strategia: si sostituisce l'intero blocco <w:body>...</w:body> con
+         * '<w:body>' + paragrafi_nuovi + '</w:body>'. Tutto il resto (header con
+         * namespace, footer con '</w:document>+') viene preservato. */
+        /* === Trova i confini del body e prepara la nuova document.xml ===
+         * Strategia: si sostituisce l'intero blocco <w:body>...</w:body> con
+         * '<w:body>' + paragrafi_nuovi + '</w:body>' + '</w:document>'.
+         * Se l'originale e' troncato o malformato (es. manca '</w:body>' o
+         * la coda e' unibiscata tipo '</w:bod</w:document>'), si riutilizza
+         * solo il prefisso fino all'apertura di <w:body> e si chiudono i tag
+         * noi per produrre un XML coerente. */
+        const char *bopen  = strstr(old_xml, "<w:body");
+        if (!bopen)
+        {
+            /* Fallback: body senza prefisso (molto raro). Cerchiamo un <body>. */
+            bopen = strstr(old_xml, "<body");
+        }
+        if (!bopen)
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: word/document.xml without <w:body>\n");
+            mz_zip_reader_end(&src);
+            remove(tmp_path);
+            free(tmp_path);
+            free(old_xml);
+            free(para_xml);
+            return;
+        }
+
+        /* Trova la fine dell'apertura di <w:body>: il primo '>' dopo 'bopen'. */
+        const char *bopen_tag_end = strchr(bopen, '>');
+        if (!bopen_tag_end || bopen_tag_end < bopen + 7)
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: <w:body> tag incomplete\n");
+            mz_zip_reader_end(&src);
+            remove(tmp_path);
+            free(tmp_path);
+            free(old_xml);
+            free(para_xml);
+            return;
+        }
+
+        /* Nuovo documento =
+         *   [1] prefix: tutto fino a (e inclusa) l'apertura di <w:body>
+         *   [2] i nuovi paragrafi
+         *   [3] '</w:body>'
+         *   [4] '</w:document>'
+         * Il suffisso originale (coda dopo '</w:body>') viene conservato SOLO se
+         * e' ben formato (contiene '</w:document>' e non e' unibiscato). In caso
+         * contrario (es. '</w:bod</w:document>' troncato) lo scartiamo e chiudiamo
+         * noi per produrre un XML coerente. */
+        size_t prefix_len = (size_t)(bopen_tag_end + 1 - old_xml);
+
+        /* Cerca '</w:body>' e il successivo '</w:document>' ben formato */
+        const char *bclose = bopen ? strstr(bopen + 7, "</w:body>") : NULL;
+        int keep_suffix = 0;
+        const char *suffix_start = NULL;
+        const char *suffix_end = NULL;
+        size_t suffix_len = 0;
+        if (bclose)
+        {
+            const char *after_body = bclose + strlen(bclose);
+            const char *sfx_doc_close = strstr(after_body, "</w:document>");
+            if (sfx_doc_close && sfx_doc_close >= after_body)
+            {
+                /* Coda ben formata: e' '</w:document>' (eventualmente con altri tag
+                 * tra '</w:body>' e '</w:document>'). La conserviamo. */
+                keep_suffix = 1;
+                suffix_start = after_body;
+                suffix_end   = sfx_doc_close + strlen(sfx_doc_close);
+                suffix_len   = (size_t)(suffix_end - suffix_start);
+            }
+        }
+
+        size_t new_doc_len = prefix_len + total_para_len + 7 /* '</w:body>' */
+                            + suffix_len
+                            + (keep_suffix ? 0 : 13) /* '</w:document>' solo se scartiamo il suffisso */;
+        char *new_doc = (char *)malloc(new_doc_len + 1);
+        if (!new_doc)
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: malloc failed for new document.xml\n");
+            mz_zip_reader_end(&src);
+            remove(tmp_path);
+            free(tmp_path);
+            free(old_xml);
+            free(para_xml);
+            return;
+        }
+
+        char *w = new_doc;
+        /* 1) Scheletro fino a (inclusa) l'apertura di <w:body> */
+        memcpy(w, old_xml, prefix_len);                    w += prefix_len;
+        /* 2) I nuovi paragrafi */
+        memcpy(w, para_xml, total_para_len);               w += total_para_len;
+        /* 3) Chiusura del body */
+        memcpy(w, "</w:body>", 7);                         w += 7;
+        /* 4) Coda ben formata (se c'era, include gia' '</w:document>') */
+        if (keep_suffix && suffix_len > 0)
+        {
+            memcpy(w, suffix_start, suffix_len);           w += suffix_len;
+        }
+        else
+        {
+            /* Originale troncato/malformato: chiudiamo noi il documento */
+            memcpy(w, "</w:document>", 13);               w += 13;
+        }
+        *w = '\0';
+
+        fprintf(stderr, "[SAVE_DEBUG] 5a. New document.xml: %d bytes (%d prefix, %d paragraphs, %d suffix)\n",
+                (int)new_doc_len, (int)prefix_len, total_para_len, (int)suffix_len);
+
+        /* === Ricostruisci l'archivio su file temporaneo === */
+        if (!mz_zip_writer_init_file(&dst, tmp_path, 0))
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: mz_zip_writer_init_file failed\n");
+            mz_zip_reader_end(&src);
+            remove(tmp_path);
+            free(tmp_path);
+            free(old_xml);
+            free(para_xml);
+            free(new_doc);
+            return;
+        }
+
+        int ok = MZ_TRUE;
+        mz_uint nfiles = mz_zip_reader_get_num_files(&src);
+        for (mz_uint f = 0; f < nfiles; f++)
+        {
+            mz_zip_archive_file_stat stat;
+            if (!mz_zip_reader_file_stat(&src, f, &stat))
+            {
+                fprintf(stderr, "[SAVE_DEBUG] ERROR: mz_zip_reader_file_stat failed on %u\n", f);
+                ok = MZ_FALSE;
+                break;
+            }
+
+            /* word/document.xml viene sostituito col contenuto ricostruito */
+            if (f == doc_index)
+            {
+                if (!mz_zip_writer_add_mem(&dst, "word/document.xml", new_doc, new_doc_len, MZ_BEST_COMPRESSION))
+                {
+                    fprintf(stderr, "[SAVE_DEBUG] ERROR: mz_zip_writer_add_mem failed\n");
+                    ok = MZ_FALSE;
+                }
+                continue;
+            }
+
+            /* Copia il file come-is (riutilizza i dati gia' compressi) */
+            if (!mz_zip_writer_add_from_zip_reader(&dst, &src, f))
+            {
+                fprintf(stderr, "[SAVE_DEBUG] ERROR: mz_zip_writer_add_from_zip_reader failed on '%s'\n", stat.m_filename);
+                ok = MZ_FALSE;
+                break;
+            }
+        }
+
+        if (ok && !mz_zip_writer_finalize_archive(&dst))
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: mz_zip_writer_finalize_archive failed\n");
+            ok = MZ_FALSE;
+        }
+
+        mz_zip_writer_end(&dst);
+        mz_zip_reader_end(&src);
+        free(old_xml);
+        free(para_xml);
+        free(new_doc);
+
+        if (!ok)
+        {
+            remove(tmp_path);
+            free(tmp_path);
+            MessageBoxA(g_hwnd,
+                        "Errore durante il salvataggio del documento.",
+                        "d2dview - Salva", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        /* Sostituisci l'archivio originale con quello ricostruito */
+        if (remove(path) != 0)
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: cannot delete old file '%s' (in uso?)\n", path);
+            remove(tmp_path);
+            free(tmp_path);
+            MessageBoxA(g_hwnd,
+                        "Impossibile sovrascrivere il file (aperto da un altro programma?).",
+                        "d2dview - Salva", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        if (rename(tmp_path, path) != 0)
+        {
+            fprintf(stderr, "[SAVE_DEBUG] ERROR: rename tmp -> '%s' failed\n", path);
+            remove(tmp_path);
+            free(tmp_path);
+            MessageBoxA(g_hwnd,
+                        "Errore durante il salvataggio del documento.",
+                        "d2dview - Salva", MB_OK | MB_ICONERROR);
+            return;
+        }
+        free(tmp_path);
+
+        fprintf(stderr, "[SAVE_DEBUG] 6. DOCX rebuilt successfully with miniz\n");
+
+        /* Forza un aggiornamento dell'interfaccia */
+        g_layout_epoch++;
+        InvalidateRect(g_hwnd, NULL, FALSE);
+
+        fprintf(stderr, "[SAVE_DEBUG] 7. Save completed\n");
+        MessageBoxA(g_hwnd, "Documento salvato correttamente.", "d2dview - Salva", MB_OK | MB_ICONINFORMATION);
+    }
 }
 
 /* ----------------------- paragrafi: coordinate / editor ----------------------- */
@@ -2652,6 +3035,19 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case 103:
             MessageBoxA(hwnd, "d2dview - Visualizzatore DOCX con renderer Direct2D (litedocx.dll).", "Informazioni", MB_OK);
             return 0;
+        case 104:
+            if (!can_switch_document())
+            {
+                MessageBoxA(hwnd,
+                            "Attendere il completamento dell'operazione sul paragrafo.",
+                            "d2dview", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            if (g_path[0]) {
+                /* Salva l'XML modificato in memoria sul file DOCX */
+                save_docx_file(g_path);
+            }
+            return 0;
         }
         break;
 
@@ -2751,6 +3147,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     AppendMenuA(filemenu, MF_STRING, 101, "&Ricarica\tF5");
     AppendMenuA(filemenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(filemenu, MF_STRING, 102, "&Esci");
+    AppendMenuA(filemenu, MF_STRING, 104, "Salva\tCtrl+S");
     AppendMenuA(menu, MF_POPUP, (UINT_PTR)filemenu, "&File");
     AppendMenuA(menu, MF_STRING, 103, "&?");
 
