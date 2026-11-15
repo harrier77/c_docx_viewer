@@ -233,6 +233,24 @@ int ld_paragraph_get_xml(void* doc, int index, char** out_xml);
  * only and is NOT written to the DOCX file.  Returns 1 on success, 0 on failure. */
 int ld_paragraph_set_xml(void* doc, int index, const char* xml);
 
+/* Return the original OOXML <w:p>...</w:p> fragment of the paragraph, exactly
+ * as captured from word/document.xml while loading (re-serialized from the
+ * parsed XML DOM).  This is the real DOCX markup (w:p, w:r, w:t, w:pPr...),
+ * NOT the litehtml serialization returned by ld_paragraph_get_xml().
+ * The caller must free the string with ld_free_string().
+ * Returns 1 on success, 0 if the index has no stored OOXML. */
+int ld_paragraph_get_ooxml(void* doc, int index, char** out_xml);
+
+/* Replace the paragraph's raw OOXML with the given <w:p>...</w:p> fragment.
+ * The fragment must contain exactly one well-formed w:p.  Its original byte
+ * range in word/document.xml is replaced in place and the whole render tree
+ * is rebuilt, so styling/lists/tables continue to be resolved by the normal
+ * DOCX pipeline.  The paragraph keeps its index as long as the fragment still
+ * contains a single w:p that does not change document structure.
+ * Caller must run a full ld_render() afterwards to get the new layout.
+ * In-memory only: the DOCX file is not written.  Returns 1 on success. */
+int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml);
+
 /* Free a string returned by litedocx (ld_paragraph_get_text / hit-test). */
 void ld_free_string(char* str);
 

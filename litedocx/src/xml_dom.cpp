@@ -166,6 +166,7 @@ namespace litedocx
                 {
                     if(xml_local_name(stack[i]->name) == local)
                     {
+                        stack[i]->src_end = static_cast<size_t>(scan.p - data);
                         stack.resize(i);
                         break;
                     }
@@ -175,6 +176,11 @@ namespace litedocx
 
             auto node = std::unique_ptr<XmlNode>(new XmlNode());
             node->name = std::string_view(tok.name, tok.name_len);
+            node->src_begin = static_cast<size_t>((tok.name > data ? tok.name - 1 : tok.name) - data);
+            if(tok.self_closing)
+            {
+                node->src_end = static_cast<size_t>(scan.p - data);
+            }
             parse_attrs(tok.attrs, tok.attrs_len, node->attrs);
 
             XmlNode* raw = node.get();
@@ -194,5 +200,80 @@ namespace litedocx
             }
         }
         return root;
+    }
+
+    namespace
+    {
+        void escape_xml_text(const std::string& in, std::string& out)
+        {
+            out.reserve(out.size() + in.size());
+            for(char c : in)
+            {
+                switch(c)
+                {
+                    case '&': out += "&amp;"; break;
+                    case '<': out += "&lt;"; break;
+                    case '>': out += "&gt;"; break;
+                    default: out.push_back(c); break;
+                }
+            }
+        }
+
+        void escape_xml_attr(const std::string& in, std::string& out)
+        {
+            out.reserve(out.size() + in.size());
+            for(char c : in)
+            {
+                switch(c)
+                {
+                    case '&': out += "&amp;"; break;
+                    case '<': out += "&lt;"; break;
+                    case '>': out += "&gt;"; break;
+                    case '"': out += "&quot;"; break;
+                    case '\n': out += "&#10;"; break;
+                    case '\r': out += "&#13;"; break;
+                    case '\t': out += "&#9;"; break;
+                    default: out.push_back(c); break;
+                }
+            }
+        }
+
+        void serialize_into(const XmlNode& node, std::string& out)
+        {
+            out.push_back('<');
+            out.append(node.name.data(), node.name.size());
+            for(const auto& a : node.attrs)
+            {
+                out.push_back(' ');
+                out.append(a.first.data(), a.first.size());
+                out += "=\"";
+                escape_xml_attr(a.second, out);
+                out.push_back('"');
+            }
+            if(node.text.empty() && node.children.empty())
+            {
+                out += "/>";
+                return;
+            }
+            out.push_back('>');
+            escape_xml_text(node.text, out);
+            for(const auto& c : node.children)
+            {
+                if(c)
+                {
+                    serialize_into(*c, out);
+                }
+            }
+            out += "</";
+            out.append(node.name.data(), node.name.size());
+            out.push_back('>');
+        }
+    } // namespace
+
+    std::string xml_serialize(const XmlNode& node)
+    {
+        std::string out;
+        serialize_into(node, out);
+        return out;
     }
 } // namespace litedocx

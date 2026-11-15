@@ -253,6 +253,20 @@ namespace litedocx
             return m_error;
         }
 
+        /* Raw OOXML <w:p> fragment for each paragraph, keyed by the same
+         * stable index written to data-ld-paragraph-index. */
+        const std::map<int, std::string>& paragraph_ooxml() const
+        {
+            return m_paragraph_ooxml;
+        }
+
+        /* Byte range of the original <w:p> inside model.document_xml for each
+         * paragraph index (see XmlNode::src_begin/src_end). */
+        const std::map<int, std::pair<size_t, size_t>>& paragraph_ranges() const
+        {
+            return m_paragraph_ranges;
+        }
+
       private:
         struct ListCtx
         {
@@ -273,6 +287,10 @@ namespace litedocx
         int                     m_page_break_count = 0;
         int                     m_paragraph_index = 0;
         StyleCache              m_style_cache;
+        /* Raw OOXML <w:p> source for each indexed paragraph. */
+        std::map<int, std::string> m_paragraph_ooxml;
+        /* Byte range of each <w:p> in model.document_xml. */
+        std::map<int, std::pair<size_t, size_t>> m_paragraph_ranges;
         // Reusable buffers for append_text (avoid substr allocations)
         std::string             m_nbsp_buf;
         std::string             m_word_buf;

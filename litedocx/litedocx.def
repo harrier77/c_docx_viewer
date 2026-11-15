@@ -28,6 +28,8 @@ EXPORTS
     ld_paragraph_set_text
     ld_paragraph_get_xml
     ld_paragraph_set_xml
+    ld_paragraph_get_ooxml
+    ld_paragraph_set_ooxml
     ld_free_string
     ld_last_error
     ld_version

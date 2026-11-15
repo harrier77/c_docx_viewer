@@ -17,6 +17,13 @@ namespace litedocx
         std::string text; // decoded text directly inside this element
         std::vector<std::unique_ptr<XmlNode>> children;
 
+        /* Byte range of this element in the buffer passed to xml_parse():
+         * [src_begin, src_end) covers the whole element, opening tag through
+         * closing tag (self-closing tags included).  Useful to replace the
+         * original markup in place without re-serializing the whole document. */
+        size_t src_begin = 0;
+        size_t src_end   = 0;
+
         bool has(std::string_view a) const
         {
             return attrs.find(a) != attrs.end();
@@ -38,6 +45,13 @@ namespace litedocx
 
     // Parse a UTF-8 XML document.  Returns the document element, or nullptr.
     std::unique_ptr<XmlNode> xml_parse(const char* data, size_t len);
+
+    // Serialize an XmlNode subtree back to a UTF-8 XML fragment.
+    // Text and attribute values are re-escaped; names keep their prefix
+    // (e.g. "w:p").  The result is not byte-identical to the original source
+    // (entity spelling and inter-element whitespace are normalized) but it is
+    // a valid, complete XML representation of the subtree.
+    std::string xml_serialize(const XmlNode& node);
 
 } // namespace litedocx
 
