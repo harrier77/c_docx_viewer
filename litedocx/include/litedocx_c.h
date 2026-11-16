@@ -261,6 +261,14 @@ const char* ld_version(void);
  * Forces font recreation at next layout/render. */
 void ld_invalidate_font_cache(void* doc);
 
+/* Return the complete, up-to-date word/document.xml as UTF-8 string.
+ * The returned string includes the XML declaration, root <w:document> with
+ * all namespaces, the updated <w:body> with all paragraphs (including any
+ * edits applied via ld_paragraph_set_ooxml), and the closing tags.
+ * The caller owns the returned string and must free it with ld_free_string().
+ * Returns 1 on success, 0 on failure (e.g., invalid document handle). */
+int ld_get_document_xml(void* doc, char** out_xml);
+
 void ld_destroy(void* doc);
 
 #ifdef __cplusplus

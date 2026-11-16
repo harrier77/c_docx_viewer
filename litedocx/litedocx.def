@@ -30,6 +30,7 @@ EXPORTS
     ld_paragraph_set_xml
     ld_paragraph_get_ooxml
     ld_paragraph_set_ooxml
+    ld_get_document_xml
     ld_free_string
     ld_last_error
     ld_version

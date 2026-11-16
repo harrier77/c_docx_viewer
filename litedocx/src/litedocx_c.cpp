@@ -2841,4 +2841,39 @@ int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
     set_error("");
     return 1;
 }
+
+/* ld_get_document_xml: return the complete, up-to-date word/document.xml.
+ * The model->document_xml is kept in sync by ld_paragraph_set_ooxml which
+ * rebuilds it when a paragraph is edited. */
+int ld_get_document_xml(void* doc, char** out_xml)
+{
+    if(!out_xml)
+    {
+        return 0;
+    }
+    *out_xml = nullptr;
+
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->container || !h->container->owned_model)
+    {
+        set_error("parametri ld_get_document_xml non validi");
+        return 0;
+    }
+
+    const std::string& xml = h->container->owned_model->document_xml;
+    if(xml.empty())
+    {
+        set_error("document.xml non disponibile");
+        return 0;
+    }
+
+    *out_xml = ld_dup_utf8(xml);
+    if(!*out_xml)
+    {
+        set_error("memoria insufficiente");
+        return 0;
+    }
+    set_error("");
+    return 1;
+}
 } // extern "C"
