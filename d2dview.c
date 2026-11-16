@@ -1777,9 +1777,12 @@ static LRESULT CALLBACK paragraph_editor_proc(HWND hwnd, UINT msg, WPARAM wp, LP
             WS_CHILD | WS_VISIBLE,
             0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_HINT,
             GetModuleHandle(NULL), NULL);
-        if (g_edit_ctl_xml)
-            SendMessageW(g_edit_ctl_xml, WM_SETFONT,
-                         (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+        if (g_edit_ctl_xml){
+           HFONT hFont = CreateFontW(
+                -16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Consolas");
+            SendMessageW(g_edit_ctl_xml, WM_SETFONT, (WPARAM)hFont, TRUE);}
         {
             HWND hint = GetDlgItem(hwnd, IDC_PARA_HINT);
             HWND ba = GetDlgItem(hwnd, IDC_PARA_APPLY);
