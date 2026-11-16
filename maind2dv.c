@@ -31,7 +31,7 @@
 #include "renderer.h"
 #include "text_utf8.h"
 #include "document.h"
-#include "miniz.h"
+#include "miniz_zip/miniz.h"
 
 /* Accesso allo stato di layout (vedi func_gdi/layout.h). */
 #define LAY layout_get()

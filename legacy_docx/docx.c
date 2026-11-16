@@ -1,7 +1,7 @@
 #include "docx.h"
 #include "htmlbuf.h"
 #include "wml.h"
-#include "zip.h"
+#include "../zip_lib/zip.h"
 #include "css.h"
 
 #include <stdio.h>
