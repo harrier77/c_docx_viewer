@@ -9,15 +9,15 @@
 
 #include <windows.h>
 
-/* Geometria della pagina (ex docxview_new.c) */
+/* Geometria della pagina (ex docxview_new.c) (800,24,20,4)*/
 #define PAGE_MAX_W        800
 #define PAGE_DESK_MARGIN   24
 #define PAGE_TOP_GAP       20
 #define PAGE_SHADOW_OFF     4
 
-/* Padding: valori legati tra loro, non cambiare uno senza gli altri. (magic numbers justified text 160,18,6)*/
+/* Padding: valori legati tra loro, non cambiare uno senza gli altri. (magic numbers justified text 160,0,6)*/
 #define LAYOUT_PADDING_X         160
-#define LAYOUT_VISUAL_PADDING_X   18
+#define LAYOUT_VISUAL_PADDING_X   0
 #define LAYOUT_VISUAL_MARGIN_Y     6
 
 /* Limiti zoom (ex docxview_new.c) */
