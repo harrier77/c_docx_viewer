@@ -88,8 +88,10 @@ static int       g_pan_x, g_pan_y;
 /* Toolbar */
 static HWND      g_toolbar;
 #define TOOLBAR_HEIGHT 36
-#define IDM_TB_OPEN  4001
-#define IDM_TB_SAVE  4002
+#define IDM_TB_OPEN   4001
+#define IDM_TB_SAVE   4002
+#define IDM_TB_RELOAD 4003
+#define IDM_TB_EXIT   4004
 /* Tooltip nativo (click destro): finestra TOOLTIPS "tracking" e stato
  * attivo. Il testo mostra le coordinate client del mouse. */
 static HWND      g_tip_wnd;

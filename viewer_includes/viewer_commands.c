@@ -42,6 +42,7 @@ static void viewer_on_command(HWND hwnd, WPARAM wp)
         return;
     }
     case 101:
+    case IDM_TB_RELOAD:
         if (!can_switch_document())
         {
             MessageBoxA(hwnd,
@@ -52,6 +53,7 @@ static void viewer_on_command(HWND hwnd, WPARAM wp)
         if (g_path[0]) load_docx_file(g_path);
         return;
     case 102:
+    case IDM_TB_EXIT:
         PostMessageA(hwnd, WM_CLOSE, 0, 0);
         return;
     case 103:

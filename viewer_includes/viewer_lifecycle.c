@@ -26,7 +26,7 @@ static LRESULT viewer_on_create(HWND hwnd)
         tbab.nID = IDB_STD_SMALL_COLOR;
         SendMessage(g_toolbar, TB_ADDBITMAP, 0, (LPARAM)&tbab);
 
-        TBBUTTON tbb[2] = {0};
+        TBBUTTON tbb[5] = {0};
         tbb[0].iBitmap = STD_FILEOPEN;
         tbb[0].idCommand = IDM_TB_OPEN;
         tbb[0].fsState = TBSTATE_ENABLED;
@@ -35,7 +35,22 @@ static LRESULT viewer_on_create(HWND hwnd)
         tbb[1].idCommand = IDM_TB_SAVE;
         tbb[1].fsState = TBSTATE_ENABLED;
         tbb[1].fsStyle = BTNS_BUTTON;
-        SendMessage(g_toolbar, TB_ADDBUTTONS, 2, (LPARAM)tbb);
+        tbb[2].iBitmap = 0;
+        tbb[2].idCommand = 0;
+        tbb[2].fsState = TBSTATE_ENABLED;
+        tbb[2].fsStyle = BTNS_SEP;
+        /* Nota: IDTRYAGAIN/IDCLOSE non esistono nella bitmap STD: riciclo
+         * STD_UNDO (frecce in senso antiorario, look "ricarica") per
+         * Ricarica e STD_DELETE (croce rossa) per Esci. */
+        tbb[3].iBitmap = STD_UNDO;
+        tbb[3].idCommand = IDM_TB_RELOAD;
+        tbb[3].fsState = TBSTATE_ENABLED;
+        tbb[3].fsStyle = BTNS_BUTTON;
+        tbb[4].iBitmap = STD_DELETE;
+        tbb[4].idCommand = IDM_TB_EXIT;
+        tbb[4].fsState = TBSTATE_ENABLED;
+        tbb[4].fsStyle = BTNS_BUTTON;
+        SendMessage(g_toolbar, TB_ADDBUTTONS, 5, (LPARAM)tbb);
         SendMessage(g_toolbar, TB_AUTOSIZE, 0, 0);
         /* Imposta tooltip per i bottoni */
         SendMessage(g_toolbar, TB_SETMAXTEXTROWS, 0, 0);
