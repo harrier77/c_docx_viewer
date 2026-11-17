@@ -198,16 +198,16 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     filemenu = CreatePopupMenu();
     AppendMenuA(filemenu, MF_STRING, 100, "&Apri...\tCtrl+O");
     AppendMenuA(filemenu, MF_STRING, 101, "&Ricarica\tF5");
+    AppendMenuA(filemenu, MF_STRING, 104, "Salva\tCtrl+S");
     AppendMenuA(filemenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(filemenu, MF_STRING, 102, "&Esci");
-    AppendMenuA(filemenu, MF_STRING, 104, "Salva\tCtrl+S");
     AppendMenuA(menu, MF_POPUP, (UINT_PTR)filemenu, "&File");
     AppendMenuA(menu, MF_STRING, 103, "&?");
 
     layout_init(900, 700);
 
     hwnd = CreateWindowExW(0, L"D2DViewClass", L"d2dview",
-                           WS_OVERLAPPEDWINDOW | WS_VSCROLL,
+                           WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN,
                            CW_USEDEFAULT, CW_USEDEFAULT, LAY->cw, LAY->ch,
                            NULL, menu, inst, NULL);
     if (!hwnd) return 1;

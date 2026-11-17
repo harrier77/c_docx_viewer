@@ -1,0 +1,8 @@
+#include <windows.h>
+#include <winuser.h>
+
+/* Icon */
+1 ICON "icon/docx.ico"
+
+/* Manifest per Windows 11 - RT_MANIFEST = 24 */
+1 RT_MANIFEST "manifest.xml"
