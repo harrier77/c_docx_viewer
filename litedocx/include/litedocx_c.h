@@ -226,6 +226,19 @@ typedef struct ld_run_hit
 
 int ld_run_hit_test(void* doc, int x, int y, ld_run_hit* out);
 
+/* Replace the plain text of a single run ("slot") of a paragraph, keeping the
+ * formatting of every other run.  run_index is the same direct-child slot
+ * index reported by ld_run_hit_test (DOM order, <br> excluded).  When the
+ * paragraph has stored OOXML and it maps cleanly onto the render tree, the
+ * change is applied to the underlying word/document.xml (the w:t of the
+ * matching w:r) and the render tree is rebuilt, so the edit is INCLUDED in
+ * ld_get_document_xml and therefore in the saved file.  Otherwise the change
+ * falls back to an in-memory-only edit of the render tree (the existing span
+ * element is reused, so its class and matched styles are preserved).  text
+ * is UTF-8; '\n' and '\r' are rejected (a run is inline).  A full ld_render()
+ * is needed afterwards.  Returns 1 on success, 0 on invalid index/failure. */
+int ld_run_set_text(void* doc, int index, int run_index, const char* text);
+
 /* Return a newly allocated UTF-8 copy of a paragraph's plain text.
  * The caller must free it with ld_free_string().  Returns NULL if the index
  * is invalid or the paragraph cache is not valid yet (before the first

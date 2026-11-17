@@ -9,6 +9,38 @@ static LRESULT viewer_on_create(HWND hwnd)
 {
     // log_msg("[CREATE] WM_CREATE\n");
     g_hwnd = hwnd;
+    /* Crea toolbar */
+    INITCOMMONCONTROLSEX icc_tb = { sizeof(icc_tb), ICC_BAR_CLASSES };
+    InitCommonControlsEx(&icc_tb);
+    g_toolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, NULL,
+        WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS | CCS_TOP,
+        0, 0, 0, TOOLBAR_HEIGHT,
+        hwnd, (HMENU)1000, GetModuleHandle(NULL), NULL);
+    if (g_toolbar) {
+        SendMessage(g_toolbar, TB_BUTTONSTRUCTSIZE, (WPARAM)sizeof(TBBUTTON), 0);
+        SendMessage(g_toolbar, TB_SETBITMAPSIZE, 0, (LPARAM)MAKELONG(24, 24));
+
+        /* Usa TB_ADDBITMAP con 0 per le icone standard di sistema */
+        TBADDBITMAP tbab;
+        tbab.hInst = HINST_COMMCTRL;
+        tbab.nID = IDB_STD_SMALL_COLOR;
+        SendMessage(g_toolbar, TB_ADDBITMAP, 0, (LPARAM)&tbab);
+
+        TBBUTTON tbb[2] = {0};
+        tbb[0].iBitmap = STD_FILEOPEN;
+        tbb[0].idCommand = IDM_TB_OPEN;
+        tbb[0].fsState = TBSTATE_ENABLED;
+        tbb[0].fsStyle = BTNS_BUTTON;
+        tbb[1].iBitmap = STD_FILESAVE;
+        tbb[1].idCommand = IDM_TB_SAVE;
+        tbb[1].fsState = TBSTATE_ENABLED;
+        tbb[1].fsStyle = BTNS_BUTTON;
+        SendMessage(g_toolbar, TB_ADDBUTTONS, 2, (LPARAM)tbb);
+        SendMessage(g_toolbar, TB_AUTOSIZE, 0, 0);
+        /* Imposta tooltip per i bottoni */
+        SendMessage(g_toolbar, TB_SETMAXTEXTROWS, 0, 0);
+        fprintf(stderr, "[TOOLBAR] bottoni: %ld\n", (long)SendMessage(g_toolbar, TB_BUTTONCOUNT, 0, 0));
+    }
     /* Crea IDWriteFactory per DirectWrite (text rendering migliorato).
        DWriteCreateFactory non richiede CoInitialize quando si usa il
        tipo SHARED; creiamo qui l'factory sul thread UI prima del renderer. */

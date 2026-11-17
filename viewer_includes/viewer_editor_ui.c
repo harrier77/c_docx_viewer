@@ -50,6 +50,24 @@ static int strings_equal_ignore_cr(const char *a, const char *b)
     }
 }
 
+/* Commit nella modalita' "modifica run": nessun confronto con l'OOXML
+ * originale, il testo letto dal controllo va dritto in g_edit_result_utf8
+ * (poi request_run_apply lo manda a ld_run_set_text). */
+static void commit_run_editor(HWND hwnd)
+{
+    char *text = control_text_utf8(g_edit_ctl_xml);
+    if (!text)
+    {
+        g_edit_apply = 0;
+        DestroyWindow(hwnd);
+        return;
+    }
+    free(g_edit_result_utf8);
+    g_edit_result_utf8 = text;
+    g_edit_apply = 1;
+    DestroyWindow(hwnd);
+}
+
 static void commit_paragraph_editor(HWND hwnd)
 {
     fprintf(stderr, "[XML][COMMIT] XML tab has_original=%d\n",
@@ -173,7 +191,12 @@ static LRESULT CALLBACK paragraph_editor_proc(HWND hwnd, UINT msg, WPARAM wp, LP
         switch (LOWORD(wp))
         {
         case IDC_PARA_APPLY:
-            commit_paragraph_editor(hwnd);
+            /* Modalita' run: commit dedicato (testo del run, niente
+             * confronto OOXML). */
+            if (g_edit_run_slot >= 0)
+                commit_run_editor(hwnd);
+            else
+                commit_paragraph_editor(hwnd);
             return 0;
         case IDC_PARA_CANCEL:
             g_edit_apply = 0;
@@ -504,14 +527,16 @@ static void show_paragraph_editor_xml(int index, const char *xml_utf8)
     g_edit_result_utf8 = NULL;
 }
 
-/* Visualizzatore in sola lettura del run cliccato (doppio click destro).
- * Mostra solo la slice di testo del run: l'apply su un run isolato non e'
- * ancora supportato dalla DLL (riscriverebbe l'intero paragrafo
- * appiattendo gli altri run), quindi niente Applica. */
+/* Editor del run cliccato (doppio click destro).  Mostra la slice di testo
+ * del run [run_char_start..run_char_end) ed e' EDITABILE: Applica/Ctrl+Invio
+ * accoda JOB_RUN_APPLY_EDIT che chiama ld_run_set_text sullo slot cliccato
+ * (passato dall'hit-test, non ricalcolato).  Lo span esistente viene
+ * riusato dalla DLL: la formattazione del run e degli altri run resta
+ * intatta. */
 static void show_run_viewer(int para_index, const ld_run_hit *hit,
                             const char *run_text)
 {
-    static ACCEL accels[1];
+    static ACCEL accels[2];
     WCHAR       *wtext;
     RECT         rc_main;
     int          w = 660, h = 300, x, y;
@@ -524,7 +549,10 @@ static void show_run_viewer(int para_index, const ld_run_hit *hit,
 
     ensure_editor_class();
 
-    g_edit_readonly = 1;
+    /* Editabile: stesso template dell'editor paragrafo, ma in modalita'
+     * run (commit dedicato, g_edit_run_slot >= 0). */
+    g_edit_readonly = 0;
+    g_edit_run_slot = hit ? hit->run_index : -1;
     g_edit_index = para_index;
     g_edit_apply = 0;
     free(g_edit_result_utf8);
@@ -536,13 +564,14 @@ static void show_run_viewer(int para_index, const ld_run_hit *hit,
 
     g_doc_state = DOC_STATE_EDITOR;
     hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, LD_PARA_EDIT_CLASS,
-                           L"Run cliccato (sola lettura)",
+                           L"Modifica run",
                            WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
                            x, y, w, h, g_hwnd, NULL,
                            GetModuleHandle(NULL), NULL);
     if (!hwnd)
     {
         g_edit_readonly = 0;
+        g_edit_run_slot = -1;
         g_edit_index = -1;
         g_doc_state = DOC_STATE_IDLE;
         return;
@@ -560,7 +589,7 @@ static void show_run_viewer(int para_index, const ld_run_hit *hit,
         HWND hint = GetDlgItem(hwnd, IDC_PARA_HINT);
         WCHAR hint_w[200];
         wsprintfW(hint_w,
-                  L"Run %d del paragrafo %d | offset paragrafo %d, range [%d..%d) | box %d, %d %dx%d | sola lettura",
+                  L"Run %d del paragrafo %d | offset paragrafo %d, range [%d..%d) | box %d, %d %dx%d | Ctrl+Invio = Applica",
                   hit ? hit->run_index : -1,
                   para_index,
                   hit ? hit->char_offset : -1,
@@ -572,11 +601,14 @@ static void show_run_viewer(int para_index, const ld_run_hit *hit,
             SetWindowTextW(hint, hint_w);
     }
 
-    /* Solo ESC (Annulla): niente Ctrl+Invio che puntava ad Applica. */
+    /* ESC = Annulla, Ctrl+Invio = Applica (come l'editor del paragrafo). */
     accels[0].fVirt = FVIRTKEY;
     accels[0].key = VK_ESCAPE;
     accels[0].cmd = IDC_PARA_CANCEL;
-    g_edit_accel = CreateAcceleratorTableW(accels, 1);
+    accels[1].fVirt = FVIRTKEY | FCONTROL;
+    accels[1].key = VK_RETURN;
+    accels[1].cmd = IDC_PARA_APPLY;
+    g_edit_accel = CreateAcceleratorTableW(accels, 2);
 
     EnableWindow(g_hwnd, FALSE);
     ShowWindow(hwnd, SW_SHOWNORMAL);
@@ -621,6 +653,7 @@ static void show_run_viewer(int para_index, const ld_run_hit *hit,
     if (quit)
     {
         g_edit_index = -1;
+        g_edit_run_slot = -1;
         free(g_edit_result_utf8);
         g_edit_result_utf8 = NULL;
         g_doc_state = DOC_STATE_IDLE;
@@ -628,13 +661,23 @@ static void show_run_viewer(int para_index, const ld_run_hit *hit,
         return;
     }
 
-    /* Sola lettura: alla chiusura si torna a documento a riposo. */
-    g_edit_is_xml = 0;
-    g_doc_state = DOC_STATE_IDLE;
-    InvalidateRect(g_hwnd, NULL, FALSE);
-    resume_pending_render();
+    if (g_edit_apply && g_edit_result_utf8)
+    {
+        /* Applica: sostituzione del testo del run cliccato (la richiesta
+         * usa g_edit_index/g_edit_run_slot, che vengono azzerati sotto). */
+        request_run_apply(g_edit_result_utf8);
+    }
+    else
+    {
+        g_edit_is_xml = 0;
+        g_doc_state = DOC_STATE_IDLE;
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        resume_pending_render();
+    }
 
     g_edit_index = -1;
+    g_edit_run_slot = -1;
+    g_edit_is_xml = 0;
     free(g_edit_result_utf8);
     g_edit_result_utf8 = NULL;
 }

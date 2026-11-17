@@ -2516,6 +2516,459 @@ void ld_free_string(char* str)
     }
 }
 
+/* ---- Persistenza OOXML dell'edit del run ----
+ *
+ * Lo slot cliccato (modello del builder: figlio diretto del paragrafo)
+ * corrisponde a un w:r nel frammento OOXML memorizzato per quel paragrafo.
+ * Il mapping si fa per OFFSET, non per ordinale: il walker ripercorre lo
+ * stesso DFS di DocxBuilder::process_inline_children (docx_builder.cpp) e
+ * accumula la lunghezza del testo normalizzato che il builder emetterebbe
+ * (NBSP compatto come ld_norm_text_len, w:tab = 4 spazi, w:br/w:cr/
+ * noBreakHyphen/sym = 1 carattere).  Gli slot senza testo (bookmark, div di
+ * page-break, span vuoti) non spostano l'offset e quindi non influenzano il
+ * match; hyperlink/ins/smartTag/fldSimple/sdt cambiano solo il nesting, non
+ * l'ordine DFS.  Se il totale degli offset calcolato sull'OOXML non coincide
+ * con quello dell'albero render (paragrafo modificato in memoria in passato,
+ * formule oMath, ...), il mapping non e' affidabile e l'edit resta
+ * in-memory (non persistente). */
+
+static int ld_apply_paragraph_ooxml(ld_doc* h, ld_container* c, int index,
+                                    const char* ooxml, size_t len);
+
+struct ld_ooxml_run_scan
+{
+    int                    offset       = 0;  /* offset corrente (testo normalizzato) */
+    int                    target_start = -1;
+    int                    target_end   = -1;
+    const litedocx::XmlNode* run        = nullptr; /* w:r corrispondente, se trovato */
+};
+
+/* Lunghezza normalizzata del testo emesso dal builder per un w:r.
+ * *editable = 0 se il run contiene altro oltre a w:t (tab, br, sym,
+ * disegni): quei run non si lasciano riscrivere con la sola sostituzione
+ * del w:t. */
+static int ld_ooxml_run_text_len(const litedocx::XmlNode* run, int* editable)
+{
+    int len = 0;
+    *editable = 1;
+    for(const auto& c : run->children)
+    {
+        if(!c || c->is("rPr"))
+        {
+            continue;
+        }
+        if(c->is("t"))
+        {
+            if(!c->text.empty())
+            {
+                len += (int)ld_norm_text_len(c->text);
+            }
+            continue;
+        }
+        if(c->is("br") || c->is("cr"))     { len += 1; *editable = 0; continue; }
+        if(c->is("tab"))                   { len += 4; *editable = 0; continue; }
+        if(c->is("noBreakHyphen"))         { len += 1; *editable = 0; continue; }
+        if(c->is("sym"))
+        {
+            len += c->attr("w:char").empty() ? 0 : 1;
+            *editable = 0;
+            continue;
+        }
+        if(c->is("drawing") || c->is("pict") || c->is("object"))
+        {
+            *editable = 0;
+            continue;
+        }
+        /* fldChar/instrText/delText/lastRenderedPageBreak/ecc.: il builder
+         * li ignora (zero testo). */
+    }
+    return len;
+}
+
+/* DFS sul frammento OOXML nello stesso ordine del builder.  Completa sempre
+ * la scansione (serve l'offset totale per la verifica di allineamento) e
+ * registra il PRIMO w:r il cui range coincide con quello del run cliccato. */
+static void ld_ooxml_walk(const litedocx::XmlNode* node, ld_ooxml_run_scan* s,
+                          int* unsupported)
+{
+    if(!node)
+    {
+        return;
+    }
+    if(node->is("pPr"))
+    {
+        return;
+    }
+    if(node->is("r"))
+    {
+        int         editable = 0;
+        const int   len      = ld_ooxml_run_text_len(node, &editable);
+        const int   start    = s->offset;
+        s->offset += len;
+        if(!s->run && len > 0 && editable &&
+           start == s->target_start && start + len == s->target_end)
+        {
+            s->run = node;
+        }
+        return;
+    }
+    if(node->is("hyperlink"))
+    {
+        /* Con href i run interni annidano dentro <a>, senza no diventano
+         * slot diretti del paragrafo: in entrambi i casi l'ordine DFS e
+         * l'offset non cambiano. */
+        for(const auto& c : node->children)
+        {
+            ld_ooxml_walk(c.get(), s, unsupported);
+        }
+        return;
+    }
+    if(node->is("bookmarkStart"))
+    {
+        /* Slot zero-length (un <a> vuoto) se ha un nome: non sposta l'offset. */
+        return;
+    }
+    if(node->is("del") || node->is("moveFrom") || node->is("commentRangeStart") ||
+       node->is("commentRangeEnd") || node->is("commentReference") ||
+       node->is("bookmarkEnd") || node->is("proofErr") ||
+       node->is("lastRenderedPageBreak") || node->is("fldChar") ||
+       node->is("instrText") || node->is("delText"))
+    {
+        return;
+    }
+    if(node->is("sdt"))
+    {
+        if(const litedocx::XmlNode* c = node->child("sdtContent"))
+        {
+            for(const auto& cc : c->children)
+            {
+                ld_ooxml_walk(cc.get(), s, unsupported);
+            }
+        }
+        return;
+    }
+    if(node->is("ins") || node->is("moveTo") || node->is("smartTag") ||
+       node->is("customXml") || node->is("fldSimple") || node->is("sdtContent") ||
+       node->is("dir") || node->is("bdo"))
+    {
+        for(const auto& cc : node->children)
+        {
+            ld_ooxml_walk(cc.get(), s, unsupported);
+        }
+        return;
+    }
+    if(node->is("oMath") || node->is("oMathPara"))
+    {
+        /* Il builder emette il testo della formula via collect_text: non
+         * specchiato dal walker. */
+        *unsupported = 1;
+        return;
+    }
+    /* drawing/pict/object a livello paragrafo ed elementi sconosciuti: il
+     * builder li emette senza testo o li ignora: offset invariato. */
+}
+
+/* Prova a rendere persistente l'edit del run andando a toccare il w:t del
+ * w:r corrispondente nel document.xml in memoria, poi splicando il frammento
+ * w:p modificato (ld_apply_paragraph_ooxml: validazione, splice, rollback,
+ * rebuild completo dell'albero).  Ritorna 1 se persistito: in quel caso
+ * l'albero render e' GIA' stato rigenerato dal rebuild e NON va mutato di
+ * nuovo.  Ritorna 0 se il paragrafo non e' mappabile sull'OOXML (nessun
+ * documento memorizzato, offset non allineati, costrutti non supportati):
+ * il chiamante cade sul percorso in-memory.  Diagnostica su stderr. */
+static int ld_run_persist_ooxml(ld_doc* h, int index, int target_start,
+                                int target_end, int render_total, const char* text)
+{
+    if(!h || !h->container || !h->container->owned_model)
+    {
+        return 0;
+    }
+    litedocx::DocxModel* model = h->container->owned_model.get();
+
+    auto range = h->container->paragraph_ranges.find(index);
+    if(range == h->container->paragraph_ranges.end())
+    {
+        return 0;
+    }
+    const size_t begin = range->second.first;
+    const size_t end   = range->second.second;
+    if(begin >= end || end > model->document_xml.size())
+    {
+        return 0;
+    }
+
+    const std::string frag_src = model->document_xml.substr(begin, end - begin);
+    std::unique_ptr<litedocx::XmlNode> frag =
+        litedocx::xml_parse(frag_src.data(), frag_src.size());
+    if(!frag || !frag->is("p"))
+    {
+        fprintf(stderr, "[RUN][OOXML] frammento w:p non valido: fallback\n");
+        fflush(stderr);
+        return 0;
+    }
+
+    ld_ooxml_run_scan scan;
+    scan.target_start = target_start;
+    scan.target_end   = target_end;
+    int unsupported   = 0;
+    /* Come in DocxBuilder::add_paragraph: ogni figlio diretto del w:p passa
+     * per il dispatch di process_inline_children (il w:p stesso non emette
+     * testo).  Il ramo di default del walker NON ricorre, quindi la
+     * discesa parte da qui. */
+    for(const auto& c : frag->children)
+    {
+        ld_ooxml_walk(c.get(), &scan, &unsupported);
+    }
+
+    if(scan.offset != render_total)
+    {
+        fprintf(stderr, "[RUN][OOXML] offset non allineati (render=%d ooxml=%d): fallback\n",
+                render_total, scan.offset);
+        fflush(stderr);
+        return 0;
+    }
+    if(unsupported)
+    {
+        fprintf(stderr, "[RUN][OOXML] paragrafo con formule (oMath): fallback\n");
+        fflush(stderr);
+        return 0;
+    }
+    if(!scan.run)
+    {
+        fprintf(stderr, "[RUN][OOXML] nessun w:r per il range [%d..%d): fallback\n",
+                target_start, target_end);
+        fflush(stderr);
+        return 0;
+    }
+
+    /* Policy: il w:r deve avere testo puro (solo w:t). */
+    const litedocx::XmlNode* first_t = nullptr;
+    int t_count = 0;
+    for(const auto& c : scan.run->children)
+    {
+        if(!c || c->is("rPr"))
+        {
+            continue;
+        }
+        if(c->is("t"))
+        {
+            if(!first_t)
+            {
+                first_t = c.get();
+            }
+            ++t_count;
+            continue;
+        }
+        if(c->is("br") || c->is("cr") || c->is("tab") || c->is("noBreakHyphen") ||
+           c->is("sym") || c->is("drawing") || c->is("pict") || c->is("object"))
+        {
+            fprintf(stderr, "[RUN][OOXML] run con contenuto non testuale: fallback\n");
+            fflush(stderr);
+            return 0;
+        }
+    }
+    if(!first_t)
+    {
+        fprintf(stderr, "[RUN][OOXML] run senza w:t: fallback\n");
+        fflush(stderr);
+        return 0;
+    }
+
+    /* Modifica il DOM OOXML: il primo w:t prende il nuovo testo (gli
+     * eventuali w:t aggiuntivi vengono rimossi).  xml:space="preserve"
+     * protegge gli spazi ai bordi; xml_serialize si occupa dell'escaping. */
+    litedocx::XmlNode* run = const_cast<litedocx::XmlNode*>(scan.run);
+    litedocx::XmlNode* wt  = const_cast<litedocx::XmlNode*>(first_t);
+    wt->text = text;
+    wt->attrs.clear();
+    wt->attrs.emplace("xml:space", std::string("preserve"));
+    if(t_count > 1)
+    {
+        run->children.erase(
+            std::remove_if(run->children.begin(), run->children.end(),
+                           [&wt](const std::unique_ptr<litedocx::XmlNode>& c) {
+                               return c && c->is("t") && c.get() != wt;
+                           }),
+            run->children.end());
+    }
+
+    const std::string frag_new = litedocx::xml_serialize(*frag);
+    if(!ld_apply_paragraph_ooxml(h, h->container, index,
+                                 frag_new.c_str(), frag_new.size()))
+    {
+        fprintf(stderr, "[RUN][OOXML] splice/rebuild fallito ('%s'): fallback\n",
+                ld_last_error());
+        fflush(stderr);
+        return 0;
+    }
+
+    fprintf(stderr, "[RUN][OOXML] run persistito in document.xml (para=%d range [%d..%d))\n",
+            index, target_start, target_end);
+    fflush(stderr);
+    return 1;
+}
+
+/* Sostituisce il testo di un singolo run (slot) di un paragrafo, preservando
+ * la formattazione di tutti gli altri run.  Lo slot e' lo stesso individuato
+ * da ld_run_hit_test: figlio diretto numero run_index in ordine DOM, <br>
+ * esclusi.  Due casi:
+ *  - span: l'elemento ESISTENTE viene riutilizzato (clearRecursive svuota il
+ *    contenuto ma conserva attributi e stili matched, quindi il font resta
+ *    corretto) e il nuovo testo viene appeso come parti plain;
+ *  - nodo di testo puro (run senza formattazione, el_text/el_space): lo slot
+ *    viene rimosso e i pezzi del nuovo testo vengono appesi al paragrafo,
+ *    ripristinando poi in coda i fratelli successivi (appendChild non ha
+ *    insert_before, ma l'ordine si ricostruisce riappendendo).
+ * Invalidazione geometria/cache ESATTAMENTE come ld_paragraph_set_text e
+ * SEMPRE prima di mutare il DOM.  '\n' e '\r' sono rifiutati: un run e'
+ * inline, un'interruzione di riga dentro lo span romperebbe il modello degli
+ * slot.  Se il paragrafo ha OOXML memorizzato e il mapping con document.xml
+ * e' allineato (ld_run_persist_ooxml), la modifica viene invece applicata
+ * DIRETTAMENTE a document.xml (w:t del w:r corrispondente) e l'albero viene
+ * rigenerato dal rebuild: l'edit persiste nel salvataggio del file.  Ritorna
+ * 1 se text e' il nuovo testo del run. */
+int ld_run_set_text(void* doc, int index, int run_index, const char* text)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container || !text)
+    {
+        set_error("parametri modifica run non validi");
+        return 0;
+    }
+    if(strchr(text, '\n') || strchr(text, '\r'))
+    {
+        set_error("il testo di un run non puo' contenere fine riga");
+        return 0;
+    }
+
+    try
+    {
+        ld_container* c = h->container;
+        const ld_container::ParagraphInfo* info = c->find_paragraph(index);
+        if(!info || !info->element)
+        {
+            set_error("indice paragrafo non valido");
+            return 0;
+        }
+
+        /* Stesso criterio di ld_run_hit_test: figli diretti in ordine DOM,
+         * <br> esclusi dal conteggio degli slot.  La stessa scansiona
+         * restituisce lo slot, il suo range normalizzato [start,end) e il
+         * testo totale del paragrafo (tutti e tre servono al mapping
+         * OOXML). */
+        litehtml::element::ptr slot;
+        int target_start = -1;
+        int target_end   = -1;
+        int render_total = 0;
+        {
+            int offset = 0;
+            int n      = 0;
+            for(const auto& child : info->element->children())
+            {
+                if(child->is_break())
+                {
+                    offset += 1;
+                    continue;
+                }
+                const int len = ld_subtree_norm_len(child);
+                if(n == run_index)
+                {
+                    slot         = child;
+                    target_start = offset;
+                    target_end   = offset + len;
+                }
+                offset += len;
+                ++n;
+            }
+            render_total = offset;
+        }
+        if(!slot || target_end <= target_start)
+        {
+            set_error("indice run non valido");
+            return 0;
+        }
+
+        /* Persistenza: se il paragrafo ha OOXML memorizzato e il mapping
+         * con document.xml e' allineato, la modifica va direttamente nel
+         * w:t del w:r e il rebuild rigenera l'albero render: l'edit compare
+         * anche nel salvataggio.  A fallimento si cade sul percorso
+         * in-memory (solo a video). */
+        {
+            int persisted = 0;
+            try
+            {
+                persisted = ld_run_persist_ooxml(h, index, target_start,
+                                                 target_end, render_total, text);
+            } catch(...)
+            {
+                persisted = 0;
+            }
+            if(persisted)
+            {
+                set_error("");
+                return 1;
+            }
+            fprintf(stderr, "[RUN][OOXML] fallback in-memory (edit non persistente)\n");
+            fflush(stderr);
+        }
+
+        /* Cache e geometria diventano stale: invalida PRIMA di mutare il
+         * DOM, cosi' un fallimento non puo' lasciare cache "valida" su
+         * contenuto cambiato. */
+        c->clear_paragraphs();
+        h->m_rebuild_needed    = true;
+        h->m_full_layout_done  = false;
+        h->m_page_heights.clear();
+        h->m_page_y_offsets.clear();
+        h->m_last_rendered_page = -1;
+
+        if(slot->is_text())
+        {
+            /* Run senza formattazione: il nodo di testo non puo' avere
+             * figli, quindi lo si sostituisce con i pezzi del nuovo testo
+             * appesi direttamente al paragrafo. */
+            litehtml::element::ptr para = info->element;
+            std::vector<litehtml::element::ptr> tail;
+            bool seen = false;
+            for(const auto& child : para->children())
+            {
+                if(child == slot)
+                {
+                    seen = true;
+                    continue;
+                }
+                if(seen)
+                {
+                    tail.push_back(child);
+                }
+            }
+            if(!para->removeChild(slot))
+            {
+                set_error("rimozione del run non riuscita");
+                return 0;
+            }
+            append_plain_text_children(para, std::string(text));
+            for(const auto& t : tail)
+            {
+                para->appendChild(t);
+            }
+        }
+        else
+        {
+            /* Span riusato: attributi e stili matched restano intatti. */
+            slot->clearRecursive();
+            append_plain_text_children(slot, std::string(text));
+        }
+
+        set_error("");
+        return 1;
+    } catch(...)
+    {
+        set_error("errore durante la modifica del run");
+        return 0;
+    }
+}
+
 
 // ===== Paginated layout API (Fase 4) =====
 
@@ -3025,41 +3478,16 @@ int ld_paragraph_get_ooxml(void* doc, int index, char** out_xml)
     return 1;
 }
 
-/* ld_paragraph_set_ooxml: replace the raw OOXML <w:p> of a paragraph and
- * rebuild the document.
- *
- * Implementation follows a plain "find the original slice and replace it"
- * strategy: the parser records the byte range of every <w:p> in
- * model->document_xml, so we splice the new fragment in exactly where the old
- * one was and let DocxBuilder rebuild the whole litehtml tree.  This reuses
- * the normal style/list/table/image pipeline and keeps indices stable as long
- * as the fragment still contains exactly one <w:p>.
- *
- * The caller must later run a full ld_render() to get new layout/pagination.
- * Returns 1 on success, 0 on failure (document left untouched). */
-int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
+/* Nucleo comune di ld_paragraph_set_ooxml: valida il frammento (un solo
+ * w:p), lo splicca nel byte-range del paragrafo in model->document_xml e
+ * ricostruisce l'intero albero render con rollback a fallimento.  Chiamato
+ * sia dall'apply OOXML esplicito sia dalla persistenza dell'edit del run
+ * (ld_run_set_text).  Il chiamante deve aver gia' verificato owned_model e
+ * la lunghezza del frammento. */
+static int ld_apply_paragraph_ooxml(ld_doc* h, ld_container* c, int index,
+                                    const char* ooxml, size_t len)
 {
-    auto* h = static_cast<ld_doc*>(doc);
-    if(!h || !h->container || !h->container->owned_model || !ooxml)
-    {
-        set_error("parametri ld_paragraph_set_ooxml non validi");
-        return 0;
-    }
-
-    ld_container* c     = h->container;
     litedocx::DocxModel* model = c->owned_model.get();
-
-    const size_t len = std::strlen(ooxml);
-    if(len == 0)
-    {
-        set_error("OOXML del paragrafo vuoto");
-        return 0;
-    }
-    if(len > (size_t)1 << 20) // 1 MiB: un singolo paragrafo non dovrebbe mai essere cosi' grande
-    {
-        set_error("OOXML del paragrafo troppo grande");
-        return 0;
-    }
 
     /* Validate the fragment: exactly one <w:p> and nothing else around it. */
     {
@@ -3150,6 +3578,36 @@ int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
 
     set_error("");
     return 1;
+}
+
+/* ld_paragraph_set_ooxml: replace the raw OOXML <w:p> of a paragraph and
+ * rebuild the document.  The caller must later run a full ld_render() to
+ * get new layout/pagination.  Returns 1 on success, 0 on failure (document
+ * left untouched). */
+int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->container || !h->container->owned_model || !ooxml)
+    {
+        set_error("parametri ld_paragraph_set_ooxml non validi");
+        return 0;
+    }
+
+    ld_container* c = h->container;
+
+    const size_t len = std::strlen(ooxml);
+    if(len == 0)
+    {
+        set_error("OOXML del paragrafo vuoto");
+        return 0;
+    }
+    if(len > (size_t)1 << 20) // 1 MiB: un singolo paragrafo non dovrebbe mai essere cosi' grande
+    {
+        set_error("OOXML del paragrafo troppo grande");
+        return 0;
+    }
+
+    return ld_apply_paragraph_ooxml(h, c, index, ooxml, len);
 }
 
 /* ld_get_document_xml: return the complete, up-to-date word/document.xml.

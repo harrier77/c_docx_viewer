@@ -129,6 +129,68 @@ static void request_paragraph_apply(const char *text)
     }
 }
 
+/* Accoda la sostituzione del testo del run in editing (finestra del run,
+ * doppio click destro).  g_edit_index = paragrafo, g_edit_run_slot = slot
+ * del run (esito dell'hit-test, non ricalcolato).  g_render_busy viene
+ * impostato QUI, sul thread UI, prima di accodare il job, come in
+ * request_paragraph_apply. */
+static void request_run_apply(const char *text)
+{
+    if (!g_doc || !text || g_edit_index < 0 || g_edit_run_slot < 0)
+    {
+        g_doc_state = DOC_STATE_IDLE;
+        return;
+    }
+
+    g_apply_token++;
+    g_doc_state = DOC_STATE_APPLYING;
+    g_pending_apply_token = g_apply_token;
+
+    if (!g_worker_started)
+    {
+        EditResult r;
+        ZeroMemory(&r, sizeof(r));
+        r.doc = g_doc;
+        r.gen = g_load_gen;
+        r.token = g_apply_token;
+        r.ok = ld_run_set_text(g_doc, g_edit_index, g_edit_run_slot, text);
+        if (!r.ok)
+        {
+            const char *err = ld_last_error();
+            lstrcpynA(r.error, err ? err : "", sizeof(r.error));
+        }
+        on_edit_applied(&r);
+        return;
+    }
+
+    {
+        Job *j = alloc_job(JOB_RUN_APPLY_EDIT);
+        if (!j)
+        {
+            g_pending_apply_token = 0;
+            g_doc_state = DOC_STATE_IDLE;
+            return;
+        }
+        j->doc = g_doc;
+        j->gen = g_load_gen;
+        j->epoch = g_layout_epoch;
+        j->token = g_apply_token;
+        j->para_index = g_edit_index;
+        j->run_index = g_edit_run_slot;
+        j->text = _strdup(text);
+        if (!j->text)
+        {
+            free(j);
+            g_pending_apply_token = 0;
+            g_doc_state = DOC_STATE_IDLE;
+            return;
+        }
+        g_render_busy = 1;
+        g_render_doc = g_doc;
+        enqueue_job(j);
+    }
+}
+
 /* Avvia l'hit-test sul worker (o in modo sincrono senza worker). */
 static void begin_paragraph_edit_at(int doc_x, int doc_y)
 {

@@ -9,6 +9,11 @@ static void viewer_on_size(HWND hwnd, WPARAM wp, LPARAM lp)
 {
     (void)wp;
     // log_msg("[SIZE] WM_SIZE cw=%d ch=%d\n", LOWORD(lp), HIWORD(lp));
+    /* Resize toolbar */
+    if (g_toolbar) {
+        SendMessage(g_toolbar, TB_AUTOSIZE, 0, 0);
+        MoveWindow(g_toolbar, 0, 0, LOWORD(lp), TOOLBAR_HEIGHT, TRUE);
+    }
     layout_resize(LOWORD(lp), HIWORD(lp));
     sync_view_scale();
     /* Ogni ridimensionamento invalida gli hit-test in volo. */
@@ -163,10 +168,11 @@ static LRESULT viewer_on_rbuttonup(HWND hwnd, LPARAM lp)
     return 0;
 }
 
-/* Doppio click destro: apre il visualizzatore in sola lettura del run
- * cliccato.  Il primo click del doppio ha gia' accodato JOB_RUN_HIT_TEST
- * (per il tooltip): se l'esito non e' ancora arrivato si marca l'attesa,
- * altrimenti si accoda un nuovo job con la richiesta di apertura. */
+/* Doppio click destro: apre l'editor del paragrafo (testo/OOXML).  Il
+ * primo click del doppio ha gia' accodato JOB_RUN_HIT_TEST (per il
+ * tooltip): se l'esito non e' ancora arrivato si marca l'attesa e
+ * l'editor viene aperto dall'esito (handle_run_hit_result), altrimenti
+ * si avvia subito l'hit-test del paragrafo. */
 static void viewer_on_rbuttondblclk(HWND hwnd, LPARAM lp)
 {
     int cx = (short)LOWORD(lp);
@@ -183,26 +189,14 @@ static void viewer_on_rbuttondblclk(HWND hwnd, LPARAM lp)
 
     if (g_doc_state == DOC_STATE_HITTEST)
     {
-        /* Esito in volo (job del primo click): verra' aperto il run. */
-        g_run_view_pending = 1;
+        /* Esito in volo (job del primo click): l'editor si aprira' dopo. */
+        g_para_edit_pending = 1;
         return;
     }
     if (g_doc_state != DOC_STATE_IDLE || !g_worker_started || g_edit_hwnd)
         return;
 
-    {
-        Job *j = alloc_job(JOB_RUN_HIT_TEST);
-        if (!j)
-            return;
-        j->doc = g_doc;
-        j->gen = g_load_gen;
-        j->epoch = g_layout_epoch;
-        j->doc_x = doc_x;
-        j->doc_y = doc_y;
-        g_run_view_pending = 1;
-        g_doc_state = DOC_STATE_HITTEST;
-        enqueue_job(j);
-    }
+    begin_paragraph_edit_at(doc_x, doc_y);
 }
 
 /* Esito asincrono del run hit-test: aggiorna il testo del tooltip con
@@ -214,6 +208,7 @@ static void handle_run_hit_result(RunHitResult *r)
 
     if (!r)
     {
+        g_para_edit_pending = 0;
         if (g_doc_state == DOC_STATE_HITTEST)
             g_doc_state = DOC_STATE_IDLE;
         resume_pending_render();
@@ -223,6 +218,7 @@ static void handle_run_hit_result(RunHitResult *r)
     /* Risultato scaduto (documento/layout cambiati nel frattempo). */
     if (r->doc != g_doc || r->gen != g_load_gen || r->epoch != g_layout_epoch)
     {
+        g_para_edit_pending = 0;
         if (g_doc_state == DOC_STATE_HITTEST)
             g_doc_state = DOC_STATE_IDLE;
         resume_pending_render();
@@ -238,8 +234,8 @@ static void handle_run_hit_result(RunHitResult *r)
             r->info.run_char_start, r->info.run_char_end, r->info.run_char_offset,
             r->info.x, r->info.y, r->info.w, r->info.h, r->doc_x, r->doc_y);
 
-    /* Doppio click destro: apre il visualizzatore in sola lettura del
-     * run cliccato invece di aggiornare il tooltip. */
+    /* Doppio click sinistro: apre l'editor del run cliccato invece di
+     * aggiornare il tooltip. */
     if (g_run_view_pending)
     {
         g_run_view_pending = 0;
@@ -271,6 +267,17 @@ static void handle_run_hit_result(RunHitResult *r)
                 free(para);
             }
         }
+        free(r);
+        return;
+    }
+
+    /* Doppio click destro: il primo click del doppio ha accodato il job
+     * per il tooltip; arrivato l'esito si apre l'editor del paragrafo
+     * (testo/OOXML) nello stesso punto. */
+    if (g_para_edit_pending)
+    {
+        g_para_edit_pending = 0;
+        begin_paragraph_edit_at(r->doc_x, r->doc_y);
         free(r);
         return;
     }
@@ -365,22 +372,47 @@ static LRESULT viewer_on_mbuttonup(HWND hwnd)
     return 0;
 }
 
+/* Doppio click sinistro: apre l'editor del run cliccato.  Il primo click
+ * del doppio non accoda nulla (il sinistro singolo chiude solo il
+ * tooltip): se c'e' un hit-test in volo (es. da un click destro appena
+ * fatto) si marca l'attesa, altrimenti si accoda un nuovo job con la
+ * richiesta di apertura. */
 static void viewer_on_lbuttondblclk(HWND hwnd, LPARAM lp)
 {
+    int cx = (short)LOWORD(lp);
+    int cy = (short)HIWORD(lp);
+    int doc_x = 0, doc_y = 0;
+
     (void)hwnd;
-    viewer_hide_tooltip("dblclk");
-    /* Doppio clic: unico punto di ingresso dell'editor di paragrafo.
-     * Solo quando il documento e' fermo e il layout e' completo (la
-     * cache dei paragrafi e' valida solo dopo un render completato). */
-    if (!g_doc || g_load_active || g_render_busy || !g_layout_complete ||
-        g_doc_state != DOC_STATE_IDLE)
+    viewer_hide_tooltip("ldblclk");
+
+    if (!g_doc || g_load_active || g_render_busy || !g_layout_complete)
+        return;
+
+    client_to_doc(cx, cy, &doc_x, &doc_y);
+
+    if (g_doc_state == DOC_STATE_HITTEST)
     {
+        /* Esito in volo (job di un click precedente): verra' aperto il
+         * run. */
+        g_run_view_pending = 1;
         return;
     }
+    if (g_doc_state != DOC_STATE_IDLE || !g_worker_started || g_edit_hwnd)
+        return;
+
     {
-        int dx, dy;
-        client_to_doc((short)LOWORD(lp), (short)HIWORD(lp), &dx, &dy);
-        begin_paragraph_edit_at(dx, dy);
+        Job *j = alloc_job(JOB_RUN_HIT_TEST);
+        if (!j)
+            return;
+        j->doc = g_doc;
+        j->gen = g_load_gen;
+        j->epoch = g_layout_epoch;
+        j->doc_x = doc_x;
+        j->doc_y = doc_y;
+        g_run_view_pending = 1;
+        g_doc_state = DOC_STATE_HITTEST;
+        enqueue_job(j);
     }
 }
 

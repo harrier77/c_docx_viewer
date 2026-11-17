@@ -263,6 +263,42 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
             break;
         }
 
+        case JOB_RUN_APPLY_EDIT:
+        {
+            /* Sostituzione del testo del singolo run (ld_run_set_text).
+             * Esito via WM_APP_EDIT_APPLIED: stessa struct EditResult e
+             * stesso reset dell'apply del paragrafo. */
+            EditResult *r = (EditResult *)calloc(1, sizeof(EditResult));
+            int ok = 0;
+            if (!g_shutdown && j->doc && j->run_index >= 0 && j->text)
+            {
+                fprintf(stderr, "[XML][WORKER-RUN-APPLY] para=%d run=%d bytes=%d\n",
+                        j->para_index, j->run_index, (int)strlen(j->text));
+                ok = ld_run_set_text(j->doc, j->para_index, j->run_index, j->text);
+                fprintf(stderr, "[XML][WORKER-RUN-APPLY] ok=%d err='%s'\n",
+                        ok, ok ? "" : ld_last_error());
+            }
+            if (r)
+            {
+                r->doc = j->doc;
+                r->gen = j->gen;
+                r->token = j->token;
+                r->ok = ok;
+                if (!ok)
+                {
+                    const char *err = ld_last_error();
+                    lstrcpynA(r->error, err ? err : "", sizeof(r->error));
+                }
+                if (!g_shutdown)
+                    PostMessageA(j->hwnd, WM_APP_EDIT_APPLIED, 0, (LPARAM)r);
+                else
+                    free(r);
+            }
+            free(j->text);
+            j->text = NULL;
+            break;
+        }
+
         case JOB_DESTROY:
             if (j->doc)
                 ld_destroy(j->doc);

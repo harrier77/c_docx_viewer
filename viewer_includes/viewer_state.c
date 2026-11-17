@@ -85,6 +85,11 @@ static char      g_cur[32] = "arrow";
 /* Pan con tasto centrale: ancora del drag (px schermo). */
 static int       g_pan_active;
 static int       g_pan_x, g_pan_y;
+/* Toolbar */
+static HWND      g_toolbar;
+#define TOOLBAR_HEIGHT 36
+#define IDM_TB_OPEN  4001
+#define IDM_TB_SAVE  4002
 /* Tooltip nativo (click destro): finestra TOOLTIPS "tracking" e stato
  * attivo. Il testo mostra le coordinate client del mouse. */
 static HWND      g_tip_wnd;
@@ -182,6 +187,7 @@ typedef enum JobKind
     JOB_HIT_TEST,
     JOB_RUN_HIT_TEST,
     JOB_APPLY_EDIT,
+    JOB_RUN_APPLY_EDIT,
     JOB_GET_PARA_XML,
     JOB_DESTROY,
     JOB_QUIT
@@ -205,6 +211,7 @@ typedef struct Job
     unsigned    epoch;
     unsigned    token;
     int         para_index;
+    int         run_index;    /* slot del run per JOB_RUN_APPLY_EDIT */
     int         doc_x;
     int         doc_y;
     char       *text;        /* plain text for ld_paragraph_set_text */
@@ -270,10 +277,18 @@ static HACCEL    g_edit_accel;
 /* Modalita' di sola lettura (visualizzatore del run): niente Applica,
  * controllo EDIT in ES_READONLY. */
 static int       g_edit_readonly;
-/* Doppio click destro in attesa dell'esito del run hit-test: quando il
- * risultato arriva si apre il visualizzatore del run invece di aggiornare
- * solo il tooltip. */
+/* Modalita' "modifica run" (doppio click destro): g_edit_run_slot >= 0
+ * contiene lo slot del run cliccato (esito di ld_run_hit_test).  Il commit
+ * va al testo del run (ld_run_set_text), non al paragrafo/OOXML. */
+static int       g_edit_run_slot = -1;
+/* Doppio click sinistro in attesa dell'esito del run hit-test: quando il
+ * risultato arriva si apre l'editor del run invece di aggiornare solo il
+ * tooltip. */
 static int       g_run_view_pending;
+/* Doppio click destro in attesa dell'esito del run hit-test (il primo
+ * click del doppio ha gia' accodato il job del tooltip): quando il
+ * risultato arriva si apre l'editor del paragrafo. */
+static int       g_para_edit_pending;
 static int       g_editor_class_registered;
 static int       g_justification_dirty;  /* larghezza giustificazione da riallineare */
 
@@ -292,3 +307,4 @@ static void apply_pending_justification(void);
  * column will render inside the second column. */
 
 static void request_paragraph_apply(const char *text);
+static void request_run_apply(const char *text);

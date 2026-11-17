@@ -17,6 +17,7 @@ static int can_switch_document(void)
 static void viewer_on_command(HWND hwnd, WPARAM wp)
 {
     switch (LOWORD(wp)) {
+    case IDM_TB_OPEN:
     case 100: {
         OPENFILENAMEA ofn;
         char szFile[MAX_PATH] = "";
@@ -56,6 +57,7 @@ static void viewer_on_command(HWND hwnd, WPARAM wp)
     case 103:
         MessageBoxA(hwnd, "d2dview - Visualizzatore DOCX con renderer Direct2D (litedocx.dll).", "Informazioni", MB_OK);
         return;
+    case IDM_TB_SAVE:
     case 104:
         if (!can_switch_document())
         {

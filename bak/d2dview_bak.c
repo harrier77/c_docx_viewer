@@ -120,6 +120,10 @@ static char      g_cur[32] = "arrow";
 static int       g_pan_active;
 static int       g_pan_x, g_pan_y;
 static FILE     *g_log_file = NULL;
+static HWND      g_toolbar = NULL;
+#define TOOLBAR_HEIGHT 36
+#define IDM_TB_OPEN  4001
+#define IDM_TB_SAVE  4002
 #if ENABLE_FILE_LOGGING
 static char      g_log_path[MAX_PATH];
 #endif
@@ -2371,6 +2375,32 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE:
         // log_msg("[CREATE] WM_CREATE\n");
         g_hwnd = hwnd;
+        /* Crea toolbar */
+        INITCOMMONCONTROLSEX icc_tb = { sizeof(icc_tb), ICC_BAR_CLASSES };
+        InitCommonControlsEx(&icc_tb);
+        g_toolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, NULL,
+            WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS | CCS_TOP,
+            0, 0, 0, TOOLBAR_HEIGHT,
+            hwnd, (HMENU)1000, GetModuleHandle(NULL), NULL);
+        if (g_toolbar) {
+            /* Aggiunge i bottoni standard (STD_FILEOPEN, STD_FILESAVE) */
+            TBADDBITMAP tbab = { HINST_COMMCTRL, IDB_STD_SMALL_COLOR };
+            SendMessage(g_toolbar, TB_ADDBITMAP, 0, (LPARAM)&tbab);
+            TBBUTTON tbb[2] = {0};
+            tbb[0].iBitmap = STD_FILEOPEN;
+            tbb[0].idCommand = IDM_TB_OPEN;
+            tbb[0].fsState = TBSTATE_ENABLED;
+            tbb[0].fsStyle = BTNS_BUTTON;
+            tbb[0].iString = (INT_PTR)L"Apri";
+            tbb[1].iBitmap = STD_FILESAVE;
+            tbb[1].idCommand = IDM_TB_SAVE;
+            tbb[1].fsState = TBSTATE_ENABLED;
+            tbb[1].fsStyle = BTNS_BUTTON;
+            tbb[1].iString = (INT_PTR)L"Salva";
+            SendMessage(g_toolbar, TB_ADDBUTTONS, 2, (LPARAM)tbb);
+            SendMessage(g_toolbar, TB_AUTOSIZE, 0, 0);
+            SendMessage(g_toolbar, TB_SETBUTTONSIZE, 0, MAKELONG(24, 24));
+        }
         /* Crea IDWriteFactory per DirectWrite (text rendering migliorato).
            DWriteCreateFactory non richiede CoInitialize quando si usa il
            tipo SHARED; creiamo qui l'factory sul thread UI prima del renderer. */

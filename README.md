@@ -114,6 +114,20 @@ Enabled by default in Phase D:
 - Float/positioned CSS: standard `litehtml` support, Phase B early-exit doesn't handle them
 - Pagination: based on `<div data-page-break>` injected by builder; not Word-perfect
 
+## Win32 Notes: Toolbar Initialization & Bitmaps
+
+When creating a native Win32 toolbar (`TOOLBARCLASSNAMEW`), standard system bitmaps (such as `IDB_STD_SMALL_COLOR` with `HINST_COMMCTRL`) may appear as a blank white strip without button icons if not initialized correctly. To fix this:
+1. Send `TB_BUTTONSTRUCTSIZE` with `sizeof(TBBUTTON)` immediately after creation.
+2. Set `TB_SETBITMAPSIZE` before adding buttons/bitmaps.
+3. Pass `0` as `wParam` to `TB_ADDBITMAP` when loading `IDB_STD_SMALL_COLOR` (specifying `1` or other non-zero counts can cause standard button indices like `STD_FILEOPEN` to be out of bounds).
+
+```c
+SendMessage(g_toolbar, TB_BUTTONSTRUCTSIZE, (WPARAM)sizeof(TBBUTTON), 0);
+SendMessage(g_toolbar, TB_SETBITMAPSIZE, 0, (LPARAM)MAKELONG(24, 24));
+TBADDBITMAP tbab = { HINST_COMMCTRL, IDB_STD_SMALL_COLOR };
+SendMessage(g_toolbar, TB_ADDBITMAP, 0, (LPARAM)&tbab);
+```
+
 ## License
 
 Source code: MIT (see `LICENSE`).

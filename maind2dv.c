@@ -97,7 +97,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return viewer_on_rbuttonup(hwnd, lp);
 
     case WM_RBUTTONDBLCLK:
-        /* Doppio click destro: visualizzatore in sola lettura del run. */
+        /* Doppio click destro: editor del paragrafo (testo/OOXML). */
         viewer_on_rbuttondblclk(hwnd, lp);
         return 0;
 
@@ -107,6 +107,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_LBUTTONDBLCLK:
+        /* Doppio click sinistro: editor del run cliccato. */
         viewer_on_lbuttondblclk(hwnd, lp);
         return 0;
 
@@ -173,7 +174,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     {
         INITCOMMONCONTROLSEX icc;
         icc.dwSize = sizeof(icc);
-        icc.dwICC = ICC_TAB_CLASSES;
+        icc.dwICC = ICC_TAB_CLASSES | ICC_BAR_CLASSES;
         InitCommonControlsEx(&icc);
     }
 
