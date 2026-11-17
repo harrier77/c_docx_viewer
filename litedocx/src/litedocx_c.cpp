@@ -2107,6 +2107,316 @@ int ld_paragraph_hit_test(void* doc, int x, int y, ld_paragraph_hit* out_hit, ch
     }
 }
 
+/* ---- Run hit-test di sola lettura (diagnostica) ---- */
+
+/* Numero di caratteri UTF-8 di s dopo la normalizzazione di
+ * normalize_plain_text: NBSP (C2 A0) -> ' ', '\r' scartato.  Gli offset
+ * restituiti da ld_run_hit_test sono in questo spazio di testo, cosi'
+ * coincidono con ld_paragraph_get_text. */
+static size_t ld_norm_text_len(const std::string& s)
+{
+    size_t n = 0;
+    for(size_t i = 0; i < s.size();)
+    {
+        if(s[i] == '\r')
+        {
+            ++i;
+            continue;
+        }
+        if((unsigned char)s[i] == 0xC2 && i + 1 < s.size() &&
+           (unsigned char)s[i + 1] == 0xA0)
+        {
+            n += 1;
+            i += 2;
+        }
+        else
+        {
+            n += 1;
+            i += 1;
+        }
+    }
+    return n;
+}
+
+/* Testo normalizzato dell'intero sottoalbero di el (usato per i range dei
+ * run: ogni figlio diretto del paragrafo e' uno "slot" di run). */
+static int ld_subtree_norm_len(const litehtml::element::ptr& el)
+{
+    if(!el)
+    {
+        return 0;
+    }
+    if(el->is_break())
+    {
+        return 1; /* <br> contribuisce '\n' al testo plain */
+    }
+    if(el->is_text())
+    {
+        std::string t;
+        el->get_text(t);
+        return (int)ld_norm_text_len(t);
+    }
+    int n = 0;
+    for(const auto& c : el->children())
+    {
+        n += ld_subtree_norm_len(c);
+    }
+    return n;
+}
+
+/* Stato della scansione ricorsiva delle parti di testo (el_text/el_space:
+ * litehtml splitta il testo a livello di parola, ogni parte ha il proprio
+ * box dopo il layout). */
+struct ld_run_scan
+{
+    int         px;
+    int         py;
+    int         para_index     = -1;
+    int         run_index      = -1; /* slot corrente (figlio diretto) */
+    int         run_char_start = 0;  /* offset normalizzato di inizio slot */
+    bool        exact          = false;
+    bool        fb_valid       = false; /* candidata di fallback */
+    int         fb_dist        = 1 << 30;
+    int         fb_slot        = -1;
+    int         fb_offset      = 0;
+    int         fb_len         = 0;
+    int         fb_intra       = 0;
+    litehtml::position fb_pos;
+    ld_run_hit* out            = nullptr;
+};
+
+static void ld_record_hit(ld_run_scan& s, int word_offset,
+                          const litehtml::position& pos, int intra)
+{
+    s.out->para_index      = s.para_index;
+    s.out->run_index       = s.run_index;
+    s.out->char_offset     = word_offset + intra;
+    s.out->run_char_start  = s.run_char_start;
+    s.out->run_char_offset = s.out->char_offset - s.out->run_char_start;
+    s.out->x               = (int)pos.x;
+    s.out->y               = (int)pos.y;
+    s.out->w               = (int)pos.width;
+    s.out->h               = (int)pos.height;
+}
+
+/* Visita in ordine DOM: aggiorna *offset (spazio testo normalizzato) e
+ * registra il primo box che contiene il punto (exact). Se il punto cade in
+ * un gap tra parole, tiene il candidato piu' vicino sulla stessa banda
+ * verticale (fallback). Solo lettura: nessuna modifica a DOM o layout. */
+static void ld_scan_text_parts(const litehtml::element::ptr& el, int* offset,
+                               ld_run_scan& s)
+{
+    if(s.exact || !el)
+    {
+        return;
+    }
+    for(const auto& child : el->children())
+    {
+        if(s.exact)
+        {
+            return;
+        }
+        if(child->is_break())
+        {
+            *offset += 1;
+            continue;
+        }
+        if(child->is_text())
+        {
+            std::string t;
+            child->get_text(t);
+            const int len = (int)ld_norm_text_len(t);
+            const litehtml::position pos = child->get_placement();
+            /* pixel_t di questa installazione litehtml e' float
+             * (pixel_float_t): si confronta in int per evitare gli
+             * overload ambigui int/pixel_t. */
+            const int bx = (int)pos.x;
+            const int by = (int)pos.y;
+            const int bw = (int)pos.width;
+            const int bh = (int)pos.height;
+            if(bw > 0 && bh > 0)
+            {
+                const bool in_box = (s.px >= bx && s.px < bx + bw &&
+                                     s.py >= by && s.py < by + bh);
+                if(in_box)
+                {
+                    int intra = 0;
+                    if(len > 0)
+                    {
+                        intra = (int)(((double)(s.px - bx) * (double)len /
+                                       (double)bw) + 0.5);
+                        if(intra < 0)
+                            intra = 0;
+                        if(intra > len)
+                            intra = len;
+                    }
+                    ld_record_hit(s, *offset, pos, intra);
+                    s.exact = true;
+                    return;
+                }
+                /* stessa banda verticale, fuori dal box: gap tra parole */
+                if(s.py >= by && s.py < by + bh)
+                {
+                    int dx;
+                    if(s.px < bx)
+                        dx = bx - s.px;
+                    else if(s.px >= bx + bw)
+                        dx = s.px - (bx + bw);
+                    else
+                        dx = 0;
+                    if(dx < s.fb_dist)
+                    {
+                        s.fb_valid      = true;
+                        s.fb_dist       = dx;
+                        s.fb_slot       = s.run_index;
+                        s.fb_offset     = *offset;
+                        s.fb_len        = len;
+                        s.fb_intra      = (s.px < bx) ? 0 : len;
+                        s.fb_pos        = pos;
+                    }
+                }
+            }
+            *offset += len;
+        }
+        else
+        {
+            ld_scan_text_parts(child, offset, s);
+        }
+    }
+}
+
+int ld_run_hit_test(void* doc, int x, int y, ld_run_hit* out)
+{
+    if(out)
+    {
+        memset(out, 0, sizeof(*out));
+        out->para_index      = -1;
+        out->run_index       = -1;
+        out->char_offset     = -1;
+        out->run_char_start  = -1;
+        out->run_char_end    = -1;
+        out->run_char_offset = -1;
+    }
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container || !h->container->paragraphs_valid)
+    {
+        return 0;
+    }
+    try
+    {
+        /* Stesso criterio di ld_paragraph_hit_test: il paragrafo piu'
+         * piccolo contenente il punto. */
+        const ld_container::ParagraphInfo* best = nullptr;
+        long                               best_area = 0;
+        for(const auto& kv : h->container->paragraphs)
+        {
+            const ld_container::ParagraphInfo& p = kv.second;
+            if(!p.has_geometry || !p.element)
+            {
+                continue;
+            }
+            if(x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h)
+            {
+                const long area = static_cast<long>(p.w) * static_cast<long>(p.h);
+                if(!best || area < best_area)
+                {
+                    best      = &p;
+                    best_area = area;
+                }
+            }
+        }
+        if(!best)
+        {
+            return 0;
+        }
+        if(out)
+        {
+            out->para_index = best->index;
+        }
+
+        /* Passata 1: range normalizzato [inizio,fine) del testo di ogni
+         * figlio diretto (slot di run, in ordine DOM, <br> escluso). */
+        std::vector<std::pair<int, int>> ranges;
+        ranges.reserve(16);
+        {
+            int offset = 0;
+            for(const auto& child : best->element->children())
+            {
+                if(child->is_break())
+                {
+                    offset += 1;
+                    continue;
+                }
+                const int len = ld_subtree_norm_len(child);
+                ranges.emplace_back(offset, offset + len);
+                offset += len;
+            }
+        }
+
+        /* Passata 2: ricerca della parte di testo colpita. */
+        ld_run_scan scan;
+        scan.px        = x;
+        scan.py        = y;
+        scan.para_index = best->index;
+        scan.out       = out;
+        int    offset  = 0;
+        size_t slot    = 0;
+        for(const auto& child : best->element->children())
+        {
+            if(child->is_break())
+            {
+                offset += 1;
+                continue;
+            }
+            if(slot < ranges.size())
+            {
+                scan.run_index      = (int)slot;
+                scan.run_char_start = ranges[slot].first;
+            }
+            else
+            {
+                scan.run_index      = -1;
+                scan.run_char_start = -1;
+            }
+            ld_scan_text_parts(child, &offset, scan);
+            if(scan.exact)
+            {
+                break;
+            }
+            ++slot;
+        }
+
+        if(!scan.exact && scan.fb_valid)
+        {
+            /* Click in un gap: usa il candidato piu' vicino. */
+            out->run_index       = scan.fb_slot;
+            out->char_offset     = scan.fb_offset + scan.fb_intra;
+            out->run_char_start  = (scan.fb_slot >= 0 &&
+                                    (size_t)scan.fb_slot < ranges.size())
+                                       ? ranges[(size_t)scan.fb_slot].first : -1;
+            out->run_char_offset = (out->run_char_start >= 0)
+                                       ? out->char_offset - out->run_char_start : -1;
+            out->x = (int)scan.fb_pos.x;
+            out->y = (int)scan.fb_pos.y;
+            out->w = (int)scan.fb_pos.width;
+            out->h = (int)scan.fb_pos.height;
+        }
+
+        if(out && out->run_index >= 0 && (size_t)out->run_index < ranges.size() &&
+           (scan.exact || scan.fb_valid))
+        {
+            out->run_char_end = ranges[(size_t)out->run_index].second;
+        }
+
+        set_error("");
+        return (scan.exact || scan.fb_valid) ? 1 : 0;
+    } catch(...)
+    {
+        set_error("errore durante l'hit-test del run");
+        return 0;
+    }
+}
+
 char* ld_paragraph_get_text(void* doc, int index)
 {
     auto* h = static_cast<ld_doc*>(doc);

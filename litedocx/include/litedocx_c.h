@@ -204,6 +204,28 @@ typedef struct ld_paragraph_hit
 int ld_paragraph_hit_test(void* doc, int x, int y,
                           ld_paragraph_hit* out_hit, char** out_text);
 
+/* Diagnostic, read-only run hit-test.  Given a point in document coordinates
+ * (the same space as ld_paragraph_hit_test), it reports which direct child
+ * ("run slot") of the hit paragraph contains the point and where the click
+ * falls in the paragraph's plain text (the normalized text returned by
+ * ld_paragraph_get_text: NBSP -> space, byte offsets in UTF-8).
+ * litehtml splits text into word-level elements, so x/y/w/h is the box of
+ * the hit text part (a word); a click in a gap between words falls back to
+ * the nearest word on the same line.  Nothing is modified: no text, no
+ * layout, no caches are touched.  Returns 1 when a text part is resolved. */
+typedef struct ld_run_hit
+{
+    int para_index;      /* hit paragraph index, -1 when nothing is hit */
+    int run_index;       /* direct-child slot in DOM order, -1 when none */
+    int char_offset;     /* click offset in the paragraph plain text, -1 */
+    int run_char_start;  /* run start offset in the paragraph text, -1 */
+    int run_char_end;    /* run end offset (exclusive) in that text, -1 */
+    int run_char_offset; /* click offset inside the run text, -1 */
+    int x, y, w, h;      /* hit text-part box in document coordinates */
+} ld_run_hit;
+
+int ld_run_hit_test(void* doc, int x, int y, ld_run_hit* out);
+
 /* Return a newly allocated UTF-8 copy of a paragraph's plain text.
  * The caller must free it with ld_free_string().  Returns NULL if the index
  * is invalid or the paragraph cache is not valid yet (before the first

@@ -95,14 +95,23 @@ static LRESULT CALLBACK paragraph_editor_proc(HWND hwnd, UINT msg, WPARAM wp, LP
                 ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL,
             0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_EDIT_XML,
             GetModuleHandle(NULL), NULL);
-        CreateWindowExW(0, L"BUTTON", L"Applica",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_APPLY,
-            GetModuleHandle(NULL), NULL);
         CreateWindowExW(0, L"BUTTON", L"Annulla",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_CANCEL,
             GetModuleHandle(NULL), NULL);
+        /* Modalita' di sola lettura (visualizzatore del run): niente
+         * Applica e controllo EDIT non modificabile. */
+        if (g_edit_readonly)
+        {
+            SendMessageW(g_edit_ctl_xml, EM_SETREADONLY, TRUE, 0);
+        }
+        else
+        {
+            CreateWindowExW(0, L"BUTTON", L"Applica",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                0, 0, 10, 10, hwnd, (HMENU)(UINT_PTR)IDC_PARA_APPLY,
+                GetModuleHandle(NULL), NULL);
+        }
         CreateWindowExW(0, L"STATIC",
             L"Modifica OOXML del paragrafo (in memoria, salva per applicare su file).",
             WS_CHILD | WS_VISIBLE,
@@ -491,6 +500,141 @@ static void show_paragraph_editor_xml(int index, const char *xml_utf8)
 
     g_edit_index = -1;
     g_edit_is_xml = 0;
+    free(g_edit_result_utf8);
+    g_edit_result_utf8 = NULL;
+}
+
+/* Visualizzatore in sola lettura del run cliccato (doppio click destro).
+ * Mostra solo la slice di testo del run: l'apply su un run isolato non e'
+ * ancora supportato dalla DLL (riscriverebbe l'intero paragrafo
+ * appiattendo gli altri run), quindi niente Applica. */
+static void show_run_viewer(int para_index, const ld_run_hit *hit,
+                            const char *run_text)
+{
+    static ACCEL accels[1];
+    WCHAR       *wtext;
+    RECT         rc_main;
+    int          w = 660, h = 300, x, y;
+    HWND         hwnd;
+    MSG          msg;
+    int          quit = 0;
+
+    if (!run_text || para_index < 0 || g_edit_hwnd)
+        return;
+
+    ensure_editor_class();
+
+    g_edit_readonly = 1;
+    g_edit_index = para_index;
+    g_edit_apply = 0;
+    free(g_edit_result_utf8);
+    g_edit_result_utf8 = NULL;
+
+    GetWindowRect(g_hwnd, &rc_main);
+    x = rc_main.left + ((rc_main.right - rc_main.left) - w) / 2;
+    y = rc_main.top + ((rc_main.bottom - rc_main.top) - h) / 2;
+
+    g_doc_state = DOC_STATE_EDITOR;
+    hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, LD_PARA_EDIT_CLASS,
+                           L"Run cliccato (sola lettura)",
+                           WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+                           x, y, w, h, g_hwnd, NULL,
+                           GetModuleHandle(NULL), NULL);
+    if (!hwnd)
+    {
+        g_edit_readonly = 0;
+        g_edit_index = -1;
+        g_doc_state = DOC_STATE_IDLE;
+        return;
+    }
+
+    wtext = u8_to_w(run_text);
+    if (wtext)
+    {
+        SetWindowTextW(g_edit_ctl_xml, wtext);
+        free(wtext);
+    }
+
+    /* Hint con i valori diagnostici del run. */
+    {
+        HWND hint = GetDlgItem(hwnd, IDC_PARA_HINT);
+        WCHAR hint_w[200];
+        wsprintfW(hint_w,
+                  L"Run %d del paragrafo %d | offset paragrafo %d, range [%d..%d) | box %d, %d %dx%d | sola lettura",
+                  hit ? hit->run_index : -1,
+                  para_index,
+                  hit ? hit->char_offset : -1,
+                  hit ? hit->run_char_start : -1,
+                  hit ? hit->run_char_end : -1,
+                  hit ? hit->x : 0, hit ? hit->y : 0,
+                  hit ? hit->w : 0, hit ? hit->h : 0);
+        if (hint)
+            SetWindowTextW(hint, hint_w);
+    }
+
+    /* Solo ESC (Annulla): niente Ctrl+Invio che puntava ad Applica. */
+    accels[0].fVirt = FVIRTKEY;
+    accels[0].key = VK_ESCAPE;
+    accels[0].cmd = IDC_PARA_CANCEL;
+    g_edit_accel = CreateAcceleratorTableW(accels, 1);
+
+    EnableWindow(g_hwnd, FALSE);
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    SetForegroundWindow(hwnd);
+    SetFocus(g_edit_ctl_xml);
+
+    for (;;)
+    {
+        int r = GetMessageW(&msg, NULL, 0, 0);
+        if (r == 0)
+        {
+            quit = 1;
+            break;
+        }
+        if (r == -1)
+            break;
+        if (!g_edit_accel || !TranslateAcceleratorW(hwnd, g_edit_accel, &msg))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (!g_edit_hwnd)
+            break;
+    }
+
+    if (g_edit_hwnd)
+    {
+        g_edit_apply = 0;
+        DestroyWindow(g_edit_hwnd);
+        g_edit_hwnd = NULL;
+    }
+    if (g_edit_accel)
+    {
+        DestroyAcceleratorTable(g_edit_accel);
+        g_edit_accel = NULL;
+    }
+
+    g_edit_readonly = 0;
+    EnableWindow(g_hwnd, TRUE);
+    SetForegroundWindow(g_hwnd);
+
+    if (quit)
+    {
+        g_edit_index = -1;
+        free(g_edit_result_utf8);
+        g_edit_result_utf8 = NULL;
+        g_doc_state = DOC_STATE_IDLE;
+        PostQuitMessage(0);
+        return;
+    }
+
+    /* Sola lettura: alla chiusura si torna a documento a riposo. */
+    g_edit_is_xml = 0;
+    g_doc_state = DOC_STATE_IDLE;
+    InvalidateRect(g_hwnd, NULL, FALSE);
+    resume_pending_render();
+
+    g_edit_index = -1;
     free(g_edit_result_utf8);
     g_edit_result_utf8 = NULL;
 }

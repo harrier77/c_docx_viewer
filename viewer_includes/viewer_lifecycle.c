@@ -35,6 +35,39 @@ static LRESULT viewer_on_create(HWND hwnd)
                     "Errore", MB_OK | MB_ICONERROR);
         return -1;
     }
+    /* Tooltip nativo per il click destro: finestra TOOLTIPS "tracking"
+     * attivata solo on-demand da viewer_on_rbuttonup (nessun tool
+     * associato a un'area: solo TTF_TRACK | TTF_ABSOLUTE). */
+    {
+        HINSTANCE hi = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
+        TOOLINFOW ti;
+        g_tip_wnd = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL,
+                                    WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                                    CW_USEDEFAULT, CW_USEDEFAULT,
+                                    CW_USEDEFAULT, CW_USEDEFAULT,
+                                    hwnd, NULL, hi, NULL);
+        log_msg("[TOOLTIP] create: g_tip_wnd=%p (err=%lu)\n",
+                (void *)g_tip_wnd, GetLastError());
+        if (g_tip_wnd) {
+            LRESULT addres;
+            /* TopMost e no-activate: il tooltip non ruba il focus. */
+            SetWindowPos(g_tip_wnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            /* Consente il testo su piu' righe (le due righe del
+             * tooltip: coordinate client e coordinate documento). */
+            SendMessageW(g_tip_wnd, TTM_SETMAXTIPWIDTH, 0, 300);
+            ZeroMemory(&ti, sizeof(ti));
+            ti.cbSize = TTTOOLINFOW_V1_SIZE;
+            ti.hwnd = hwnd;            /* finestra "proprietaria" del tool */
+            ti.uId = 1;                /* id fittizio, tool senza hit-test */
+            /* TTF_TRANSPARENT: i messaggi mouse attraversano il tooltip. */
+            ti.uFlags = TTF_TRACK | TTF_ABSOLUTE | TTF_TRANSPARENT;
+            addres = SendMessageW(g_tip_wnd, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+            log_msg("[TOOLTIP] TTM_ADDTOOLW -> %ld\n", (long)addres);
+        } else {
+            fprintf(stderr, "[TOOLTIP] creazione TOOLTIPS fallita\n");
+        }
+    }
     return 0;
 }
 
@@ -45,6 +78,12 @@ static void viewer_on_destroy(void)
     g_doc_state = DOC_STATE_IDLE;
     g_pending_apply_token = 0;
     g_edit_apply = 0;
+    if (g_tip_wnd)
+    {
+        DestroyWindow(g_tip_wnd);
+        g_tip_wnd = NULL;
+        g_tip_shown = 0;
+    }
     if (g_edit_hwnd)
     {
         DestroyWindow(g_edit_hwnd);

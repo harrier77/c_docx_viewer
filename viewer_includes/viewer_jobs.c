@@ -173,6 +173,27 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                break;
            }
 
+       case JOB_RUN_HIT_TEST:
+           {
+               /* Diagnostica read-only: ld_run_hit_test non tocca testo,
+                * DOM ne' cache di layout. Esito via WM_APP_RUN_HIT_RESULT. */
+               if (!g_shutdown && j->doc)
+               {
+                   RunHitResult *r = (RunHitResult *)calloc(1, sizeof(RunHitResult));
+                   if (r)
+                   {
+                       r->doc   = j->doc;
+                       r->gen   = j->gen;
+                       r->epoch = j->epoch;
+                       r->doc_x = j->doc_x;
+                       r->doc_y = j->doc_y;
+                       r->hit   = ld_run_hit_test(j->doc, j->doc_x, j->doc_y, &r->info);
+                       PostMessageA(j->hwnd, WM_APP_RUN_HIT_RESULT, 0, (LPARAM)r);
+                   }
+               }
+               break;
+           }
+
            case JOB_GET_PARA_XML:
            {
                if (!g_shutdown && j->doc && j->para_index >= 0)

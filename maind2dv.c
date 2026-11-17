@@ -92,6 +92,20 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_MBUTTONUP:
         return viewer_on_mbuttonup(hwnd);
 
+    case WM_RBUTTONUP:
+        /* Click destro: tooltip nativo con le coordinate client del mouse. */
+        return viewer_on_rbuttonup(hwnd, lp);
+
+    case WM_RBUTTONDBLCLK:
+        /* Doppio click destro: visualizzatore in sola lettura del run. */
+        viewer_on_rbuttondblclk(hwnd, lp);
+        return 0;
+
+    case WM_LBUTTONDOWN:
+        /* Qualsiasi click sinistro chiude il tooltip eventualmente aperto. */
+        viewer_hide_tooltip("lbtn");
+        return 0;
+
     case WM_LBUTTONDBLCLK:
         viewer_on_lbuttondblclk(hwnd, lp);
         return 0;
@@ -127,6 +141,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_APP_PARA_XML_READY:
         handle_para_xml_ready((ParaXmlResult *)lp);
+        return 0;
+
+    case WM_APP_RUN_HIT_RESULT:
+        handle_run_hit_result((RunHitResult *)lp);
         return 0;
 
     case WM_COMMAND:

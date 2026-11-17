@@ -85,6 +85,17 @@ static char      g_cur[32] = "arrow";
 /* Pan con tasto centrale: ancora del drag (px schermo). */
 static int       g_pan_active;
 static int       g_pan_x, g_pan_y;
+/* Tooltip nativo (click destro): finestra TOOLTIPS "tracking" e stato
+ * attivo. Il testo mostra le coordinate client del mouse. */
+static HWND      g_tip_wnd;
+static int       g_tip_shown;
+/* Ancora del tooltip: coordinate client al momento del click destro.
+ * Il tooltip resta visibile finche' il mouse non si allontana (soglia),
+ * perche' il tooltip stesso genera WM_MOUSEMOVE sulla finestra sotto. */
+static int       g_tip_anchor_x, g_tip_anchor_y;
+/* Posizione SCHERMO corrente del tooltip (per l'aggiornamento del testo
+ * quando arriva l'esito asincrono del run hit-test). */
+static int       g_tip_screen_x, g_tip_screen_y;
 static FILE     *g_log_file = NULL;
 #if ENABLE_FILE_LOGGING
 static char      g_log_path[MAX_PATH];
@@ -107,6 +118,7 @@ static void log_xml_block(const char *tag, int index, const char *xml);
 #define WM_APP_HIT_RESULT   (WM_APP + 4)
 #define WM_APP_EDIT_APPLIED (WM_APP + 5)
 #define WM_APP_PARA_XML_READY (WM_APP + 6)
+#define WM_APP_RUN_HIT_RESULT (WM_APP + 7)
 
 /* UI-side document state.  Transitions are made only on the UI thread and
  * serialize mutually exclusive operations on the document tree. */
@@ -151,12 +163,24 @@ typedef struct ParaXmlResult
     char      error[256];
 } ParaXmlResult;
 
+/* Esito di JOB_RUN_HIT_TEST: valori di diagnostica read-only della DLL. */
+typedef struct RunHitResult
+{
+    void      *doc;
+    unsigned   gen;
+    unsigned   epoch;
+    int        hit;        /* 1 se una parte di testo e' stata risolta */
+    int        doc_x, doc_y; /* punto richiesto (coordinate documento) */
+    ld_run_hit info;       /* valori grezzi della DLL */
+} RunHitResult;
+
 typedef enum JobKind
 {
     JOB_LOAD = 1,
     JOB_RENDER,
     JOB_RENDER_RANGE,
     JOB_HIT_TEST,
+    JOB_RUN_HIT_TEST,
     JOB_APPLY_EDIT,
     JOB_GET_PARA_XML,
     JOB_DESTROY,
@@ -243,6 +267,13 @@ static int       g_edit_index = -1;    /* indice paragrafo in editing */
 static int       g_edit_apply;         /* l'utente ha scelto Applica */
 static char     *g_edit_result_utf8;   /* testo confermato (UTF-8, malloc) */
 static HACCEL    g_edit_accel;
+/* Modalita' di sola lettura (visualizzatore del run): niente Applica,
+ * controllo EDIT in ES_READONLY. */
+static int       g_edit_readonly;
+/* Doppio click destro in attesa dell'esito del run hit-test: quando il
+ * risultato arriva si apre il visualizzatore del run invece di aggiornare
+ * solo il tooltip. */
+static int       g_run_view_pending;
 static int       g_editor_class_registered;
 static int       g_justification_dirty;  /* larghezza giustificazione da riallineare */
 
