@@ -307,7 +307,8 @@ static void d2d_draw_text(Renderer *r, const char *utf8, void *font, COLORREF co
     IDWriteTextFormat_AddRef(format);
 
     /* Create text layout for measuring and drawing */
-    hr = IDWriteFactory_CreateTextLayout(d->dw_factory, ws, lstrlenW(ws),
+    UINT32 text_len = lstrlenW(ws);
+    hr = IDWriteFactory_CreateTextLayout(d->dw_factory, ws, text_len,
         format, (FLOAT)w, (FLOAT)h, &layout);
     free(ws);
     
@@ -318,6 +319,18 @@ static void d2d_draw_text(Renderer *r, const char *utf8, void *font, COLORREF co
 
     /* Configure layout - no word wrapping for single line */
     IDWriteTextLayout_SetWordWrapping(layout, DWRITE_WORD_WRAPPING_NO_WRAP);
+
+    /* Apply underline if requested */
+    if (handle->underline) {
+        DWRITE_TEXT_RANGE range = { 0, text_len };
+        IDWriteTextLayout_SetUnderline(layout, TRUE, range);
+    }
+
+    /* Apply strikethrough if requested */
+    if (handle->strike) {
+        DWRITE_TEXT_RANGE range = { 0, text_len };
+        IDWriteTextLayout_SetStrikethrough(layout, TRUE, range);
+    }
 
     /* Set up color brush */
     col.r = GetRValue(color) / 255.0f;
