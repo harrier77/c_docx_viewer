@@ -226,6 +226,32 @@ typedef struct ld_run_hit
 
 int ld_run_hit_test(void* doc, int x, int y, ld_run_hit* out);
 
+/* Precision caret hit-test (read-only, first step of the inline caret work).
+ * Same read-only contract as ld_run_hit_test (nothing is modified: no text,
+ * no DOM, no caches), but the intra-word offset is NOT estimated
+ * proportionally: the widths of the prefixes of the hit text part are
+ * measured with the same font metrics used by the renderer/layout
+ * (the container's text_width), so the reported character offset and the
+ * caret position are exact at character level.  Clicks in a gap between
+ * words snap the caret to the nearest edge on the same line.
+ * caret_x/caret_y is the left edge / top of the caret bar in document
+ * coordinates, caret_h its height (the hit text part box height) and
+ * caret_w the suggested bar thickness (1 px). */
+typedef struct ld_caret_hit
+{
+    int para_index;      /* hit paragraph index, -1 when nothing is hit */
+    int run_index;       /* direct-child slot in DOM order, -1 when none */
+    int char_offset;     /* caret offset in the paragraph plain text, -1 */
+    int run_char_start;  /* run start offset in the paragraph text, -1 */
+    int run_char_end;    /* run end offset (exclusive) in that text, -1 */
+    int run_char_offset; /* caret offset inside the run text, -1 */
+    int caret_x, caret_y; /* caret bar position in document coordinates */
+    int caret_w;         /* suggested bar thickness (1 px) */
+    int caret_h;         /* bar height (hit text-part box height) */
+} ld_caret_hit;
+
+int ld_run_caret_hit(void* doc, int x, int y, ld_caret_hit* out);
+
 /* Replace the plain text of a single run ("slot") of a paragraph, keeping the
  * formatting of every other run.  run_index is the same direct-child slot
  * index reported by ld_run_hit_test (DOM order, <br> excluded).  When the

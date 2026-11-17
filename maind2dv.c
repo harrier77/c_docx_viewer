@@ -102,8 +102,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_LBUTTONDOWN:
-        /* Qualsiasi click sinistro chiude il tooltip eventualmente aperto. */
-        viewer_hide_tooltip("lbtn");
+        /* Click sinistro: chiude il tooltip e prova a piazzare il caret
+         * (Fase 2, sola visualizzazione). */
+        viewer_on_lbuttondown(hwnd, lp);
         return 0;
 
     case WM_LBUTTONDBLCLK:
@@ -146,6 +147,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_APP_RUN_HIT_RESULT:
         handle_run_hit_result((RunHitResult *)lp);
+        return 0;
+
+    case WM_APP_CARET_RESULT:
+        handle_caret_result((CaretHitResult *)lp);
         return 0;
 
     case WM_COMMAND:

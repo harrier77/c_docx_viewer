@@ -25,6 +25,7 @@ EXPORTS
     ld_free_table_cells
     ld_paragraph_hit_test
     ld_run_hit_test
+    ld_run_caret_hit
     ld_run_set_text
     ld_paragraph_get_text
     ld_paragraph_set_text

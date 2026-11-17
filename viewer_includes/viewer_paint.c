@@ -62,6 +62,24 @@ static void viewer_paint(HWND hwnd)
                        g_doc_state == DOC_STATE_APPLYING;
         document_draw(g_doc, g_renderer, g_doc_h, dom_busy,
                       g_zoom > 0.0f ? 1.0f / g_zoom : 1.0f);
+
+        /* Caret inline (Fase 2, prova di posizionamento): barretta in
+         * coordinate DOCUMENTO.  La trasformata di scala del renderer e'
+         * ancora attiva e ld_draw usa rc_content come origine logica
+         * (screen = (rc_content + doc) * g_zoom, inversa di client_to_doc),
+         * quindi basta sommare il contenuto: la barretta resta ancorata al
+         * punto del documento anche con scroll/pan/zoom. */
+        if (!dom_busy && g_caret_valid && g_doc && g_caret_h > 0)
+        {
+            RECT rc_content;
+            layout_content_rect(g_doc_h, &rc_content);
+            g_renderer->vtbl->FillRect(g_renderer,
+                                       rc_content.left + g_caret_x,
+                                       rc_content.top + g_caret_y,
+                                       g_caret_w > 0 ? g_caret_w : 1,
+                                       g_caret_h,
+                                       RGB(0, 0, 0));
+        }
     }
 
     g_renderer->vtbl->Present(g_renderer, hdc, LAY->cw, LAY->ch);

@@ -57,6 +57,7 @@ static void on_edit_applied(EditResult *r)
         g_render_pending_last_page = -1;
         g_doc_state = DOC_STATE_IDLE;
         g_layout_epoch++;
+        viewer_caret_clear();
         apply_pending_justification();
         request_render(layout_content_width());
         InvalidateRect(g_hwnd, NULL, TRUE);

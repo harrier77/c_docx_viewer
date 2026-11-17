@@ -194,6 +194,28 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                break;
            }
 
+        case JOB_CARET_HIT:
+            {
+                /* Caret hit-test read-only (ld_run_caret_hit): misura
+                 * l'offset intra-parola con le metriche del renderer
+                 * (text_width sui prefissi). Esito via WM_APP_CARET_RESULT. */
+                if (!g_shutdown && j->doc)
+                {
+                    CaretHitResult *r = (CaretHitResult *)calloc(1, sizeof(CaretHitResult));
+                    if (r)
+                    {
+                        r->doc   = j->doc;
+                        r->gen   = j->gen;
+                        r->epoch = j->epoch;
+                        r->doc_x = j->doc_x;
+                        r->doc_y = j->doc_y;
+                        r->hit   = ld_run_caret_hit(j->doc, j->doc_x, j->doc_y, &r->info);
+                        PostMessageA(j->hwnd, WM_APP_CARET_RESULT, 0, (LPARAM)r);
+                    }
+                }
+                break;
+            }
+
            case JOB_GET_PARA_XML:
            {
                if (!g_shutdown && j->doc && j->para_index >= 0)

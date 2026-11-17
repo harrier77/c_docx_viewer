@@ -183,6 +183,7 @@ static void apply_loaded_doc(unsigned id, void *doc)
      * precedente e va scartato. */
     g_layout_epoch++;
     g_pending_apply_token = 0;
+    viewer_caret_clear();
 
     if (doc)
     {

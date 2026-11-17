@@ -2417,6 +2417,356 @@ int ld_run_hit_test(void* doc, int x, int y, ld_run_hit* out)
     }
 }
 
+/* ---- Caret: hit-test con offset esatto a livello carattere ----
+ *
+ * Prima fase della Fase 2 (caret inline): sola lettura, nessuna modifica a
+ * testo, DOM o cache di layout.  Come ld_run_hit_test individua il paragrafo,
+ * lo slot di run e la parte di testo (parola) colpita, ma l'offset
+ * intra-parola NON e' stimato proporzionalmente: viene misurato con le
+ * stesse metriche font del layout/renderer (container->text_width, la
+ * funzione stessa chiamata da litehtml in el_text::compute_styles) sui
+ * prefissi del testo della parte colpita.  Restituisce anche la posizione
+ * px della barretta del caret in coordinate documento.
+ */
+
+/* Prefisso di t che contiene n caratteri nello stesso spazio di
+ * ld_paragraph_get_text (NBSP resta in byte cosi' come litehtml lo misura:
+ * e' parte del testo originale della parte). */
+static std::string ld_norm_prefix_bytes(const std::string& t, int n)
+{
+    std::string out;
+    size_t      i = 0;
+    int         k = 0;
+    while(i < t.size() && k < n)
+    {
+        if(t[i] == '\r')
+        {
+            ++i;
+            continue;
+        }
+        out.push_back(t[i]);
+        if((unsigned char)t[i] == 0xC2 && i + 1 < t.size() &&
+           (unsigned char)t[i + 1] == 0xA0)
+        {
+            out.push_back(t[i + 1]);
+            i += 2;
+        }
+        else
+        {
+            i += 1;
+        }
+        ++k;
+    }
+    return out;
+}
+
+/* Stato della scansione per ld_run_caret_hit (stessa struttura di
+ * ld_run_scan: DOM order, offset normalizzato, slot di run, fallback). */
+struct ld_caret_scan
+{
+    int         px;
+    int         py;
+    int         para_index     = -1;
+    int         run_index      = -1; /* slot corrente (figlio diretto) */
+    int         run_char_start = 0;  /* offset normalizzato di inizio slot */
+    bool        exact          = false;
+    bool        fb_valid       = false; /* candidata di fallback (gap) */
+    int         fb_dist        = 1 << 30;
+    int         fb_slot        = -1;
+    int         fb_offset      = 0;
+    int         fb_intra       = 0;
+    litehtml::position fb_pos;
+    ld_doc*     host           = nullptr;
+    ld_caret_hit* out          = nullptr;
+};
+
+static void ld_record_caret_hit(ld_caret_scan& s, int word_offset,
+                                const litehtml::position& pos, int intra,
+                                int caret_x)
+{
+    s.out->para_index      = s.para_index;
+    s.out->run_index       = s.run_index;
+    s.out->char_offset     = word_offset + intra;
+    s.out->run_char_start  = s.run_char_start;
+    s.out->run_char_offset = s.out->char_offset - s.out->run_char_start;
+    s.out->caret_x         = caret_x;
+    s.out->caret_y         = (int)pos.y;
+    s.out->caret_w         = 1;
+    s.out->caret_h         = (int)pos.height;
+}
+
+/* Visita in ordine DOM: come ld_scan_text_parts ma con il caret esatto.
+ * Per la parte colpita misura la larghezza di ogni prefisso del suo testo
+ * con container->text_width (le stesse metriche del layout) e sceglie il
+ * confine tra caratteri piu' vicino al punto cliccato. */
+static void ld_caret_scan_parts(const litehtml::element::ptr& el, int* offset,
+                                ld_caret_scan& s)
+{
+    if(s.exact || !el)
+    {
+        return;
+    }
+    for(const auto& child : el->children())
+    {
+        if(s.exact)
+        {
+            return;
+        }
+        if(child->is_break())
+        {
+            *offset += 1;
+            continue;
+        }
+        if(child->is_text())
+        {
+            std::string t;
+            child->get_text(t);
+            const int len = (int)ld_norm_text_len(t);
+            const litehtml::position pos = child->get_placement();
+            const int bx = (int)pos.x;
+            const int by = (int)pos.y;
+            const int bw = (int)pos.width;
+            const int bh = (int)pos.height;
+            if(bw > 0 && bh > 0)
+            {
+                /* Font con cui litehtml misura/disegna questa parte:
+                 * quello del padre (el_text::compute_styles). */
+                litehtml::uint_ptr font = 0;
+                {
+                    litehtml::element::ptr p = child->parent();
+                    if(p)
+                    {
+                        font = p->css().get_font();
+                    }
+                }
+                if(s.px >= bx && s.px < bx + bw &&
+                   s.py >= by && s.py < by + bh)
+                {
+                    int intra   = 0;
+                    int caret_x = s.px;
+                    if(len > 0 && font && s.host && s.host->container)
+                    {
+                        /* Offset esatto: per ogni confine tra caratteri i
+                         * la larghezza del prefisso i; si sceglie il
+                         * confine piu' vicino al punto cliccato. */
+                        const float tx    = (float)(s.px - bx);
+                        int         best_i = 0;
+                        float       best_w = 0.0f;
+                        float       best_d = 1e30f;
+                        for(int i = 0; i <= len; ++i)
+                        {
+                            float w = 0.0f;
+                            if(i > 0)
+                            {
+                                const std::string pre = ld_norm_prefix_bytes(t, i);
+                                w = static_cast<float>(
+                                    s.host->container->text_width(pre.c_str(), font));
+                            }
+                            float d = tx - w;
+                            if(d < 0)
+                            {
+                                d = -d;
+                            }
+                            if(d < best_d)
+                            {
+                                best_d = d;
+                                best_i = i;
+                                best_w = w;
+                            }
+                        }
+                        intra   = best_i;
+                        caret_x = bx + (int)(best_w + 0.5f);
+                    }
+                    else if(len > 0)
+                    {
+                        /* Niente font: ripiega sulla stima proporzionale
+                         * di ld_run_hit_test (caret al punto cliccato). */
+                        intra = (int)(((double)(s.px - bx) * (double)len /
+                                       (double)bw) + 0.5);
+                        if(intra < 0)
+                            intra = 0;
+                        if(intra > len)
+                            intra = len;
+                        caret_x = s.px;
+                    }
+                    else
+                    {
+                        /* Parte vuota: caret sul bordo sinistro. */
+                        caret_x = bx;
+                    }
+                    ld_record_caret_hit(s, *offset, pos, intra, caret_x);
+                    s.exact = true;
+                    return;
+                }
+                /* stessa banda verticale, fuori dal box: gap tra parole */
+                if(s.py >= by && s.py < by + bh)
+                {
+                    int dx;
+                    if(s.px < bx)
+                        dx = bx - s.px;
+                    else if(s.px >= bx + bw)
+                        dx = s.px - (bx + bw);
+                    else
+                        dx = 0;
+                    if(dx < s.fb_dist)
+                    {
+                        s.fb_valid = true;
+                        s.fb_dist  = dx;
+                        s.fb_slot  = s.run_index;
+                        s.fb_offset = *offset;
+                        s.fb_intra = (s.px < bx) ? 0 : len;
+                        s.fb_pos   = pos;
+                    }
+                }
+            }
+            *offset += len;
+        }
+        else
+        {
+            ld_caret_scan_parts(child, offset, s);
+        }
+    }
+}
+
+int ld_run_caret_hit(void* doc, int x, int y, ld_caret_hit* out)
+{
+    if(out)
+    {
+        memset(out, 0, sizeof(*out));
+        out->para_index      = -1;
+        out->run_index       = -1;
+        out->char_offset     = -1;
+        out->run_char_start  = -1;
+        out->run_char_end    = -1;
+        out->run_char_offset = -1;
+        out->caret_x         = -1;
+        out->caret_y         = -1;
+        out->caret_w         = 0;
+        out->caret_h         = 0;
+    }
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container || !h->container->paragraphs_valid)
+    {
+        return 0;
+    }
+    try
+    {
+        /* Stesso criterio di ld_run_hit_test: il paragrafo piu' piccolo
+         * contenente il punto. */
+        const ld_container::ParagraphInfo* best      = nullptr;
+        long                               best_area = 0;
+        for(const auto& kv : h->container->paragraphs)
+        {
+            const ld_container::ParagraphInfo& p = kv.second;
+            if(!p.has_geometry || !p.element)
+            {
+                continue;
+            }
+            if(x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h)
+            {
+                const long area = static_cast<long>(p.w) * static_cast<long>(p.h);
+                if(!best || area < best_area)
+                {
+                    best      = &p;
+                    best_area = area;
+                }
+            }
+        }
+        if(!best)
+        {
+            return 0;
+        }
+        if(out)
+        {
+            out->para_index = best->index;
+        }
+
+        /* Passata 1: range normalizzato [inizio,fine) di ogni figlio
+         * diretto (slot di run, ordine DOM, <br> escluso). */
+        std::vector<std::pair<int, int>> ranges;
+        ranges.reserve(16);
+        {
+            int offset = 0;
+            for(const auto& child : best->element->children())
+            {
+                if(child->is_break())
+                {
+                    offset += 1;
+                    continue;
+                }
+                const int len = ld_subtree_norm_len(child);
+                ranges.emplace_back(offset, offset + len);
+                offset += len;
+            }
+        }
+
+        /* Passata 2: ricerca della parte di testo colpita + caret. */
+        ld_caret_scan scan;
+        scan.px    = x;
+        scan.py    = y;
+        scan.para_index = best->index;
+        scan.host  = h;
+        scan.out   = out;
+        int    offset = 0;
+        size_t slot   = 0;
+        for(const auto& child : best->element->children())
+        {
+            if(child->is_break())
+            {
+                offset += 1;
+                continue;
+            }
+            if(slot < ranges.size())
+            {
+                scan.run_index      = (int)slot;
+                scan.run_char_start = ranges[slot].first;
+            }
+            else
+            {
+                scan.run_index      = -1;
+                scan.run_char_start = -1;
+            }
+            ld_caret_scan_parts(child, &offset, scan);
+            if(scan.exact)
+            {
+                break;
+            }
+            ++slot;
+        }
+
+        if(!scan.exact && scan.fb_valid)
+        {
+            /* Click in un gap: caret al bordo della parte piu' vicina
+             * sulla stessa banda verticale. */
+            out->run_index       = scan.fb_slot;
+            out->char_offset     = scan.fb_offset + scan.fb_intra;
+            out->run_char_start  = (scan.fb_slot >= 0 &&
+                                    (size_t)scan.fb_slot < ranges.size())
+                                       ? ranges[(size_t)scan.fb_slot].first : -1;
+            out->run_char_offset = (out->run_char_start >= 0)
+                                       ? out->char_offset - out->run_char_start : -1;
+            out->caret_x = (int)scan.fb_pos.x +
+                           (scan.fb_intra ? (int)scan.fb_pos.width : 0);
+            out->caret_y = (int)scan.fb_pos.y;
+            out->caret_w = 1;
+            out->caret_h = (int)scan.fb_pos.height;
+        }
+
+        if(out && out->run_index >= 0 && (size_t)out->run_index < ranges.size() &&
+           (scan.exact || scan.fb_valid))
+        {
+            out->run_char_end = ranges[(size_t)out->run_index].second;
+        }
+
+        set_error("");
+        return (scan.exact || scan.fb_valid) ? 1 : 0;
+    } catch(...)
+    {
+        set_error("errore durante il caret hit-test");
+        return 0;
+    }
+}
+
 char* ld_paragraph_get_text(void* doc, int index)
 {
     auto* h = static_cast<ld_doc*>(doc);

@@ -19,6 +19,7 @@ static void viewer_on_size(HWND hwnd, WPARAM wp, LPARAM lp)
     /* Ogni ridimensionamento invalida gli hit-test in volo. */
     if (g_doc)
         g_layout_epoch++;
+    viewer_caret_clear();
     /* NON chiamare BeginDraw qui: in WM_SIZE non si disegna nulla.
      * Il back buffer viene (ri)allocato da BeginDraw in WM_PAINT, che e'
      * l'unico punto in cui viene bilanciato da Present/EndPaint.
@@ -168,6 +169,41 @@ static LRESULT viewer_on_rbuttonup(HWND hwnd, LPARAM lp)
     return 0;
 }
 
+/* Click sinistro singolo: prova caret inline (Fase 2, niente editing).
+ * Piazzare la barretta segue lo stesso flusso read-only del tooltip:
+ * job asincrono a layout fermo, esito via WM_APP_CARET_RESULT.
+ * Nota: il primo click di un doppio click sinistro accoda il job del
+ * caret; se poi arriva WM_LBUTTONDBLCLK con l'esito ancora in volo,
+ * handle_caret_result apre l'editor del run (come prima dell'introduzione
+ * del caret, ma senza un job dedicato). */
+static void viewer_on_lbuttondown(HWND hwnd, LPARAM lp)
+{
+    int cx = (short)LOWORD(lp);
+    int cy = (short)HIWORD(lp);
+    int doc_x = 0, doc_y = 0;
+
+    (void)hwnd;
+
+    if (!g_doc || g_load_active || g_render_busy || !g_layout_complete ||
+        g_doc_state != DOC_STATE_IDLE || !g_worker_started)
+        return;
+
+    client_to_doc(cx, cy, &doc_x, &doc_y);
+
+    {
+        Job *j = alloc_job(JOB_CARET_HIT);
+        if (!j)
+            return;
+        j->doc = g_doc;
+        j->gen = g_load_gen;
+        j->epoch = g_layout_epoch;
+        j->doc_x = doc_x;
+        j->doc_y = doc_y;
+        g_doc_state = DOC_STATE_HITTEST;
+        enqueue_job(j);
+    }
+}
+
 /* Doppio click destro: apre l'editor del paragrafo (testo/OOXML).  Il
  * primo click del doppio ha gia' accodato JOB_RUN_HIT_TEST (per il
  * tooltip): se l'esito non e' ancora arrivato si marca l'attesa e
@@ -197,6 +233,45 @@ static void viewer_on_rbuttondblclk(HWND hwnd, LPARAM lp)
         return;
 
     begin_paragraph_edit_at(doc_x, doc_y);
+}
+
+/* Apre l'editor del run (sola lettura) a partire dai valori di un
+ * hit-test risolto: taglia la slice [run_char_start..run_char_end) dal
+ * testo plain del paragrafo.  Common a JOB_RUN_HIT_TEST e JOB_CARET_HIT
+ * (il doppio click sinistro puo' arrivare mentre e' in volo l'uno o
+ * l'altro). */
+static void open_run_editor_from_hit(const ld_run_hit *hit)
+{
+    char *para;
+    int plen, s, e;
+
+    if (!g_doc || !hit || hit->para_index < 0 ||
+        hit->run_char_start < 0 || hit->run_char_end < hit->run_char_start ||
+        g_edit_hwnd)
+        return;
+
+    para = ld_paragraph_get_text(g_doc, hit->para_index);
+    if (!para)
+        return;
+    plen = (int)strlen(para);
+    s = hit->run_char_start;
+    e = hit->run_char_end;
+    if (s > plen) s = plen;
+    if (e > plen) e = plen;
+    if (e > s)
+    {
+        int n = e - s;
+        char *run_text = (char *)malloc((size_t)n + 1);
+        if (run_text)
+        {
+            memcpy(run_text, para + s, (size_t)n);
+            run_text[n] = '\0';
+            g_doc_state = DOC_STATE_EDITOR;
+            show_run_viewer(hit->para_index, hit, run_text);
+            free(run_text);
+        }
+    }
+    free(para);
 }
 
 /* Esito asincrono del run hit-test: aggiorna il testo del tooltip con
@@ -239,34 +314,8 @@ static void handle_run_hit_result(RunHitResult *r)
     if (g_run_view_pending)
     {
         g_run_view_pending = 0;
-        if (r->hit && r->info.para_index >= 0 &&
-            r->info.run_char_start >= 0 && r->info.run_char_end >= r->info.run_char_start &&
-            !g_edit_hwnd)
-        {
-            char *para = ld_paragraph_get_text(g_doc, r->info.para_index);
-            if (para)
-            {
-                int plen = (int)strlen(para);
-                int s = r->info.run_char_start;
-                int e = r->info.run_char_end;
-                if (s > plen) s = plen;
-                if (e > plen) e = plen;
-                if (e > s)
-                {
-                    int n = e - s;
-                    char *run_text = (char *)malloc((size_t)n + 1);
-                    if (run_text)
-                    {
-                        memcpy(run_text, para + s, (size_t)n);
-                        run_text[n] = '\0';
-                        g_doc_state = DOC_STATE_EDITOR;
-                        show_run_viewer(r->info.para_index, &r->info, run_text);
-                        free(run_text);
-                    }
-                }
-                free(para);
-            }
-        }
+        if (r->hit)
+            open_run_editor_from_hit(&r->info);
         free(r);
         return;
     }
@@ -312,6 +361,86 @@ static void handle_run_hit_result(RunHitResult *r)
                   g_tip_anchor_x, g_tip_anchor_y, r->doc_x, r->doc_y);
     }
     viewer_show_tooltip_at(g_tip_anchor_x, g_tip_anchor_y, text);
+    free(r);
+}
+
+/* Esito asincrono del caret hit-test (prima fase della Fase 2, sola
+ * visualizzazione): aggiorna lo stato della barretta in coordinate
+ * documento e ridisegna.  Nessuna editing: il caret e' solo segnaposto
+ * visivo per validare il posizionamento. */
+static void handle_caret_result(CaretHitResult *r)
+{
+    if (!r)
+    {
+        if (g_doc_state == DOC_STATE_HITTEST)
+            g_doc_state = DOC_STATE_IDLE;
+        resume_pending_render();
+        return;
+    }
+
+    /* Risultato scaduto (documento/layout/scroll cambiati nel frattempo). */
+    if (r->doc != g_doc || r->gen != g_load_gen || r->epoch != g_layout_epoch)
+    {
+        if (g_doc_state == DOC_STATE_HITTEST)
+            g_doc_state = DOC_STATE_IDLE;
+        resume_pending_render();
+        free(r);
+        return;
+    }
+    if (g_doc_state == DOC_STATE_HITTEST)
+        g_doc_state = DOC_STATE_IDLE;
+    resume_pending_render();
+
+    log_msg("[CARET] hit=%d para=%d run=%d off=%d inRun=%d [%d..%d) caret=%d,%d %dx%d (doc %d,%d)\n",
+            r->hit, r->info.para_index, r->info.run_index, r->info.char_offset,
+            r->info.run_char_offset, r->info.run_char_start, r->info.run_char_end,
+            r->info.caret_x, r->info.caret_y, r->info.caret_w, r->info.caret_h,
+            r->doc_x, r->doc_y);
+
+    /* Doppio click sinistro: il primo click del doppio ha accodato il job
+     * del caret (al posto del JOB_RUN_HIT_TEST di prima); arrivato l'esito
+     * si apre l'editor del run cliccato. */
+    if (g_run_view_pending)
+    {
+        ld_run_hit hit;
+        g_run_view_pending = 0;
+        if (r->hit)
+        {
+            ZeroMemory(&hit, sizeof(hit));
+            hit.para_index      = r->info.para_index;
+            hit.run_index       = r->info.run_index;
+            hit.char_offset     = r->info.char_offset;
+            hit.run_char_start  = r->info.run_char_start;
+            hit.run_char_end    = r->info.run_char_end;
+            hit.run_char_offset = r->info.run_char_offset;
+            hit.x = r->info.caret_x;
+            hit.y = r->info.caret_y;
+            open_run_editor_from_hit(&hit);
+        }
+        free(r);
+        return;
+    }
+
+    /* Caret: la barretta segue il punto di inserimento restituito dalla
+     * DLL (coordinate documento). */
+    if (r->hit && r->info.caret_h > 0)
+    {
+        g_caret_valid  = 1;
+        g_caret_epoch  = r->epoch;
+        g_caret_para   = r->info.para_index;
+        g_caret_run    = r->info.run_index;
+        g_caret_offset = r->info.char_offset;
+        g_caret_x      = r->info.caret_x;
+        g_caret_y      = r->info.caret_y;
+        g_caret_w      = r->info.caret_w > 0 ? r->info.caret_w : 1;
+        g_caret_h      = r->info.caret_h;
+    }
+    else
+    {
+        /* Click fuori dal testo (o paragrafo senza parole): niente caret. */
+        viewer_caret_clear();
+    }
+    InvalidateRect(g_hwnd, NULL, FALSE);
     free(r);
 }
 

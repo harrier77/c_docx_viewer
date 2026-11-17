@@ -126,6 +126,7 @@ static void log_xml_block(const char *tag, int index, const char *xml);
 #define WM_APP_EDIT_APPLIED (WM_APP + 5)
 #define WM_APP_PARA_XML_READY (WM_APP + 6)
 #define WM_APP_RUN_HIT_RESULT (WM_APP + 7)
+#define WM_APP_CARET_RESULT (WM_APP + 8)
 
 /* UI-side document state.  Transitions are made only on the UI thread and
  * serialize mutually exclusive operations on the document tree. */
@@ -181,6 +182,18 @@ typedef struct RunHitResult
     ld_run_hit info;       /* valori grezzi della DLL */
 } RunHitResult;
 
+/* Esito di JOB_CARET_HIT: ld_run_caret_hit (sola lettura) con offset
+ * esatto e posizione px della barretta. */
+typedef struct CaretHitResult
+{
+    void         *doc;
+    unsigned      gen;
+    unsigned      epoch;
+    int           hit;
+    int           doc_x, doc_y;
+    ld_caret_hit  info;
+} CaretHitResult;
+
 typedef enum JobKind
 {
     JOB_LOAD = 1,
@@ -188,6 +201,7 @@ typedef enum JobKind
     JOB_RENDER_RANGE,
     JOB_HIT_TEST,
     JOB_RUN_HIT_TEST,
+    JOB_CARET_HIT,
     JOB_APPLY_EDIT,
     JOB_RUN_APPLY_EDIT,
     JOB_GET_PARA_XML,
@@ -293,6 +307,27 @@ static int       g_run_view_pending;
 static int       g_para_edit_pending;
 static int       g_editor_class_registered;
 static int       g_justification_dirty;  /* larghezza giustificazione da riallineare */
+
+/* ---- Caret inline (Fase 2, prova di posizionamento, nessuna editing) ----
+ * La barretta e' memorizzata in coordinate DOCUMENTO (esito di
+ * ld_run_caret_hit): sopravvive a scroll/pan/zoom perche' il paint la
+ * riporta in client con la stessa trasformazione inversa di client_to_doc.
+ * Viene azzerata su nuovo documento, edit applicato e resize (il layout
+ * cambia: la posizione testuale non e' piu' affidabile). */
+static int       g_caret_valid;
+static unsigned  g_caret_epoch;
+static int       g_caret_para   = -1;
+static int       g_caret_run    = -1;
+static int       g_caret_offset = -1;
+static int       g_caret_x, g_caret_y, g_caret_w, g_caret_h;
+
+static void viewer_caret_clear(void)
+{
+    g_caret_valid  = 0;
+    g_caret_para   = -1;
+    g_caret_run    = -1;
+    g_caret_offset = -1;
+}
 
 static void apply_pending_justification(void);
 
