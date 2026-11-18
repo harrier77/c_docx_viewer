@@ -27,15 +27,15 @@ static void on_edit_applied(EditResult *r)
     if (!r)
         return;
 
-    fprintf(stderr, "[XML][APPLY-DONE] doc=%p gen=%u token=%u pending=%u ok=%d err='%s'\n",
-            r->doc, r->gen, r->token, g_pending_apply_token, r->ok,
-            r->error[0] ? r->error : "");
+    // fprintf(stderr, "[XML][APPLY-DONE] doc=%p gen=%u token=%u pending=%u ok=%d err='%s'\n",
+    //         r->doc, r->gen, r->token, g_pending_apply_token, r->ok,
+    //         r->error[0] ? r->error : "");
 
     /* Solo il risultato del job corrente puo' chiudere la fase APPLYING. */
     if (r->doc != g_doc || r->gen != g_load_gen || r->token != g_pending_apply_token)
     {
-        fprintf(stderr, "[XML][APPLY-DONE] scartato (stale): doc_match=%d gen_match=%d token_match=%d\n",
-                r->doc == g_doc, r->gen == g_load_gen, r->token == g_pending_apply_token);
+        // fprintf(stderr, "[XML][APPLY-DONE] scartato (stale): doc_match=%d gen_match=%d token_match=%d\n",
+        //         r->doc == g_doc, r->gen == g_load_gen, r->token == g_pending_apply_token);
         return;
     }
 
@@ -337,12 +337,12 @@ static void handle_para_xml_ready(ParaXmlResult *r)
 /* Accoda applicazione XML paragrafo. */
 static void request_paragraph_apply_xml(const char *xml)
 {
-    fprintf(stderr, "[XML][APPLY-REQ] idx=%d worker=%d\n", g_edit_index, g_worker_started);
+    // fprintf(stderr, "[XML][APPLY-REQ] idx=%d worker=%d\n", g_edit_index, g_worker_started);
     log_xml_block("APPLY-REQ", g_edit_index, xml);
     if (!g_doc || !xml || g_edit_index < 0)
     {
-        fprintf(stderr, "[XML][APPLY-REQ] parametri non validi: doc=%p xml=%p idx=%d\n",
-                g_doc, (const void *)xml, g_edit_index);
+        // fprintf(stderr, "[XML][APPLY-REQ] parametri non validi: doc=%p xml=%p idx=%d\n",
+        //         g_doc, (const void *)xml, g_edit_index);
         g_doc_state = DOC_STATE_IDLE;
         return;
     }
@@ -359,8 +359,8 @@ static void request_paragraph_apply_xml(const char *xml)
         r.gen = g_load_gen;
         r.token = g_apply_token;
         r.ok = ld_paragraph_set_ooxml(g_doc, g_edit_index, xml);
-        fprintf(stderr, "[XML][APPLY-SYNC-OOXML] ok=%d err='%s'\n",
-                r.ok, r.ok ? "" : ld_last_error());
+        // fprintf(stderr, "[XML][APPLY-SYNC-OOXML] ok=%d err='%s'\n",
+        //         r.ok, r.ok ? "" : ld_last_error());
         if (!r.ok)
         {
             const char *err = ld_last_error();
@@ -392,8 +392,8 @@ static void request_paragraph_apply_xml(const char *xml)
             g_doc_state = DOC_STATE_IDLE;
             return;
         }
-        fprintf(stderr, "[XML][APPLY-ASYNC] enqueued idx=%d bytes=%d token=%u\n",
-                g_edit_index, (int)strlen(xml), g_apply_token);
+        // fprintf(stderr, "[XML][APPLY-ASYNC] enqueued idx=%d bytes=%d token=%u\n",
+        //         g_edit_index, (int)strlen(xml), g_apply_token);
         g_render_busy = 1;
         g_render_doc = g_doc;
         enqueue_job(j);

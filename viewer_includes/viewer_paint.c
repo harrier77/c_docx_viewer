@@ -10,8 +10,7 @@ static void viewer_paint(HWND hwnd)
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
 
-    fprintf(stderr, "[PAINT] zoom=%.2f g_render_busy=%d g_doc=%p scroll=%d\n",
-            g_zoom, g_render_busy, g_doc, LAY->scroll);
+    //fprintf(stderr, "[PAINT] zoom=%.2f g_render_busy=%d g_doc=%p scroll=%d\n",g_zoom, g_render_busy, g_doc, LAY->scroll);
 
     if (!g_renderer ||
         !g_renderer->vtbl->BeginDraw(g_renderer, hwnd, LAY->cw, LAY->ch)) {
@@ -79,7 +78,7 @@ static void viewer_paint(HWND hwnd)
                                        g_caret_w > 0 ? g_caret_w : 1,
                                        g_caret_h,
                                        RGB(0, 0, 0));
-            fprintf(stderr, "[CARET] paint: doc(%d,%d) w=%d h=%d\n", g_caret_x, g_caret_y, g_caret_w, g_caret_h);
+            fprintf(stderr, "[CARET paint line 81] paint %d,%d %dx%d\n", g_caret_x, g_caret_y, g_caret_w, g_caret_h);
         }
     }
 

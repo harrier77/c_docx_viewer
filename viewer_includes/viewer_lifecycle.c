@@ -54,7 +54,7 @@ static LRESULT viewer_on_create(HWND hwnd)
         SendMessage(g_toolbar, TB_AUTOSIZE, 0, 0);
         /* Imposta tooltip per i bottoni */
         SendMessage(g_toolbar, TB_SETMAXTEXTROWS, 0, 0);
-        fprintf(stderr, "[TOOLBAR] bottoni: %ld\n", (long)SendMessage(g_toolbar, TB_BUTTONCOUNT, 0, 0));
+        // fprintf(stderr, "[TOOLBAR] bottoni: %ld\n", (long)SendMessage(g_toolbar, TB_BUTTONCOUNT, 0, 0));
     }
     /* Crea IDWriteFactory per DirectWrite (text rendering migliorato).
        DWriteCreateFactory non richiede CoInitialize quando si usa il
@@ -66,9 +66,9 @@ static LRESULT viewer_on_create(HWND hwnd)
                 DWRITE_FACTORY_TYPE_SHARED,
                 &IID_IDWriteFactory,
                 (IUnknown **)&g_dwrite_factory))) {
-            fprintf(stderr, "[DWRITE] factory created ok\n");
+            // fprintf(stderr, "[DWRITE] factory created ok\n");
         } else {
-            fprintf(stderr, "[DWRITE] factory creation failed, testo via GDI interop\n");
+            // fprintf(stderr, "[DWRITE] factory creation failed, testo via GDI interop\n");
             g_dwrite_factory = NULL;
         }
     }
@@ -76,7 +76,7 @@ static LRESULT viewer_on_create(HWND hwnd)
     g_renderer = renderer_d2d_create(g_dwrite_factory,
             NULL, NULL);  /* resolver opzionale: NULL = usa GDI interop interno */
     if (!g_renderer) {
-        fprintf(stderr, "[RENDERER] Fallito D2D\n");
+        // fprintf(stderr, "[RENDERER] Fallito D2D\n");
         MessageBoxA(hwnd,
                     "Impossibile creare il renderer Direct2D.",
                     "Errore", MB_OK | MB_ICONERROR);
@@ -112,7 +112,7 @@ static LRESULT viewer_on_create(HWND hwnd)
             addres = SendMessageW(g_tip_wnd, TTM_ADDTOOLW, 0, (LPARAM)&ti);
             log_msg("[TOOLTIP] TTM_ADDTOOLW -> %ld\n", (long)addres);
         } else {
-            fprintf(stderr, "[TOOLTIP] creazione TOOLTIPS fallita\n");
+            // fprintf(stderr, "[TOOLTIP] creazione TOOLTIPS fallita\n");
         }
     }
     return 0;

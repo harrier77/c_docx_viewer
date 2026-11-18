@@ -222,6 +222,12 @@ typedef struct ld_run_hit
     int run_char_end;    /* run end offset (exclusive) in that text, -1 */
     int run_char_offset; /* click offset inside the run text, -1 */
     int x, y, w, h;      /* hit text-part box in document coordinates */
+    /* Font metrics of the hit text part (px), 0 when not resolved. */
+    int font_size;
+    int font_height;
+    int font_ascent;
+    int font_descent;
+    int font_ch_width;   /* character advance measure useful for caret */
 } ld_run_hit;
 
 int ld_run_hit_test(void* doc, int x, int y, ld_run_hit* out);

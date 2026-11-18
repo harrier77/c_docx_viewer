@@ -1002,7 +1002,7 @@ namespace
         void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color,
                        const litehtml::position& pos) override
         {
-            LDBG((std::string("[LITEDOCX_DRAW_TEXT] text='") + (text ? text : "NULL") + "' at (" + std::to_string(static_cast<int>(pos.x)) + "," + std::to_string(static_cast<int>(pos.y)) + ")\n").c_str());
+            // LDBG((std::string("[LITEDOCX_DRAW_TEXT] text='") + (text ? text : "NULL") + "' at (" + std::to_string(static_cast<int>(pos.x)) + "," + std::to_string(static_cast<int>(pos.y)) + ")\n").c_str());
             
             // Log start pixel for alignment debugging (justified text indent bug)
             log_start_pixel(static_cast<int>(pos.x), static_cast<int>(pos.y), static_cast<int>(pos.width), static_cast<int>(pos.height), text);
@@ -1049,7 +1049,7 @@ namespace
             }
             else
             {
-                LDBG("[LITEDOCX_DRAW_TEXT] cb.lh.draw_text is NULL!\n");
+                // LDBG("[LITEDOCX_DRAW_TEXT] cb.lh.draw_text is NULL!\n");
             }
         }
 
@@ -1246,7 +1246,7 @@ namespace
             const int y = static_cast<int>(layer.border_box.y);
             const int w = static_cast<int>(layer.border_box.width);
             const int h = static_cast<int>(layer.border_box.height);
-            LDBG((std::string("[LITEDOCX_DRAW_FILL] at (") + std::to_string(x) + "," + std::to_string(y) + ") " + std::to_string(w) + "x" + std::to_string(h) + "\n").c_str());
+            // LDBG((std::string("[LITEDOCX_DRAW_FILL] at (") + std::to_string(x) + "," + std::to_string(y) + ") " + std::to_string(w) + "x" + std::to_string(h) + "\n").c_str());
             
             /* Check if this is a table cell and call custom callback */
             if(cb.draw_table_cell_bg)
@@ -1747,7 +1747,7 @@ void ld_draw(void* doc, void* hdc, int x, int y, int clip_x, int clip_y, int cli
     fprintf(stderr, "[LD_DRAW] doc=%p x=%d y=%d clip=(%d,%d,%d,%d) doc_w=%d doc_h=%d\n",
             doc, x, y, clip_x, clip_y, clip_w, clip_h, doc_w, doc_h);
 #endif
-    LDBG((std::string("[LITEDOCX_DRAW] at (") + std::to_string(x) + "," + std::to_string(y) + ") clip=(" + std::to_string(clip_x) + "," + std::to_string(clip_y) + "," + std::to_string(clip_w) + "," + std::to_string(clip_h) + ")\n").c_str());
+    // LDBG((std::string("[LITEDOCX_DRAW] at (") + std::to_string(x) + "," + std::to_string(y) + ") clip=(" + std::to_string(clip_x) + "," + std::to_string(clip_y) + "," + std::to_string(clip_w) + "," + std::to_string(clip_h) + ")\n").c_str());
     if(!h || !h->doc)
     {
         return;
@@ -1756,7 +1756,7 @@ void ld_draw(void* doc, void* hdc, int x, int y, int clip_x, int clip_y, int cli
     try
     {
         h->doc->draw(reinterpret_cast<litehtml::uint_ptr>(hdc), x, y, &clip);
-        LDBG("[LITEDOCX_DRAW] draw returned\n");
+        // LDBG("[LITEDOCX_DRAW] draw returned\n");
     } catch(...)
     {
         set_error("errore durante il disegno");
@@ -2193,11 +2193,18 @@ struct ld_run_scan
     int         fb_len         = 0;
     int         fb_intra       = 0;
     litehtml::position fb_pos;
-    ld_run_hit* out            = nullptr;
+    int         fb_fm_size     = 0;
+    int         fb_fm_height   = 0;
+    int         fb_fm_ascent   = 0;
+    int         fb_fm_descent  = 0;
+    int         fb_fm_ch_width = 0;
+    ld_run_hit* out             = nullptr;
 };
 
 static void ld_record_hit(ld_run_scan& s, int word_offset,
-                          const litehtml::position& pos, int intra)
+                          const litehtml::position& pos, int intra,
+                          int fm_size, int fm_height, int fm_ascent, int fm_descent,
+                          int fm_ch_width)
 {
     s.out->para_index      = s.para_index;
     s.out->run_index       = s.run_index;
@@ -2208,6 +2215,11 @@ static void ld_record_hit(ld_run_scan& s, int word_offset,
     s.out->y               = (int)pos.y;
     s.out->w               = (int)pos.width;
     s.out->h               = (int)pos.height;
+    s.out->font_size       = fm_size;
+    s.out->font_height     = fm_height;
+    s.out->font_ascent     = fm_ascent;
+    s.out->font_descent    = fm_descent;
+    s.out->font_ch_width   = fm_ch_width;
 }
 
 /* Visita in ordine DOM: aggiorna *offset (spazio testo normalizzato) e
@@ -2247,6 +2259,21 @@ static void ld_scan_text_parts(const litehtml::element::ptr& el, int* offset,
             const int bh = (int)pos.height;
             if(bw > 0 && bh > 0)
             {
+                /* Metriche del font della parte di testo (padre = run/span). */
+                int fm_size = 0, fm_height = 0, fm_ascent = 0, fm_descent = 0, fm_ch_width = 0;
+                {
+                    litehtml::element::ptr p = child->parent();
+                    if(p)
+                    {
+                        const auto& fm = p->css().get_font_metrics();
+                        fm_size     = (int)fm.font_size;
+                        fm_height   = (int)fm.height;
+                        fm_ascent   = (int)fm.ascent;
+                        fm_descent  = (int)fm.descent;
+                        fm_ch_width = (int)fm.ch_width;
+                    }
+                }
+
                 const bool in_box = (s.px >= bx && s.px < bx + bw &&
                                      s.py >= by && s.py < by + bh);
                 if(in_box)
@@ -2261,7 +2288,8 @@ static void ld_scan_text_parts(const litehtml::element::ptr& el, int* offset,
                         if(intra > len)
                             intra = len;
                     }
-                    ld_record_hit(s, *offset, pos, intra);
+                    ld_record_hit(s, *offset, pos, intra,
+                                  fm_size, fm_height, fm_ascent, fm_descent, fm_ch_width);
                     s.exact = true;
                     return;
                 }
@@ -2277,13 +2305,18 @@ static void ld_scan_text_parts(const litehtml::element::ptr& el, int* offset,
                         dx = 0;
                     if(dx < s.fb_dist)
                     {
-                        s.fb_valid      = true;
-                        s.fb_dist       = dx;
-                        s.fb_slot       = s.run_index;
-                        s.fb_offset     = *offset;
-                        s.fb_len        = len;
-                        s.fb_intra      = (s.px < bx) ? 0 : len;
-                        s.fb_pos        = pos;
+                        s.fb_valid       = true;
+                        s.fb_dist        = dx;
+                        s.fb_slot        = s.run_index;
+                        s.fb_offset      = *offset;
+                        s.fb_len         = len;
+                        s.fb_intra       = (s.px < bx) ? 0 : len;
+                        s.fb_pos         = pos;
+                        s.fb_fm_size     = fm_size;
+                        s.fb_fm_height   = fm_height;
+                        s.fb_fm_ascent   = fm_ascent;
+                        s.fb_fm_descent  = fm_descent;
+                        s.fb_fm_ch_width = fm_ch_width;
                     }
                 }
             }
@@ -2411,6 +2444,11 @@ int ld_run_hit_test(void* doc, int x, int y, ld_run_hit* out)
             out->y = (int)scan.fb_pos.y;
             out->w = (int)scan.fb_pos.width;
             out->h = (int)scan.fb_pos.height;
+            out->font_size     = scan.fb_fm_size;
+            out->font_height   = scan.fb_fm_height;
+            out->font_ascent   = scan.fb_fm_ascent;
+            out->font_descent  = scan.fb_fm_descent;
+            out->font_ch_width = scan.fb_fm_ch_width;
         }
 
         if(out && out->run_index >= 0 && (size_t)out->run_index < ranges.size() &&

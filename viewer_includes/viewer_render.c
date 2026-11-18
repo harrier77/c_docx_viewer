@@ -22,7 +22,7 @@ static void request_render(int w)
         return;
     }
 
-    fprintf(stderr, "[RENDER_REQ] w=%d g_render_busy=%d zoom=%.2f\n", w, g_render_busy, g_zoom);
+    //fprintf(stderr, "[RENDER_REQ] w=%d g_render_busy=%d zoom=%.2f\n", w, g_render_busy, g_zoom);
 
     LOG_RENDER("request_render called");
     log_msg("[RENDER] request_render: w=%d g_render_busy=%d\n", w, g_render_busy);
@@ -246,7 +246,7 @@ static void on_render_done(void *doc, int used_w)
     if (g_shutdown)
         return;
 
-    fprintf(stderr, "[RENDER_DONE] used_w=%d g_render_busy=%d zoom=%.2f\n", used_w, g_render_busy, g_zoom);
+    //fprintf(stderr, "[RENDER_DONE] used_w=%d g_render_busy=%d zoom=%.2f\n", used_w, g_render_busy, g_zoom);
 
     LOG_RENDER("on_render_done called");
     log_msg("[RENDER] on_render_done: used_w=%d g_render_busy=%d g_render_pending_width=%d g_render_pending_first=%d g_render_pending_last=%d\n",
@@ -305,7 +305,7 @@ static void on_render_done(void *doc, int used_w)
      * that was applied in inline_handle_result. */
     if (g_inline_active)
     {
-        fprintf(stderr, "[CARET] render-done: reanchor\n");
+        fprintf(stderr, "[CARET render line 308] reanchor\n");
         inline_reanchor_caret();
     }
 

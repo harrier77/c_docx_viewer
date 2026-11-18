@@ -66,8 +66,8 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
     if (size < 6) size = 6;
     px_size = (float)size;
 
-    fprintf(stderr, "[FONT_CREATE] fam='%s' size=%d bold=%d italic=%d underline=%d strike=%d\n",
-            family, size, bold, italic, underline, strike);
+    // fprintf(stderr, "[FONT_CREATE] fam='%s' size=%d bold=%d italic=%d underline=%d strike=%d\n",
+    //         family, size, bold, italic, underline, strike);
 
     /* Check cache first */
     cached = font_cache_find(family, size, bold, italic, underline, strike);
@@ -76,16 +76,16 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
         IDWriteTextFormat_AddRef(format);
         metrics = cached->metrics;
         x_height = cached->x_height;
-        fprintf(stderr, "[FONT_CREATE] cache hit for '%s' %dpx\n", family, size);
+        // fprintf(stderr, "[FONT_CREATE] cache hit for '%s' %dpx\n", family, size);
     } else {
         wfam = u8_to_w(family);
         if (!wfam) {
-            fprintf(stderr, "[FONT_CREATE] utf8_to_wide failed\n");
+            // fprintf(stderr, "[FONT_CREATE] utf8_to_wide failed\n");
             return NULL;
         }
 
         if (!g_dwrite_factory) {
-            fprintf(stderr, "[FONT_CREATE] no DWrite factory\n");
+            // fprintf(stderr, "[FONT_CREATE] no DWrite factory\n");
             free(wfam);
             return NULL;
         }
@@ -97,7 +97,7 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
         wfam = NULL;
 
         if (FAILED(hr) || !format) {
-            fprintf(stderr, "[FONT_CREATE] CreateTextFormat failed hr=0x%08lX\n", (unsigned long)hr);
+            // fprintf(stderr, "[FONT_CREATE] CreateTextFormat failed hr=0x%08lX\n", (unsigned long)hr);
             return NULL;
         }
 
@@ -156,7 +156,8 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
         fm->ascent = (int)(handle->ascent + 0.5f);
         fm->descent = (int)(handle->descent + 0.5f);
         fm->x_height = (int)(x_height + 0.5f);
-        fm->ch_width = (int)(px_size * 0.6f);  /* approximate average char width */
+        //fm->ch_width = (int)(px_size * 0.6f);  /* approximate average char width */
+        fm->ch_width = (int)(px_size * 0.55f);  /* FIX char_w CARET: calibrated to match the real glyph advance */
         fm->draw_spaces = (italic || underline || strike) ? 1 : 0;
         fm->sub_shift   = size / 5;
         fm->super_shift = size / 3;

@@ -46,9 +46,9 @@ static void dbg_log(const char *fmt, ...)
 #if CONSOLE_LOGGING && TABLE_DEBUG
     va_list args;
     va_start(args, fmt);
-    fprintf(stderr, "[DBG] ");
-    vfprintf(stderr, fmt, args);
-    fprintf(stderr, "\n");
+    // fprintf(stderr, "[DBG] ");
+    // vfprintf(stderr, fmt, args);
+    // fprintf(stderr, "\n");
     va_end(args);
 #else
     (void)fmt;
@@ -68,17 +68,21 @@ static void log_xml_block(const char *tag, int index, const char *xml)
 {
     if (!xml)
     {
-        fprintf(stderr, "[XML][%s] idx=%d (null)\n", tag, index);
+        // fprintf(stderr, "[XML][%s] idx=%d (null)\n", tag, index);
         return;
     }
     {
         int len = (int)strlen(xml);
-        fprintf(stderr, "[XML][%s] idx=%d bytes=%d\n------8<------\n", tag, index, len);
+        // fprintf(stderr, "[XML][%s] idx=%d bytes=%d\n------8<------\n", tag, index, len);
         if (len > XML_LOG_LIMIT)
-            fprintf(stderr, "%.*s\n[...troncato, altri %d byte...]\n",
-                    XML_LOG_LIMIT, xml, len - XML_LOG_LIMIT);
+        {
+            // fprintf(stderr, "%.*s\n[...troncato, altri %d byte...]\n",
+            //         XML_LOG_LIMIT, xml, len - XML_LOG_LIMIT);
+        }
         else
-            fprintf(stderr, "%s\n", xml);
-        fprintf(stderr, "------>8------\n");
+        {
+            // fprintf(stderr, "%s\n", xml);
+        }
+        // fprintf(stderr, "------>8------\n");
     }
 }

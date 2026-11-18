@@ -347,14 +347,17 @@ static void handle_run_hit_result(RunHitResult *r)
     if (r->hit)
     {
         wsprintfW(text,
-                  L"%d, %d\ndoc: %d, %d\nrun %d: off %d [%d..%d) inRun %d\nbox %d, %d %dx%d",
+                  L"%d, %d\ndoc: %d, %d\nrun %d: off %d [%d..%d) inRun %d\nbox %d, %d %dx%d\nfont sz %d h %d a %d d %d ch_wid %d",
                   g_tip_anchor_x, g_tip_anchor_y,
                   r->doc_x, r->doc_y,
                   r->info.run_index,
                   r->info.char_offset,
                   r->info.run_char_start, r->info.run_char_end,
                   r->info.run_char_offset,
-                  r->info.x, r->info.y, r->info.w, r->info.h);
+                  r->info.x, r->info.y, r->info.w, r->info.h,
+                  r->info.font_size, r->info.font_height,
+                  r->info.font_ascent, r->info.font_descent,
+                  r->info.font_ch_width);
     }
     else if (r->info.para_index >= 0)
     {
@@ -394,11 +397,13 @@ static void handle_caret_result(CaretHitResult *r)
         free(r);
         return;
     }
+    if (r->hit && r->ch_width > 0) /* FIX char_w CARET: only cache a valid font-derived width. */
+        g_inline_char_w = r->ch_width; /* FIX char_w CARET: refresh the cached caret step from the current run font. */
     if (g_doc_state == DOC_STATE_HITTEST)
         g_doc_state = DOC_STATE_IDLE;
     resume_pending_render();
 
-    log_msg("[CARET] hit=%d para=%d run=%d off=%d inRun=%d [%d..%d) caret=%d,%d %dx%d (doc %d,%d)\n",
+    log_msg("[CARET viewer line 404] hit=%d para=%d run=%d off=%d inRun=%d [%d..%d) caret=%d,%d %dx%d (doc %d,%d)\n",
             r->hit, r->info.para_index, r->info.run_index, r->info.char_offset,
             r->info.run_char_offset, r->info.run_char_start, r->info.run_char_end,
             r->info.caret_x, r->info.caret_y, r->info.caret_w, r->info.caret_h,
@@ -453,8 +458,7 @@ static void handle_caret_result(CaretHitResult *r)
         else
             g_caret_x = r->info.caret_x;
         if (g_caret_x != old_cx)
-            fprintf(stderr, "[CARET] hit: x %d -> %d (dll=%d inline=%d)\n",
-                    old_cx, g_caret_x, r->info.caret_x, g_inline_active);
+            fprintf(stderr, "[CARET viwer line 459] hit x %d->%d\n", old_cx, g_caret_x);
 
         /* Avvia modalita' inline se non stiamo aprendo l'editor del run. */
         if (!g_run_view_pending && !g_inline_active)
@@ -464,7 +468,7 @@ static void handle_caret_result(CaretHitResult *r)
     }
     else
     {
-        fprintf(stderr, "[CARET] hit MISS: caret cleared, x stays=%d\n", g_caret_x);
+        fprintf(stderr, "[CARET viewer line 469] miss\n");
         /* Click fuori dal testo (o paragrafo senza parole): niente caret. */
         viewer_caret_clear();
         inline_end("caret cleared");
@@ -630,8 +634,8 @@ static void viewer_on_vscroll(HWND hwnd, WPARAM wp)
 static void viewer_on_mousewheel(HWND hwnd, WPARAM wp, LPARAM lp)
 {
     viewer_hide_tooltip("wheel");
-    short cx_ = (short)LOWORD(lp);
-    short cy_ = (short)HIWORD(lp);
+    //short cx_ = (short)LOWORD(lp);
+    //short cy_ = (short)HIWORD(lp);
     int delta = GET_WHEEL_DELTA_WPARAM(wp);
 
     if (wp & MK_CONTROL) {
@@ -649,8 +653,7 @@ static void viewer_on_mousewheel(HWND hwnd, WPARAM wp, LPARAM lp)
             new_zoom = (old_zoom - step > G_ZOOM_MIN)
                            ? old_zoom - step : G_ZOOM_MIN;
 
-        fprintf(stderr, "[ZOOM] delta=%d old=%.2f new=%.2f cursor=(%d,%d)\n",
-                delta, old_zoom, new_zoom, cx_, cy_);
+        //fprintf(stderr, "[ZOOM] delta=%d old=%.2f new=%.2f cursor=(%d,%d)\n",delta, old_zoom, new_zoom, cx_, cy_);
         g_zoom = new_zoom;
         /* La scala del renderer e' ancorata all'origine: senza questa
          * compensazione la pagina (centrata) trasla verso destra ad

@@ -428,8 +428,8 @@ static void d2d_set_transform(Renderer *r, float m11, float m12, float m21, floa
     d->current_transform._31 = dx;
     d->current_transform._32 = dy;
     d->current_transform_valid = 1;
-    fprintf(stderr, "[D2D_TRANSFORM] set m11=%f m12=%f m21=%f m22=%f dx=%f dy=%f\n",
-            m11, m12, m21, m22, dx, dy);
+    // fprintf(stderr, "[D2D_TRANSFORM] set m11=%f m12=%f m21=%f m22=%f dx=%f dy=%f\n",
+    //         m11, m12, m21, m22, dx, dy);
 
     /* Apply transform immediately if we're in a draw frame */
     if (d->renderTarget && d->in_draw) {

@@ -70,8 +70,8 @@ static void commit_run_editor(HWND hwnd)
 
 static void commit_paragraph_editor(HWND hwnd)
 {
-    fprintf(stderr, "[XML][COMMIT] XML tab has_original=%d\n",
-            g_edit_xml_original ? 1 : 0);
+    // fprintf(stderr, "[XML][COMMIT] XML tab has_original=%d\n",
+    //         g_edit_xml_original ? 1 : 0);
 
     char *xml = control_text_utf8(g_edit_ctl_xml);
     if (!xml)
@@ -84,7 +84,7 @@ static void commit_paragraph_editor(HWND hwnd)
     log_xml_block("COMMIT-EDITED", g_edit_index, xml);
     if (!strings_equal_ignore_cr(xml, g_edit_xml_original))
     {
-        fprintf(stderr, "[XML][COMMIT] OOXML modificato: applico via ld_paragraph_set_ooxml\n");
+        // fprintf(stderr, "[XML][COMMIT] OOXML modificato: applico via ld_paragraph_set_ooxml\n");
         free(g_edit_result_utf8);
         g_edit_result_utf8 = xml;
         g_edit_is_xml = 1;
@@ -92,7 +92,7 @@ static void commit_paragraph_editor(HWND hwnd)
         DestroyWindow(hwnd);
         return;
     }
-    fprintf(stderr, "[XML][COMMIT] OOXML invariato: nessun cambiamento\n");
+    // fprintf(stderr, "[XML][COMMIT] OOXML invariato: nessun cambiamento\n");
     free(xml);
     g_edit_apply = 0;
     DestroyWindow(hwnd);
@@ -297,13 +297,17 @@ static void show_paragraph_editor(int index, const char *utf8_text)
         char *xml = NULL;
         const char *load = XML_UNAVAILABLE;
         int got = ld_paragraph_get_ooxml(g_doc, index, &xml);
-        fprintf(stderr, "[XML][GET-OOXML] idx=%d ok=%d xml=%p\n", index, got, (void *)xml);
+        // fprintf(stderr, "[XML][GET-OOXML] idx=%d ok=%d xml=%p\n", index, got, (void *)xml);
         if (!got)
-            fprintf(stderr, "[XML][GET-OOXML] errore ld_last_error='%s'\n", ld_last_error());
+        {
+            // fprintf(stderr, "[XML][GET-OOXML] errore ld_last_error='%s'\n", ld_last_error());
+        }
         if (got && xml && xml[0])
             load = xml;
         else
-            fprintf(stderr, "[XML][GET-OOXML] nessun OOXML utile: uso placeholder\n");
+        {
+            // fprintf(stderr, "[XML][GET-OOXML] nessun OOXML utile: uso placeholder\n");
+        }
         log_xml_block("GET-OOXML", index, load);
         g_edit_xml_original = _strdup(load);
         {

@@ -190,6 +190,7 @@ typedef struct CaretHitResult
     unsigned      gen;
     unsigned      epoch;
     int           hit;
+    int           ch_width;     /* FIX char_w CARET: font-derived character advance from ld_run_hit_test */
     int           doc_x, doc_y;
     ld_caret_hit  info;
 } CaretHitResult;
@@ -344,6 +345,7 @@ static char     *g_inline_buffer = NULL;       /* buffer caratteri accumulati */
 static int       g_inline_pending_op = -1;     /* operazione in corso (0=insert, 1=backspace) */
 static char     *g_inline_run_text = NULL;     /* testo corrente del run (UTF-8) */
 static char     *g_inline_last_char = NULL;    /* ultimo carattere inserito (UTF-8) */
+static int       g_inline_char_w = 0;          /* FIX char_w CARET: cached font metric (ld_run_hit.font_ch_width) for caret advance */
 
 static void apply_pending_justification(void);
 static void inline_begin(const ld_caret_hit* hit);

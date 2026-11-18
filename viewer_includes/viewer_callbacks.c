@@ -14,7 +14,7 @@ static void cb_draw_text(void *hdc, const char *text, void *font, unsigned rgb, 
     static int s_text_count = 0;
     if (s_text_count++ < 200)
         dbg_log("[TABLE] cb_draw_text text='%.60s' at (%d,%d) size=%dx%d\n", text, x, y, w, h);
-    fprintf(stderr, "[FONT_DRAW] text='%.30s' font=%p at (%d,%d) zoom=%.2f\n", text ? text : "NULL", font, x, y, g_zoom);
+    // fprintf(stderr, "[FONT_DRAW] text='%.30s' font=%p at (%d,%d) zoom=%.2f\n", text ? text : "NULL", font, x, y, g_zoom);
     if (!g_renderer)
         return;
     g_renderer->vtbl->DrawText(g_renderer, text, font,

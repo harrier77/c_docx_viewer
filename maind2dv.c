@@ -187,7 +187,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     MSG msg;
     HMENU menu, filemenu;
 
-    fprintf(stderr, "[RENDERER] kind=d2d\n");
+    // fprintf(stderr, "[RENDERER] kind=d2d\n");
 
     {
         INITCOMMONCONTROLSEX icc;

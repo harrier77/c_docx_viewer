@@ -122,7 +122,7 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
             /* Essential trace: one line per full layout, shows the width
              * contract between viewer and litedocx (see layout_content_width()). */
 #if CONSOLE_LOGGING
-            fprintf(stderr, "[RENDER] ld_render content_w=%d\n", j->content_w);
+            //fprintf(stderr, "[RENDER] ld_render content_w=%d\n", j->content_w);
 #endif
             if (j->doc && !g_shutdown)
                 ld_render(j->doc, j->content_w);
@@ -210,6 +210,12 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                         r->doc_x = j->doc_x;
                         r->doc_y = j->doc_y;
                         r->hit   = ld_run_caret_hit(j->doc, j->doc_x, j->doc_y, &r->info);
+                        /* FIX char_w CARET: fetch the font metric on the worker with the read-only run hit-test. */
+                        {
+                            ld_run_hit rh = {0}; /* FIX char_w CARET: zero-initialized result receiving font metrics. */
+                            if (ld_run_hit_test(j->doc, j->doc_x, j->doc_y, &rh) && rh.font_ch_width > 0) /* FIX char_w CARET: accept only a valid font-derived width. */
+                                r->ch_width = rh.font_ch_width; /* FIX char_w CARET: cache the width for the inline caret advance. */
+                        }
                         PostMessageA(j->hwnd, WM_APP_CARET_RESULT, 0, (LPARAM)r);
                     }
                 }
@@ -247,15 +253,13 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
             {
                 if (j->xml_text)
                 {
-                    fprintf(stderr, "[XML][WORKER-APPLY] idx=%d bytes=%d ooxml=%d\n",
-                            j->para_index, (int)strlen(j->xml_text), j->ooxml);
+                    //fprintf(stderr, "[XML][WORKER-APPLY] idx=%d bytes=%d ooxml=%d\n",j->para_index, (int)strlen(j->xml_text), j->ooxml);
                     log_xml_block("WORKER-APPLY", j->para_index, j->xml_text);
                     if (j->ooxml)
                         ok = ld_paragraph_set_ooxml(j->doc, j->para_index, j->xml_text);
                     else
                         ok = ld_paragraph_set_xml(j->doc, j->para_index, j->xml_text);
-                    fprintf(stderr, "[XML][WORKER-APPLY] ok=%d err='%s'\n",
-                            ok, ok ? "" : ld_last_error());
+                    //fprintf(stderr, "[XML][WORKER-APPLY] ok=%d err='%s'\n",ok, ok ? "" : ld_last_error());
                 }
                 else if (j->text)
                 {
@@ -301,20 +305,16 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                 {
                     /* Edit inline: testo completo del run (senza i 2 byte marker) */
                     const char* new_run_text = j->text + 2;
-                    fprintf(stderr, "[INLINE][WORKER] para=%d run=%d new_text_len=%d\n",
-                            j->para_index, j->run_index, (int)strlen(new_run_text));
+                    //fprintf(stderr, "[INLINE][WORKER] para=%d run=%d new_text_len=%d\n",j->para_index, j->run_index, (int)strlen(new_run_text));
                     ok = ld_run_set_text(j->doc, j->para_index, j->run_index, new_run_text);
-                    fprintf(stderr, "[INLINE][WORKER] ok=%d err='%s'\n",
-                            ok, ok ? "" : ld_last_error());
+                    //fprintf(stderr, "[INLINE][WORKER] ok=%d err='%s'\n",ok, ok ? "" : ld_last_error());
                 }
                 else
                 {
                     /* Edit classico: sostituzione completo del run */
-                    fprintf(stderr, "[XML][WORKER-RUN-APPLY] para=%d run=%d bytes=%d\n",
-                            j->para_index, j->run_index, (int)strlen(j->text));
+                    //fprintf(stderr, "[XML][WORKER-RUN-APPLY] para=%d run=%d bytes=%d\n",j->para_index, j->run_index, (int)strlen(j->text));
                     ok = ld_run_set_text(j->doc, j->para_index, j->run_index, j->text);
-                    fprintf(stderr, "[XML][WORKER-RUN-APPLY] ok=%d err='%s'\n",
-                            ok, ok ? "" : ld_last_error());
+                    //fprintf(stderr, "[XML][WORKER-RUN-APPLY] ok=%d err='%s'\n",ok, ok ? "" : ld_last_error());
                 }
             }
             if (r)

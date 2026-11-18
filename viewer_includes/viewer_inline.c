@@ -61,8 +61,8 @@ static void inline_begin(const ld_caret_hit* hit)
     }
     if (para_text) ld_free_string(para_text);
 
-    fprintf(stderr, "[INLINE] begin para=%d run=%d para_off=%d run_off=%d run_text='%s'\n",
-            g_inline_para, g_inline_run, g_inline_offset, g_inline_run_offset, g_inline_run_text ? g_inline_run_text : "");
+    // fprintf(stderr, "[INLINE] begin para=%d run=%d para_off=%d run_off=%d run_text='%s'\n",
+    //         g_inline_para, g_inline_run, g_inline_offset, g_inline_run_offset, g_inline_run_text ? g_inline_run_text : "");
 }
 
 /* Termina la modalita' inline. */
@@ -71,7 +71,7 @@ static void inline_end(const char* why)
     if (!g_inline_active)
         return;
 
-    fprintf(stderr, "[INLINE] end (%s)\n", why ? why : "?");
+    // fprintf(stderr, "[INLINE] end (%s)\n", why ? why : "?");
     g_inline_active  = 0;
     g_inline_para    = -1;
     g_inline_run     = -1;
@@ -97,7 +97,7 @@ static void inline_apply_edit(int op, const char* text)
     /* Se il worker e' occupato, accumula il tasto per coalescing. */
     if (g_render_busy || g_doc_state != DOC_STATE_IDLE)
     {
-        fprintf(stderr, "[CARET] busy: coalesce op=%d\n", op);
+        fprintf(stderr, "[CARET line 100] busy %d\n", op);
         if (op == LD_INLINE_OP_INSERT && text && *text)
         {
             size_t old_len = g_inline_buffer ? strlen(g_inline_buffer) : 0;
@@ -125,7 +125,7 @@ static void inline_apply_edit(int op, const char* text)
 
     if (!g_worker_started)
     {
-        fprintf(stderr, "[CARET] sync-fallback op=%d\n", op);
+        fprintf(stderr, "[CARET line 128] sync %d\n", op);
         /* Fallback sincrono: usa ld_run_set_text con testo completo del run */
         int ok = 0;
         if (g_inline_run_text)
@@ -172,8 +172,7 @@ static void inline_apply_edit(int op, const char* text)
         
         if (ok)
         {
-            fprintf(stderr, "[CARET] sync ok: x=%d off=%d run_off=%d\n",
-                    g_caret_x, g_caret_offset, g_inline_run_offset);
+            fprintf(stderr, "[CARET sinc line 175] sync ok x=%d\n", g_caret_x);
             /* Aggiorna offset caret locale */
             if (op == LD_INLINE_OP_INSERT && text)
             {
@@ -227,8 +226,7 @@ static void inline_apply_edit(int op, const char* text)
 
     /* Job asincrono: usa ld_run_set_text con testo completo del run. */
     {
-        fprintf(stderr, "[CARET] job: op=%d text='%s' run_off=%d x=%d\n",
-                op, text ? text : "(null)", g_inline_run_offset, g_caret_x);
+        fprintf(stderr, "[CARET line 229] job op=%d x=%d\n", op, g_caret_x);
         Job* j = alloc_job(JOB_RUN_APPLY_EDIT); /* riutilizziamo lo stesso tipo */
         if (!j)
             return;
@@ -299,8 +297,8 @@ static void inline_apply_edit(int op, const char* text)
         
         j->text = marked_text;  /* Testo completo del run con marker */
 
-        fprintf(stderr, "[INLINE] enqueue job para=%d run=%d op=%d new_text_len=%d\n",
-                g_inline_para, g_inline_run, op, new_run_text ? (int)strlen(new_run_text) : 0);
+        // fprintf(stderr, "[INLINE] enqueue job para=%d run=%d op=%d new_text_len=%d\n",
+        //         g_inline_para, g_inline_run, op, new_run_text ? (int)strlen(new_run_text) : 0);
 
         /* Memorizza l'operazione per aggiornare l'offset al completamento */
         g_inline_pending_op = op;
@@ -337,7 +335,7 @@ static void inline_handle_result(EditResult* r)
         /* L'edit e' riuscito: riancora il caret facendo un nuovo caret hit-test
          * alla posizione aggiornata. Per ora ricomputiamo l'offset locale e
          * richiediamo un nuovo caret hit-test asincrono. */
-        fprintf(stderr, "[INLINE] edit ok, re-anchoring caret\n");
+        // fprintf(stderr, "[INLINE] edit ok, re-anchoring caret\n");
 
         /* Reset cache paginazione per forzare il re-layout. */
         g_layout_complete      = 0;
@@ -374,8 +372,7 @@ static void inline_handle_result(EditResult* r)
         int saved_caret_h        = g_caret_h;
         viewer_caret_clear();
 
-        fprintf(stderr, "[CARET] res: x=%d run_off=%d op=%d\n",
-                g_caret_x, g_inline_run_offset, g_inline_pending_op);
+        fprintf(stderr, "[CARET line 375] res x=%d\n", g_caret_x);
         g_caret_valid  = 1;
         g_caret_para   = saved_caret_para;
         g_caret_run    = saved_caret_run;
@@ -430,45 +427,12 @@ static void inline_handle_result(EditResult* r)
                     free(g_inline_run_text);
                     g_inline_run_text = new_text;
                 }
-                /* Estimate caret X advance: 0.5x the average character width
-                 * of the pre-edit run. The average is computed as
-                 * g_caret_x / pre_edit_len (position / char count before
-                 * this insert). 0.5x is a compromise: in TNR 16px the
-                 * average is ~14px/char but digits are ~7px/char, so the
-                 * full average overestimates. The re-anchor (DLL with
-                 * text_width_cache cleared by ld_render) corrects the
-                 * estimate to the exact position ~100ms later. */
+                /* FIX char_w CARET: use the font-derived width instead of g_caret_x / pre_edit_len. */
                 {
-                    int old_cx = g_caret_x;
-                    int pre_edit_len = g_inline_run_offset - add_len;
-                    /* Se siamo alla fine del run (pre_edit_len coincide con la lunghezza precedente),
-                     * usiamo la stima basata sulla media. Se siamo in mezzo al run,
-                     * applichiamo un incremento conservativo per evitare l'over-shooting verso destra. */
-                    int total_run_len = (int)strlen(g_inline_run_text);
-                    int is_at_end = (pre_edit_len >= total_run_len - add_len);
-
-                    fprintf(stderr, "[DEBUG MID] pre_edit_len=%d total_len=%d add_len=%d is_at_end=%d\n",
-                            pre_edit_len, total_run_len, add_len, is_at_end);
-
-                    if (is_at_end)
-                    {
-                        int avg_w = (pre_edit_len > 0 && g_caret_x > 0) ?
-                                    g_caret_x / pre_edit_len : g_caret_w * 2;
-                        int char_w = (avg_w + 1) / 2; /* 0.5x */
-                        if (char_w < 1) char_w = g_caret_w;
-                        g_caret_x += char_w * add_len;
-                        fprintf(stderr, "[CARET] est (end of run): x %d +%d*(%d) -> %d (pre_len=%d)\n",
-                                old_cx, char_w, add_len, g_caret_x, pre_edit_len);
-                    }
-                    else
-                    {
-                        /* In mezzo al run: avanziamo utilizzando una larghezza di fallback fissa 
-                         * (es. 8 pixel) per evitare un incremento nullo o limitato allo spessore 
-                         * della barretta g_caret_w (che vale 1). */
-                        int single_char_w = 8; 
-                        g_caret_x += single_char_w * add_len;
-                        fprintf(stderr, "[CARET] est (mid run): x %d +1 char -> %d\n", old_cx, g_caret_x);
-                    }
+                    int step = g_inline_char_w > 0 ? g_inline_char_w : 8; /* FIX char_w CARET: fall back to the measured 8px step when no font metric is available. */
+                    g_caret_x += step * add_len; /* FIX char_w CARET: advance by the same constant font metric on every keystroke. */
+                    /*Attention: the value to monitor is step, if decreases something is wrong */
+                    fprintf(stderr, "[CARET inline] est+ step=%d x=%d\n", step, g_caret_x); /* FIX char_w CARET: log the stable step for verification. */
                 }
                 free(g_inline_last_char);
                 g_inline_last_char = NULL;
@@ -484,31 +448,22 @@ static void inline_handle_result(EditResult* r)
                 if (g_caret_run_end > g_caret_run_start) g_caret_run_end -= 1;
                 if (len > 0)
                 {
-                    /* Estimate caret X retreat: 0.5x the average character
-                     * width of the pre-edit run. Same formula as insert
-                     * (symmetric), using g_caret_x / pre_edit_len where
-                     * pre_edit_len = g_inline_run_offset + 1 (the count
-                     * before this backspace). The re-anchor corrects. */
-                    int pre_edit_len = g_inline_run_offset + 1;
-                    int avg_w = (pre_edit_len > 0 && g_caret_x > 0) ?
-                                g_caret_x / pre_edit_len : g_caret_w * 2;
-                    int char_w = (avg_w + 1) / 2;
-                    if (char_w < 1) char_w = g_caret_w;
-                    g_caret_x -= char_w;
-                    g_inline_run_text[len - 1] = '\0';
-                    fprintf(stderr, "[CARET] est: backspace x -%d -> %d (pre_len=%d)\n",
-                            char_w, g_caret_x, pre_edit_len);
+                    /* FIX char_w CARET: retreat by the same font-derived step (symmetric with insert). */
+                    int step = g_inline_char_w > 0 ? g_inline_char_w : 8; /* FIX char_w CARET: fall back to 8px when the font metric is missing. */
+                    g_caret_x -= step; /* FIX char_w CARET: no decaying average, so the retreat stays constant. */
+                    g_inline_run_text[len - 1] = '\0'; /* FIX char_w CARET: drop the deleted character from the local run buffer. */
+                    fprintf(stderr, "[CARET inline] est- step=%d x=%d\n", step, g_caret_x); /* FIX char_w CARET: log the stable step for verification. */
                 }
             }
         }
 
         request_render(layout_content_width());
         InvalidateRect(g_hwnd, NULL, TRUE);
-        fprintf(stderr, "[CARET] res: AFTER x=%d valid=%d\n", g_caret_x, g_caret_valid);
+        fprintf(stderr, "[CARET line 504] done x=%d\n", g_caret_x);
     }
     else
     {
-        fprintf(stderr, "[INLINE] edit failed: %s\n", r->error);
+        // fprintf(stderr, "[INLINE] edit failed: %s\n", r->error);
         MessageBoxA(g_hwnd, r->error[0] ? r->error : "Edit inline fallito",
                     "d2dview", MB_OK | MB_ICONERROR);
     }
@@ -569,13 +524,13 @@ static int inline_handle_char(WPARAM wp)
  * Chiama ld_run_caret_hit alla posizione documento del caret precedente. */
 static void inline_reanchor_caret(void)
 {
-    fprintf(stderr, "[CARET] reanchor: x=%d state=%d\n", g_caret_x, g_doc_state);
+    fprintf(stderr, "[CARET line 569] reanchor x=%d\n", g_caret_x);
     if (!g_inline_active || !g_doc || !g_caret_valid)
         return;
 
     if (!g_worker_started || g_doc_state != DOC_STATE_IDLE)
     {
-        fprintf(stderr, "[CARET] reanchor: SKIP (worker=%d state=%d)\n", g_worker_started, g_doc_state);
+        fprintf(stderr, "[CARET line 575] reanchor skip\n");
         return;
     }
 
