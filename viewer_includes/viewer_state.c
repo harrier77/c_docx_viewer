@@ -319,6 +319,8 @@ static unsigned  g_caret_epoch;
 static int       g_caret_para   = -1;
 static int       g_caret_run    = -1;
 static int       g_caret_offset = -1;
+static int       g_caret_run_start = -1;  /* run start offset in paragraph text */
+static int       g_caret_run_end = -1;    /* run end offset in paragraph text */
 static int       g_caret_x, g_caret_y, g_caret_w, g_caret_h;
 
 static void viewer_caret_clear(void)
@@ -327,9 +329,31 @@ static void viewer_caret_clear(void)
     g_caret_para   = -1;
     g_caret_run    = -1;
     g_caret_offset = -1;
+    g_caret_run_start = -1;
+    g_caret_run_end = -1;
 }
 
+/* ---- Inline editing (prototipo in-memory) ---- */
+static int       g_inline_active = 0;          /* modalita' inline attiva */
+static int       g_inline_para   = -1;         /* paragrafo in editing */
+static int       g_inline_run    = -1;         /* run slot in editing */
+static int       g_inline_offset = -1;         /* offset caret nel paragrafo (spazio normalizzato) */
+static int       g_inline_run_offset = -1;     /* offset caret dentro il run (per inserimento) */
+static int       g_inline_coalesce = 0;        /* batch tasti mentre worker occupato */
+static char     *g_inline_buffer = NULL;       /* buffer caratteri accumulati */
+static int       g_inline_pending_op = -1;     /* operazione in corso (0=insert, 1=backspace) */
+static char     *g_inline_run_text = NULL;     /* testo corrente del run (UTF-8) */
+static char     *g_inline_last_char = NULL;    /* ultimo carattere inserito (UTF-8) */
+
 static void apply_pending_justification(void);
+static void inline_begin(const ld_caret_hit* hit);
+static void inline_end(const char* why);
+static void inline_apply_edit(int op, const char* text);
+static void inline_handle_result(EditResult* r);
+static int inline_handle_key(WPARAM wp, LPARAM lp);
+static int inline_handle_char(WPARAM wp);
+static void inline_reanchor_caret(void);
+
 
 
 

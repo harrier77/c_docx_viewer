@@ -184,6 +184,13 @@ static void viewer_on_lbuttondown(HWND hwnd, LPARAM lp)
 
     (void)hwnd;
 
+    /* Se eravamo in modalita' inline e clicchiamo altrove, usciamo. */
+    if (g_inline_active)
+    {
+        inline_end("click elsewhere");
+        InvalidateRect(g_hwnd, NULL, FALSE);
+    }
+
     if (!g_doc || g_load_active || g_render_busy || !g_layout_complete ||
         g_doc_state != DOC_STATE_IDLE || !g_worker_started)
         return;
@@ -425,20 +432,42 @@ static void handle_caret_result(CaretHitResult *r)
      * DLL (coordinate documento). */
     if (r->hit && r->info.caret_h > 0)
     {
+        int old_cx = g_caret_x;
         g_caret_valid  = 1;
         g_caret_epoch  = r->epoch;
         g_caret_para   = r->info.para_index;
         g_caret_run    = r->info.run_index;
         g_caret_offset = r->info.char_offset;
-        g_caret_x      = r->info.caret_x;
+        g_caret_run_start = r->info.run_char_start;
+        g_caret_run_end = r->info.run_char_end;
         g_caret_y      = r->info.caret_y;
         g_caret_w      = r->info.caret_w > 0 ? r->info.caret_w : 1;
         g_caret_h      = r->info.caret_h;
+        /* During inline editing, g_caret_x holds the estimated post-edit
+         * position (set by inline_handle_result). The DLL may return a
+         * stale (lower) caret_x if its hit-test ran against the pre-edit
+         * layout. Keep the estimate if the DLL value is smaller; adopt
+         * it if the DLL value is larger (accurate post-edit position). */
+        if (g_inline_active && r->info.caret_x < g_caret_x)
+            g_caret_x = g_caret_x; /* keep */
+        else
+            g_caret_x = r->info.caret_x;
+        if (g_caret_x != old_cx)
+            fprintf(stderr, "[CARET] hit: x %d -> %d (dll=%d inline=%d)\n",
+                    old_cx, g_caret_x, r->info.caret_x, g_inline_active);
+
+        /* Avvia modalita' inline se non stiamo aprendo l'editor del run. */
+        if (!g_run_view_pending && !g_inline_active)
+        {
+            inline_begin(&r->info);
+        }
     }
     else
     {
+        fprintf(stderr, "[CARET] hit MISS: caret cleared, x stays=%d\n", g_caret_x);
         /* Click fuori dal testo (o paragrafo senza parole): niente caret. */
         viewer_caret_clear();
+        inline_end("caret cleared");
     }
     InvalidateRect(g_hwnd, NULL, FALSE);
     free(r);

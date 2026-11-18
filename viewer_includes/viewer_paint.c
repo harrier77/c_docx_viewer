@@ -79,6 +79,7 @@ static void viewer_paint(HWND hwnd)
                                        g_caret_w > 0 ? g_caret_w : 1,
                                        g_caret_h,
                                        RGB(0, 0, 0));
+            fprintf(stderr, "[CARET] paint: doc(%d,%d) w=%d h=%d\n", g_caret_x, g_caret_y, g_caret_w, g_caret_h);
         }
     }
 

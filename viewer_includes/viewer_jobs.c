@@ -289,16 +289,33 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
         {
             /* Sostituzione del testo del singolo run (ld_run_set_text).
              * Esito via WM_APP_EDIT_APPLIED: stessa struct EditResult e
-             * stesso reset dell'apply del paragrafo. */
+             * stesso reset dell'apply del paragrafo.
+             * Formato inline edit: testo inizia con 0xFF 0xFF seguito dal testo completo del run.
+             * Formato classico: testo diretto. */
             EditResult *r = (EditResult *)calloc(1, sizeof(EditResult));
             int ok = 0;
             if (!g_shutdown && j->doc && j->run_index >= 0 && j->text)
             {
-                fprintf(stderr, "[XML][WORKER-RUN-APPLY] para=%d run=%d bytes=%d\n",
-                        j->para_index, j->run_index, (int)strlen(j->text));
-                ok = ld_run_set_text(j->doc, j->para_index, j->run_index, j->text);
-                fprintf(stderr, "[XML][WORKER-RUN-APPLY] ok=%d err='%s'\n",
-                        ok, ok ? "" : ld_last_error());
+                /* Check per marker inline edit: 0xFF 0xFF */
+                if ((unsigned char)j->text[0] == 0xFF && (unsigned char)j->text[1] == 0xFF)
+                {
+                    /* Edit inline: testo completo del run (senza i 2 byte marker) */
+                    const char* new_run_text = j->text + 2;
+                    fprintf(stderr, "[INLINE][WORKER] para=%d run=%d new_text_len=%d\n",
+                            j->para_index, j->run_index, (int)strlen(new_run_text));
+                    ok = ld_run_set_text(j->doc, j->para_index, j->run_index, new_run_text);
+                    fprintf(stderr, "[INLINE][WORKER] ok=%d err='%s'\n",
+                            ok, ok ? "" : ld_last_error());
+                }
+                else
+                {
+                    /* Edit classico: sostituzione completo del run */
+                    fprintf(stderr, "[XML][WORKER-RUN-APPLY] para=%d run=%d bytes=%d\n",
+                            j->para_index, j->run_index, (int)strlen(j->text));
+                    ok = ld_run_set_text(j->doc, j->para_index, j->run_index, j->text);
+                    fprintf(stderr, "[XML][WORKER-RUN-APPLY] ok=%d err='%s'\n",
+                            ok, ok ? "" : ld_last_error());
+                }
             }
             if (r)
             {

@@ -27,6 +27,7 @@ EXPORTS
     ld_run_hit_test
     ld_run_caret_hit
     ld_run_set_text
+    ld_run_edit
     ld_paragraph_get_text
     ld_paragraph_set_text
     ld_paragraph_get_xml

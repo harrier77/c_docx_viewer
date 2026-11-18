@@ -297,6 +297,18 @@ static void on_render_done(void *doc, int used_w)
     apply_pending_justification();
     LOG_RENDER("layout complete flag set");
 
+    /* Re-anchor the caret if inline editing mode is active. After a
+     * render following an edit, the layout has been rebuilt and the
+     * text_width_cache has been cleared by ld_render (content_changed
+     * branch), so the DLL's JOB_CARET_HIT now returns the exact
+     * post-edit caret position. The re-anchor refines the estimate
+     * that was applied in inline_handle_result. */
+    if (g_inline_active)
+    {
+        fprintf(stderr, "[CARET] render-done: reanchor\n");
+        inline_reanchor_caret();
+    }
+
     /* Pending width (resize) ha priorità su pending range */
     if (!g_load_active && g_render_pending_width >= 0 && g_render_pending_width != used_w)
     {

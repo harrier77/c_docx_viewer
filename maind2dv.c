@@ -58,6 +58,7 @@
 #include "viewer_includes/viewer_save.c"
 #include "viewer_includes/viewer_editor_ui.c"
 #include "viewer_includes/viewer_paragraph.c"
+#include "viewer_includes/viewer_inline.c"
 #include "viewer_includes/viewer_lifecycle.c"
 #include "viewer_includes/viewer_paint.c"
 #include "viewer_includes/viewer_input.c"
@@ -152,6 +153,18 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_APP_CARET_RESULT:
         handle_caret_result((CaretHitResult *)lp);
         return 0;
+
+    case WM_KEYDOWN:
+        /* Edit inline: Backspace e altri tasti di controllo */
+        if (inline_handle_key(wp, lp))
+            return 0;
+        break;
+
+    case WM_CHAR:
+        /* Edit inline: caratteri stampabili */
+        if (inline_handle_char(wp))
+            return 0;
+        break;
 
     case WM_COMMAND:
         viewer_on_command(hwnd, wp);

@@ -265,6 +265,32 @@ int ld_run_caret_hit(void* doc, int x, int y, ld_caret_hit* out);
  * is needed afterwards.  Returns 1 on success, 0 on invalid index/failure. */
 int ld_run_set_text(void* doc, int index, int run_index, const char* text);
 
+/* Inline editing: insert or delete at a character offset within a run.
+ * This is a convenience wrapper that reads the current run text, applies
+ * the edit in the normalized character space (same space as ld_run_hit_test
+ * and ld_paragraph_get_text: NBSP->space, byte offsets in UTF-8), and calls
+ * ld_run_set_text with the new run text.  The edit reuses the existing span
+ * element so formatting is preserved.
+ * 
+ * Parameters:
+ *   doc          - document handle
+ *   index        - paragraph index
+ *   run_index    - run slot index (from ld_run_hit_test / ld_run_caret_hit)
+ *   char_offset  - offset in the PARAGRAPH normalized text where edit occurs
+ *   op           - 0 = insert, 1 = delete (backspace), 2 = delete (forward)
+ *   text         - text to insert (UTF-8, only used when op == 0)
+ * 
+ * For insert: inserts 'text' at char_offset.
+ * For backspace: deletes the character before char_offset (if char_offset > run_start).
+ * For forward delete: deletes the character at char_offset (if char_offset < run_end).
+ * 
+ * Returns 1 on success, 0 on invalid index/failure.
+ * This is an in-memory edit only; OOXML persistence is disabled during typing.
+ * Call ld_get_document_xml after typing session to get updated OOXML for save.
+ */
+int ld_run_edit(void* doc, int index, int run_index, int char_offset,
+                int op, const char* text);
+
 /* Return a newly allocated UTF-8 copy of a paragraph's plain text.
  * The caller must free it with ld_free_string().  Returns NULL if the index
  * is invalid or the paragraph cache is not valid yet (before the first

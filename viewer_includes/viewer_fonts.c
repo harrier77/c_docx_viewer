@@ -90,8 +90,9 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
             return NULL;
         }
 
+        /* Use user default locale for proper font fallback */
         hr = IDWriteFactory_CreateTextFormat(g_dwrite_factory, wfam, NULL,
-            weight, style, stretch, px_size, L"en-US", &format);
+            weight, style, stretch, px_size, L"", &format);
         free(wfam);
         wfam = NULL;
 

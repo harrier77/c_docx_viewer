@@ -39,6 +39,13 @@ static void on_edit_applied(EditResult *r)
         return;
     }
 
+    /* Se l'edit inline e' attivo, gestisci il risultato qui e ritorna. */
+    if (g_inline_active)
+    {
+        inline_handle_result(r);
+        return;
+    }
+
     g_pending_apply_token = 0;
     g_render_busy = 0;
     g_render_doc = NULL;

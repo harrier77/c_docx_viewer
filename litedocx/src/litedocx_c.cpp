@@ -1647,6 +1647,17 @@ namespace
                 h->container->text_width_cache.clear();
             }
         }
+        /* FIX: text_width_cache holds prefix widths computed from the
+         * pre-edit content. After ld_run_set_text, the content has
+         * changed but m_rebuild_needed is true while m_fonts_invalidated
+         * remains false, so the cache above (fonts_invalidated branch)
+         * is NOT cleared. Without this, ld_run_caret_hit uses stale
+         * prefix widths and returns the pre-edit caret position.
+         * Always clear when content changed (run edit, paragraph edit). */
+        if(content_changed && h->container)
+        {
+            h->container->text_width_cache.clear();
+        }
         if(fonts_invalidated || content_changed)
         {
             h->doc->rebuild_render_tree();
@@ -3271,6 +3282,17 @@ int ld_run_set_text(void* doc, int index, int run_index, const char* text)
         h->m_page_heights.clear();
         h->m_page_y_offsets.clear();
         h->m_last_rendered_page = -1;
+        /* FIX: clear text_width_cache in the in-memory fallback path.
+         * The OOXML persist path (ld_run_persist_ooxml ->
+         * ld_apply_paragraph_ooxml) already clears the cache before
+         * returning. This fallback (OOXML persist failed) also needs
+         * the cache cleared, otherwise ld_run_caret_hit will use
+         * stale prefix widths and return the pre-edit position.
+         * NOTE: this is a defense-in-depth measure. The primary fix
+         * is in ld_apply_paragraph_ooxml (which clears the cache after
+         * rebuild) and in ld_render (which clears on content_changed). */
+        if(h->container)
+            h->container->text_width_cache.clear();
 
         if(slot->is_text())
         {
@@ -3315,6 +3337,178 @@ int ld_run_set_text(void* doc, int index, int run_index, const char* text)
     } catch(...)
     {
         set_error("errore durante la modifica del run");
+        return 0;
+    }
+}
+
+/* ---- Inline editing: insert/delete at character offset within a run ---- */
+
+int ld_run_edit(void* doc, int index, int run_index, int char_offset,
+                int op, const char* text)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container)
+    {
+        set_error("parametri modifica run non validi");
+        return 0;
+    }
+
+    try
+    {
+        ld_container* c = h->container;
+        const ld_container::ParagraphInfo* info = c->find_paragraph(index);
+        if(!info || !info->element)
+        {
+            set_error("indice paragrafo non valido");
+            return 0;
+        }
+
+        /* Locate the run slot and its normalized range, same as ld_run_set_text. */
+        litehtml::element::ptr slot;
+        int target_start = -1;
+        int target_end   = -1;
+        int render_total = 0;
+        {
+            int offset = 0;
+            int n      = 0;
+            for(const auto& child : info->element->children())
+            {
+                if(child->is_break())
+                {
+                    offset += 1;
+                    continue;
+                }
+                const int len = ld_subtree_norm_len(child);
+                if(n == run_index)
+                {
+                    slot         = child;
+                    target_start = offset;
+                    target_end   = offset + len;
+                }
+                offset += len;
+                ++n;
+            }
+            render_total = offset;
+        }
+        if(!slot || target_end <= target_start)
+        {
+            set_error("indice run non valido");
+            return 0;
+        }
+
+        /* Get current run text in normalized space (same as ld_paragraph_get_text). */
+        std::string run_text;
+        collect_plain_text(slot, run_text);
+        normalize_plain_text(run_text);
+
+        /* Convert char_offset (paragraph space) to run-local offset. */
+        int run_local_offset = char_offset - target_start;
+        if(run_local_offset < 0)
+            run_local_offset = 0;
+        if(run_local_offset > (int)run_text.size())
+            run_local_offset = (int)run_text.size();
+
+        std::string new_run_text;
+        if(op == 0) /* insert */
+        {
+            if(!text || !*text)
+            {
+                set_error("testo da inserire vuoto");
+                return 0;
+            }
+            new_run_text = run_text.substr(0, run_local_offset);
+            new_run_text += text;
+            new_run_text += run_text.substr(run_local_offset);
+        }
+        else if(op == 1) /* backspace: delete before offset */
+        {
+            if(run_local_offset <= 0)
+            {
+                /* Nothing to delete in this run; caller should handle run merge */
+                set_error("nessun carattere da cancellare");
+                return 0;
+            }
+            new_run_text = run_text.substr(0, run_local_offset - 1);
+            new_run_text += run_text.substr(run_local_offset);
+        }
+        else if(op == 2) /* forward delete: delete at offset */
+        {
+            if(run_local_offset >= (int)run_text.size())
+            {
+                set_error("nessun carattere da cancellare");
+                return 0;
+            }
+            new_run_text = run_text.substr(0, run_local_offset);
+            new_run_text += run_text.substr(run_local_offset + 1);
+        }
+        else
+        {
+            set_error("operazione non supportata");
+            return 0;
+        }
+
+        /* Validate: no newlines in run text. */
+        if(strchr(new_run_text.c_str(), '\n') || strchr(new_run_text.c_str(), '\r'))
+        {
+            set_error("il testo di un run non puo' contenere fine riga");
+            return 0;
+        }
+
+        /* Inline edits during typing: disable OOXML persistence to avoid
+         * rebuild on every keystroke. The edit is in-memory only.
+         * The updated OOXML can be retrieved later via ld_get_document_xml.
+         * This is achieved by skipping the ld_run_persist_ooxml call. */
+
+        /* Cache and geometry become stale: invalidate BEFORE mutating DOM. */
+        c->clear_paragraphs();
+        h->m_rebuild_needed    = true;
+        h->m_full_layout_done  = false;
+        h->m_page_heights.clear();
+        h->m_page_y_offsets.clear();
+        h->m_last_rendered_page = -1;
+
+        if(slot->is_text())
+        {
+            /* Run without formatting: replace the text node. */
+            litehtml::element::ptr para = info->element;
+            std::vector<litehtml::element::ptr> tail;
+            bool seen = false;
+            for(const auto& child : para->children())
+            {
+                if(child == slot)
+                {
+                    seen = true;
+                    continue;
+                }
+                if(seen)
+                {
+                    tail.push_back(child);
+                }
+            }
+            if(!para->removeChild(slot))
+            {
+                set_error("rimozione del run non riuscita");
+                return 0;
+            }
+            append_plain_text_children(para, new_run_text);
+            for(const auto& t : tail)
+            {
+                para->appendChild(t);
+            }
+        }
+        else
+        {
+            /* Span reused: attributes and matched styles stay intact.
+             * Use append_plain_text_children to split into words/spaces for wrapping. */
+            slot->clearRecursive();
+            append_plain_text_children(slot, new_run_text);
+        }
+
+        set_error("");
+        return 1;
+    } catch(...)
+    {
+        set_error("errore durante l'edit inline del run");
         return 0;
     }
 }
@@ -3914,6 +4108,14 @@ static int ld_apply_paragraph_ooxml(ld_doc* h, ld_container* c, int index,
         h->m_page_heights.clear();
         h->m_page_y_offsets.clear();
         h->m_last_rendered_page = -1;
+        /* FIX: clear text_width_cache after DOM rebuild.
+         * The render tree has been rebuilt with new text content, but
+         * the prefix-width cache still holds values computed from the
+         * old text. Without this, ld_run_caret_hit will use stale
+         * widths and return the pre-edit caret position. This is the
+         * PRIMARY fix for the stale-caret bug -- it runs in the OOXML
+         * persist path (the fast path used by inline editing). */
+        c->text_width_cache.clear();
     } catch(const std::exception& ex)
     {
         model->document_xml = old_document_xml;
