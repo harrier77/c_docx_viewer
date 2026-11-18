@@ -130,7 +130,7 @@ static void inline_apply_edit(int op, const char* text)
         int ok = 0;
         if (g_inline_run_text)
         {
-            if (op == LD_INLINE_OP_INSERT && text)
+            if (op == LD_INLINE_OP_INSERT && text) //inizio blocco per offset in run
             {
                 int run_len = (int)strlen(g_inline_run_text);
                 int txt_len = (int)strlen(text);
@@ -400,21 +400,36 @@ static void inline_handle_result(EditResult* r)
         {
             if (g_inline_pending_op == LD_INLINE_OP_INSERT && g_inline_last_char)
             {
+                /* 
+                 * CRITICAL REGRESSION FIX:
+                 * When inserting characters (especially mid-run or sequentially), we must insert 
+                 * the new text at the exact cursor position (`ins_pos`) rather than blindly 
+                 * appending it to the end of the run buffer. 
+                 * Advancing offsets first and then slicing the buffer via memcpy ensures 
+                 * correct character ordering and prevents text inversion/overwriting issues.
+                 */
                 int old_len = (int)strlen(g_inline_run_text);
                 int add_len = (int)strlen(g_inline_last_char);
-                char* new_text = (char*)realloc(g_inline_run_text, old_len + add_len + 1);
-                if (new_text)
-                {
-                    g_inline_run_text = new_text;
-                    memcpy(g_inline_run_text + old_len, g_inline_last_char, add_len + 1);
-                }
-                /* Advance the caret offset BEFORE freeing g_inline_last_char.
-                 * Must happen before the free() below, which is the fix
-                 * for the original use-after-free bug (g_inline_last_char
-                 * was read after being freed in the old code). */
+                
                 g_inline_run_offset += add_len;
                 g_caret_offset += add_len;
                 g_caret_run_end += add_len;
+
+                int ins_pos = g_inline_run_offset - add_len;
+                if (ins_pos < 0) ins_pos = 0;
+                if (ins_pos > old_len) ins_pos = old_len;
+
+                char* new_text = (char*)malloc(old_len + add_len + 1);
+                if (new_text)
+                {
+                    memcpy(new_text, g_inline_run_text, ins_pos);
+                    memcpy(new_text + ins_pos, g_inline_last_char, add_len);
+                    memcpy(new_text + ins_pos + add_len, g_inline_run_text + ins_pos, old_len - ins_pos);
+                    new_text[old_len + add_len] = '\0';
+
+                    free(g_inline_run_text);
+                    g_inline_run_text = new_text;
+                }
                 /* Estimate caret X advance: 0.5x the average character width
                  * of the pre-edit run. The average is computed as
                  * g_caret_x / pre_edit_len (position / char count before
@@ -447,9 +462,10 @@ static void inline_handle_result(EditResult* r)
                     }
                     else
                     {
-                        /* In mezzo al run: avanziamo esattamente della larghezza stimata di un singolo carattere 
-                         * (usando g_caret_w o una misura locale standard). */
-                        int single_char_w = (g_caret_w > 0 ? g_caret_w : 8);
+                        /* In mezzo al run: avanziamo utilizzando una larghezza di fallback fissa 
+                         * (es. 8 pixel) per evitare un incremento nullo o limitato allo spessore 
+                         * della barretta g_caret_w (che vale 1). */
+                        int single_char_w = 8; 
                         g_caret_x += single_char_w * add_len;
                         fprintf(stderr, "[CARET] est (mid run): x %d +1 char -> %d\n", old_cx, g_caret_x);
                     }
