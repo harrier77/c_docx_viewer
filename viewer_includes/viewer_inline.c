@@ -426,13 +426,33 @@ static void inline_handle_result(EditResult* r)
                 {
                     int old_cx = g_caret_x;
                     int pre_edit_len = g_inline_run_offset - add_len;
-                    int avg_w = (pre_edit_len > 0 && g_caret_x > 0) ?
-                                g_caret_x / pre_edit_len : g_caret_w * 2;
-                    int char_w = (avg_w + 1) / 2; /* 0.5x */
-                    if (char_w < 1) char_w = g_caret_w;
-                    g_caret_x += char_w * add_len;
-                    fprintf(stderr, "[CARET] est: x %d +%d*(%d) -> %d (pre_len=%d)\n",
-                            old_cx, char_w, add_len, g_caret_x, pre_edit_len);
+                    /* Se siamo alla fine del run (pre_edit_len coincide con la lunghezza precedente),
+                     * usiamo la stima basata sulla media. Se siamo in mezzo al run,
+                     * applichiamo un incremento conservativo per evitare l'over-shooting verso destra. */
+                    int total_run_len = (int)strlen(g_inline_run_text);
+                    int is_at_end = (pre_edit_len >= total_run_len - add_len);
+
+                    fprintf(stderr, "[DEBUG MID] pre_edit_len=%d total_len=%d add_len=%d is_at_end=%d\n",
+                            pre_edit_len, total_run_len, add_len, is_at_end);
+
+                    if (is_at_end)
+                    {
+                        int avg_w = (pre_edit_len > 0 && g_caret_x > 0) ?
+                                    g_caret_x / pre_edit_len : g_caret_w * 2;
+                        int char_w = (avg_w + 1) / 2; /* 0.5x */
+                        if (char_w < 1) char_w = g_caret_w;
+                        g_caret_x += char_w * add_len;
+                        fprintf(stderr, "[CARET] est (end of run): x %d +%d*(%d) -> %d (pre_len=%d)\n",
+                                old_cx, char_w, add_len, g_caret_x, pre_edit_len);
+                    }
+                    else
+                    {
+                        /* In mezzo al run: avanziamo esattamente della larghezza stimata di un singolo carattere 
+                         * (usando g_caret_w o una misura locale standard). */
+                        int single_char_w = (g_caret_w > 0 ? g_caret_w : 8);
+                        g_caret_x += single_char_w * add_len;
+                        fprintf(stderr, "[CARET] est (mid run): x %d +1 char -> %d\n", old_cx, g_caret_x);
+                    }
                 }
                 free(g_inline_last_char);
                 g_inline_last_char = NULL;
