@@ -62,6 +62,47 @@ static void viewer_paint(HWND hwnd)
         document_draw(g_doc, g_renderer, g_doc_h, dom_busy,
                       g_zoom > 0.0f ? 1.0f / g_zoom : 1.0f);
 
+        /* Ogni render/load cambia l'epoch: geometria e font borrowed della
+         * preview non sono piu' validi. */
+        if (g_inline_preview.valid && g_inline_preview.epoch != g_layout_epoch)
+            inline_preview_clear();
+
+        /* Preview temporanea dello shadow text: dopo il documento e prima
+         * del caret, solo per run semplici verificati dalla DLL. */
+        if (!dom_busy && g_inline_active && g_doc && g_inline_preview.text &&
+            g_inline_preview.valid &&
+            g_inline_preview.epoch == g_layout_epoch &&
+            g_inline_preview.para == g_inline_para &&
+            g_inline_preview.run == g_inline_run &&
+            g_inline_preview.measured_w <= g_inline_preview.safe_w)
+        {
+            RECT rc_content;
+            int px, py, pw;
+
+            layout_content_rect(g_doc_h, &rc_content);
+            px = rc_content.left + g_inline_preview.x;
+            py = rc_content.top + g_inline_preview.y;
+            pw = g_inline_preview.w > g_inline_preview.measured_w
+                 ? g_inline_preview.w : g_inline_preview.measured_w;
+
+            if (pw <= g_inline_preview.safe_w)
+            {
+                /* Pulisce solo il rettangolo del vecchio text leaf. */
+                g_renderer->vtbl->FillRect(g_renderer, px, py, pw,
+                                           g_inline_preview.h,
+                                           RGB(255, 255, 255));
+                if (g_inline_preview.text[0])
+                {
+                    g_renderer->vtbl->DrawText(g_renderer, g_inline_preview.text,
+                                               g_inline_preview.font,
+                                               g_inline_preview.color,
+                                               px, py,
+                                               g_inline_preview.measured_w,
+                                               g_inline_preview.h);
+                }
+            }
+        }
+
         /* Caret inline (Fase 2, prova di posizionamento): barretta in
          * coordinate DOCUMENTO.  La trasformata di scala del renderer e'
          * ancora attiva e ld_draw usa rc_content come origine logica

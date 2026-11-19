@@ -270,6 +270,49 @@ int ld_run_caret_pos(void* doc, int para_index, int run_index,
  * font-size lines where a point hit-test may miss the smaller text box. */
 int ld_run_font_ch_width(void* doc, int para_index, int run_index);
 
+/* ------------------------------------------------------------------
+ * Read-only data for a temporary shadow-text preview (inline typing).
+ *
+ * The host must call this ONLY from the UI thread, after a completed
+ * layout, while the document is not busy (no render/hittest/apply/load).
+ * Nothing is modified: no text, no DOM, no layout, no caches.
+ *
+ * Returns 1 only when EVERY condition can be proven:
+ *   - the paragraph exists, has post-layout geometry and is a normal
+ *     paragraph (not inside a table);
+ *   - run_index selects a direct child slot whose content is pure text
+ *     (litehtml may split it into several word-level leaves, each with a
+ *     valid box, contiguous within its line; no <br> and no mixed/inline
+ *     elements), and no other rendered content to its right;
+ *   - that text has an opaque colour and sits on a known white (or fully
+ *     transparent) background, with no background image/gradient, no
+ *     visible borders and no text decoration that a white patch would
+ *     erase;
+ *   - a valid opaque font handle and the text colour are available.
+ *
+ * caret_y is the caret's document-space Y.  It selects WHICH line of a
+ * wrapped run to preview; the returned box and byte range describe only
+ * that line.  char_start/char_end are byte offsets into the run's plain
+ * (normalized UTF-8) text, so the host can take the matching slice of its
+ * shadow string and draw just that line.
+ *
+ * Returns 0 without side effects for any ambiguous case.  The returned
+ * font handle is BORROWED: it is valid only until the document layout /
+ * font cache is rebuilt (next render or edit).  Never free it and never
+ * keep it across renders.
+ * ------------------------------------------------------------------ */
+typedef struct ld_run_preview
+{
+    int      x, y, w, h;   /* selected line's text box, document coordinates */
+    int      char_start;   /* byte offset of this line in the run text */
+    int      char_end;     /* byte offset just past this line */
+    void    *font;         /* borrowed opaque renderer font handle */
+    unsigned color;        /* COLORREF-compatible 0x00BBGGRR */
+    int      safe_w;       /* max width available from x on this line */
+} ld_run_preview;
+
+int ld_run_preview_info(void* doc, int para_index, int run_index, int caret_y, ld_run_preview* out);
+
 /* Replace the plain text of a single run ("slot") of a paragraph, keeping the
  * formatting of every other run.  run_index is the same direct-child slot
  * index reported by ld_run_hit_test (DOM order, <br> excluded).  When the

@@ -3102,6 +3102,430 @@ int ld_run_font_ch_width(void* doc, int para_index, int run_index)
     return 0;
 }
 
+/* ---- Read-only preview info (shadow text during inline typing) ---- */
+
+static bool ld_prev_ieq(const char* a, const char* b)
+{
+    if(!a || !b)
+    {
+        return false;
+    }
+    while(*a && *b)
+    {
+        char ca = *a;
+        char cb = *b;
+        if(ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca + 32);
+        if(cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb + 32);
+        if(ca != cb)
+        {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == 0 && *b == 0;
+}
+
+static bool ld_prev_in_table(const litehtml::element::ptr& el)
+{
+    for(litehtml::element::ptr p = el; p; p = p->parent())
+    {
+        const char* tag = p->get_tagName();
+        if(ld_prev_ieq(tag, "table") || ld_prev_ieq(tag, "td") || ld_prev_ieq(tag, "th"))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ld_prev_has_break(const litehtml::element::ptr& el)
+{
+    if(!el)
+    {
+        return false;
+    }
+    if(el->is_break())
+    {
+        return true;
+    }
+    for(const auto& c : el->children())
+    {
+        if(ld_prev_has_break(c))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Trasparente o bianco dimostrabile, senza immagini/gradienti reali.
+ * litehtml inserisce un placeholder image di tipo type_none anche quando
+ * non c'e' background-image: va ignorato come fa background::is_empty(). */
+static bool ld_prev_bg_ok(const litehtml::element::ptr& el)
+{
+    if(!el)
+    {
+        return true;
+    }
+    const litehtml::background& bg = el->css().get_bg();
+    for(const auto& img : bg.m_image)
+    {
+        if(!img.is_empty())
+        {
+            return false;   /* immagine o gradiente vero */
+        }
+    }
+    const litehtml::web_color& c = bg.m_color;
+    if(c.alpha == 0)
+    {
+        return true;
+    }
+    return c.alpha == 255 && c.red == 255 && c.green == 255 && c.blue == 255;
+}
+
+static bool ld_prev_is_ancestor(const litehtml::element::ptr& anc,
+                                const litehtml::element::ptr& el)
+{
+    for(litehtml::element::ptr p = el; p; p = p->parent())
+    {
+        if(p == anc)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Qualsiasi elemento renderizzato non appartenente al nostro slot che
+ * overlaps la stessa riga a destra dell'inizio del run rende impossibile
+ * garantire che una stringa piu' lunga non copra contenuto esistente. */
+static bool ld_prev_conflict(const litehtml::element::ptr& el,
+                             const litehtml::element::ptr& slot,
+                             int y0, int y1, int x0)
+{
+    if(!el)
+    {
+        return false;
+    }
+    /* Il nostro slot e' sotto el: e' contenuto nostro, non un conflitto. */
+    if(el == slot || ld_prev_is_ancestor(slot, el))
+    {
+        return false;
+    }
+    /* el e' un antenato del nostro slot: non ha un box proprio da controllare,
+     * ma i suoi altri figli (slot vicini) vanno visitati. */
+    if(!ld_prev_is_ancestor(el, slot))
+    {
+        const litehtml::position pos = el->get_placement();
+        const int px = static_cast<int>(pos.x);
+        const int py = static_cast<int>(pos.y);
+        const int pw = static_cast<int>(pos.width);
+        const int ph = static_cast<int>(pos.height);
+        if(pw > 0 && ph > 0 && py < y1 && py + ph > y0 && px >= x0 - 1)
+        {
+            return true;
+        }
+    }
+    for(const auto& c : el->children())
+    {
+        if(ld_prev_conflict(c, slot, y0, y1, x0))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+int ld_run_preview_info(void* doc, int para_index, int run_index, int caret_y, ld_run_preview* out)
+{
+    if(out)
+    {
+        memset(out, 0, sizeof(*out));
+    }
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container || !h->container->paragraphs_valid ||
+       !out || run_index < 0)
+    {
+        return 0;
+    }
+    try
+    {
+        const ld_container::ParagraphInfo* info = h->container->find_paragraph(para_index);
+        if(!info || !info->element || !info->has_geometry)
+        {
+            return 0;
+        }
+        if(ld_prev_in_table(info->element) || ld_prev_has_break(info->element))
+        {
+            return 0;
+        }
+
+        /* Stesso criterio di ld_run_caret_pos / ld_run_set_text:
+         * figlio diretto numero run_index, <br> escluso dallo slot. */
+        litehtml::element::ptr slot;
+        int run_start = -1;
+        int run_end   = -1;
+        {
+            int offset     = 0;
+            int slot_index = 0;
+            for(const auto& child : info->element->children())
+            {
+                if(child->is_break())
+                {
+                    offset += 1;
+                    continue;
+                }
+                const int len = ld_subtree_norm_len(child);
+                if(slot_index == run_index)
+                {
+                    slot      = child;
+                    run_start = offset;
+                    run_end   = offset + len;
+                    break;
+                }
+                offset += len;
+                ++slot_index;
+            }
+        }
+        if(!slot || run_end <= run_start)
+        {
+            return 0;
+        }
+
+        /* Tutto il contenuto dello slot deve essere testo puro.  litehtml
+         * splitta il testo in parole (el_text/el_space): un run puo' avere
+         * piu' foglie e puo' andare a capo.  Ogni riga e' un blocco contiguo
+         * indipendente, selezionato in base alla posizione del caret. */
+        std::vector<litehtml::element::ptr> leaves;
+        if(slot->is_text())
+        {
+            leaves.push_back(slot);
+        }
+        else
+        {
+            for(const auto& child : slot->children())
+            {
+                if(!child->is_text())
+                {
+                    return 0;   /* contenuto misto: nessuna preview */
+                }
+                leaves.push_back(child);
+            }
+        }
+        if(leaves.empty())
+        {
+            return 0;
+        }
+
+        /* Nessun newline nel testo del run.  Il testo normalizzato viene
+         * ricostruito foglia per foglia: gli offset di riga devono essere
+         * BYTE di questo testo (g_inline_run_text e' UTF-8), non caratteri. */
+        std::string norm;
+        std::vector<std::pair<int, int> > leaf_bytes;
+        int total_chars = 0;
+        for(const auto& leaf : leaves)
+        {
+            std::string t;
+            leaf->get_text(t);
+            if(t.find('\n') != std::string::npos ||
+               t.find('\r') != std::string::npos)
+            {
+                return 0;
+            }
+            total_chars += static_cast<int>(ld_norm_text_len(t));
+            const int b0 = static_cast<int>(norm.size());
+            /* Stessa normalizzazione di normalize_plain_text, senza la
+             * regola "solo spazi -> vuoto" che vale per il paragrafo intero. */
+            for(size_t k = 0; k < t.size();)
+            {
+                const unsigned char c = static_cast<unsigned char>(t[k]);
+                if(c == 0xC2 && k + 1 < t.size() &&
+                   static_cast<unsigned char>(t[k + 1]) == 0xA0)
+                {
+                    norm.push_back(' ');
+                    k += 2;
+                }
+                else
+                {
+                    norm.push_back(static_cast<char>(c));
+                    ++k;
+                }
+            }
+            leaf_bytes.push_back(std::make_pair(b0, static_cast<int>(norm.size())));
+        }
+        if(total_chars != run_end - run_start)
+        {
+            return 0;
+        }
+
+        /* Nessun altro slot dopo questo. */
+        int slots = 0;
+        for(const auto& child : info->element->children())
+        {
+            if(!child->is_break())
+            {
+                ++slots;
+            }
+        }
+        if(run_index != slots - 1)
+        {
+            return 0;
+        }
+
+        /* Genitore comune delle foglie: come in el_text::draw e' li' che
+         * litehtml legge font e colore. */
+        litehtml::element::ptr font_el = leaves[0]->parent();
+        if(!font_el)
+        {
+            return 0;
+        }
+        for(const auto& leaf : leaves)
+        {
+            if(leaf->parent() != font_el)
+            {
+                return 0;
+            }
+        }
+
+        /* Raggruppa le foglie per riga (stesso y/h), verificando la
+         * contiguita' interna e registrando l'intervallo di byte di ogni
+         * riga dentro il testo del run. */
+        struct ld_prev_line
+        {
+            int y = 0, h = 0;
+            int x0 = 0, x1 = 0;
+            int cs = 0, ce = 0;
+            int last_right = -1;
+        };
+        std::vector<ld_prev_line> lines;
+        for(size_t leaf_i = 0; leaf_i < leaves.size(); ++leaf_i)
+        {
+            const litehtml::element::ptr& leaf = leaves[leaf_i];
+            const int byte_start = leaf_bytes[leaf_i].first;
+            const int byte_end   = leaf_bytes[leaf_i].second;
+            const litehtml::position pos = leaf->get_placement();
+            const int lx = static_cast<int>(floor(pos.x + 0.5f));
+            const int ly = static_cast<int>(floor(pos.y + 0.5f));
+            const int lw = static_cast<int>(floor(pos.width + 0.5f));
+            const int lh = static_cast<int>(floor(pos.height + 0.5f));
+            if(lw <= 0 || lh <= 0)
+            {
+                return 0;   /* foglia non renderizzata */
+            }
+            ld_prev_line* ln = nullptr;
+            for(auto& candidate : lines)
+            {
+                if(candidate.y == ly && candidate.h == lh)
+                {
+                    ln = &candidate;
+                    break;
+                }
+            }
+            if(!ln)
+            {
+                lines.push_back(ld_prev_line());
+                ln = &lines.back();
+                ln->y  = ly;
+                ln->h  = lh;
+                ln->x0 = lx;
+                ln->cs = byte_start;
+            }
+            else if(ln->last_right >= 0 && lx < ln->last_right - 1)
+            {
+                return 0;   /* buco nella riga: non verificabile */
+            }
+            if(lx + lw > ln->x1)
+            {
+                ln->x1 = lx + lw;
+            }
+            ln->ce = byte_end;
+            ln->last_right = lx + lw;
+        }
+
+        /* La riga da mostrare e' quella che contiene il caret, in coordinate
+         * documento (g_caret_y e' esattamente la y della foglia colpita). */
+        const ld_prev_line* sel = nullptr;
+        for(const auto& ln : lines)
+        {
+            if(caret_y >= ln.y && caret_y < ln.y + ln.h)
+            {
+                sel = &ln;
+                break;
+            }
+        }
+        if(!sel || sel->ce <= sel->cs)
+        {
+            return 0;
+        }
+
+        const int x = sel->x0;
+        const int y = sel->y;
+        const int w = sel->x1 - sel->x0;
+        const int h = sel->h;
+        if(w <= 0 || h <= 0)
+        {
+            return 0;
+        }
+        if(ld_prev_conflict(info->element, slot, y, y + h, x))
+        {
+            return 0;
+        }
+
+        /* Fondo noto: nessuna immagine/gradiente, trasparente o bianco.
+         * Nessun bordo o decorazione che il FillRect bianco cancellerebbe. */
+        if(!ld_prev_bg_ok(info->element) || !ld_prev_bg_ok(slot) ||
+           !ld_prev_bg_ok(font_el))
+        {
+            return 0;
+        }
+        for(litehtml::element::ptr p = info->element->parent(); p; p = p->parent())
+        {
+            if(!ld_prev_bg_ok(p) || p->css().get_text_decoration_line() != 0)
+            {
+                return 0;
+            }
+        }
+        if(slot->css().get_borders().is_visible() ||
+           font_el->css().get_borders().is_visible() ||
+           slot->css().get_text_decoration_line() != 0 ||
+           font_el->css().get_text_decoration_line() != 0 ||
+           info->element->css().get_text_decoration_line() != 0)
+        {
+            return 0;
+        }
+
+        const litehtml::uint_ptr font = font_el->css().get_font();
+        const litehtml::web_color col = font_el->css().get_color();
+        if(!font || col.alpha != 255)
+        {
+            return 0;
+        }
+
+        const int safe_w = info->x + info->w - x - 1;
+        if(safe_w <= 0)
+        {
+            return 0;
+        }
+
+        out->x         = x;
+        out->y         = y;
+        out->w         = w;
+        out->h         = h;
+        out->char_start = sel->cs;
+        out->char_end   = sel->ce;
+        out->font      = reinterpret_cast<void*>(font);
+        out->color     = to_cref(col);
+        out->safe_w    = safe_w;
+        set_error("");
+        return 1;
+    }
+    catch(...)
+    {
+        set_error("errore durante la query di preview del run");
+        return 0;
+    }
+}
 char* ld_paragraph_get_text(void* doc, int index)
 {
     auto* h = static_cast<ld_doc*>(doc);

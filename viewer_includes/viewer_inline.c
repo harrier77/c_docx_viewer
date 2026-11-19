@@ -201,6 +201,129 @@ static int inline_has_pending(void)
             strcmp(g_inline_run_text, g_inline_applied.text) != 0);
 }
 
+/* ---------------- preview visiva del testo shadow (run semplici) ---------------- */
+
+static void inline_preview_clear(void)
+{
+    free(g_inline_preview.text);
+    ZeroMemory(&g_inline_preview, sizeof(g_inline_preview));
+}
+
+/* Interroga la DLL solo quando e' lecito leggere il DOM (UI thread, IDLE).
+ * Ritorna 1 se la preview e' supportata e la stringa corrente entra nella
+ * larghezza sicura misurata con lo stesso font del renderer. */
+static int inline_preview_refresh(void)
+{
+    inline_preview_clear();
+
+    if (!g_inline_active || !g_doc || !g_inline_run_text ||
+        g_inline_para < 0 || g_inline_run < 0)
+        return 0;
+    if (g_render_busy || g_load_active || g_doc_state != DOC_STATE_IDLE ||
+        g_pending_apply_token != 0)
+        return 0;
+    if (strchr(g_inline_run_text, '\n') || strchr(g_inline_run_text, '\r'))
+        return 0;
+
+    ld_run_preview q;
+    ZeroMemory(&q, sizeof(q));
+    if (!ld_run_preview_info(g_doc, g_inline_para, g_inline_run,
+                             g_caret_y, &q) || !q.font)
+        return 0;
+
+    /* L'intervallo della DLL si riferisce al testo ORIGINALE del run
+     * (g_inline_applied.text), mentre lo shadow text e' gia' piu' lungo (o
+     * piu' corto) dopo i tasti digitati.  Dobbiamo disegnare la riga dallo
+     * START originale fino a comprendere TUTTO il testo shadow corrente:
+     * altrimenti i caratteri appena digitati verrebbero tagliati via e la
+     * preview sarebbe identica al documento (sembra che non si attivi). */
+    int text_len = (int)strlen(g_inline_run_text);
+    int orig_len = inline_dup_len(g_inline_applied.text);
+    if (q.char_start < 0 || q.char_end <= q.char_start ||
+        q.char_end > orig_len || q.char_start > text_len)
+        return 0;
+
+    int draw_end = text_len;
+    if (q.char_end < orig_len && g_inline_run_offset < q.char_end)
+    {
+        /* Riga non finale di un run che va a capo: l'inserimento e' dentro
+         * la riga, quindi l'intervallo originale lo contiene gia'. */
+        draw_end = q.char_end;
+        if (draw_end > text_len)
+            draw_end = text_len;
+    }
+    if (draw_end <= q.char_start)
+        return 0;
+
+    int slice_len = draw_end - q.char_start;
+    char *slice = (char *)malloc((size_t)slice_len + 1);
+    if (!slice)
+        return 0;
+    memcpy(slice, g_inline_run_text + q.char_start, (size_t)slice_len);
+    slice[slice_len] = '\0';
+
+    int measured = cb_text_width(slice, q.font);
+    if (measured < 0 || measured > q.safe_w)
+    {
+        free(slice);
+        return 0;
+    }
+
+    g_inline_preview.text       = slice;
+    g_inline_preview.valid      = 1;
+    g_inline_preview.epoch      = g_layout_epoch;
+    g_inline_preview.para       = g_inline_para;
+    g_inline_preview.run        = g_inline_run;
+    g_inline_preview.x          = q.x;
+    g_inline_preview.y          = q.y;
+    g_inline_preview.w          = q.w;
+    g_inline_preview.h          = q.h;
+    g_inline_preview.measured_w = measured;
+    g_inline_preview.safe_w     = q.safe_w;
+    g_inline_preview.font       = q.font;
+    g_inline_preview.color      = RGB(GetRValue(q.color), GetGValue(q.color),
+                                      GetBValue(q.color));
+    return 1;
+}
+
+/* Invalida solo il rettangolo del text leaf/preview (con un piccolo margine
+ * per il caret). Ritorna 0 se il mapping non e' affidabile: in quel caso il
+ * chiamante usa il normale invalidate dell'intera finestra. */
+static int inline_preview_invalidate(int draw_w)
+{
+    RECT rc_content;
+    double z;
+    long left, top, right, bottom;
+    RECT r;
+    int span_w;
+
+    if (!g_inline_preview.valid || !g_hwnd || g_doc_h <= 0)
+        return 0;
+
+    layout_content_rect(g_doc_h, &rc_content);
+    z = (g_zoom > 0.0f) ? (double)g_zoom : 1.0;
+    span_w = g_inline_preview.w > draw_w ? g_inline_preview.w : draw_w;
+    if (span_w <= 0 || g_inline_preview.h <= 0)
+        return 0;
+
+    /* Stessa trasformazione del disegno documento/caret. */
+    left   = (long)floor(((double)rc_content.left + g_inline_preview.x) * z) - 3;
+    top    = (long)floor(((double)rc_content.top  + g_inline_preview.y) * z) - 3;
+    right  = (long)ceil (((double)rc_content.left + g_inline_preview.x + span_w) * z) + 3;
+    bottom = (long)ceil (((double)rc_content.top  + g_inline_preview.y + g_inline_preview.h) * z) + 3;
+
+    if (right <= left || bottom <= top ||
+        left >= LAY->cw || top >= LAY->ch || right <= 0 || bottom <= 0)
+        return 0;
+
+    r.left   = left   < 0 ? 0 : left;
+    r.top    = top    < 0 ? 0 : top;
+    r.right  = right  > LAY->cw ? LAY->cw : right;
+    r.bottom = bottom > LAY->ch ? LAY->ch : bottom;
+    InvalidateRect(g_hwnd, &r, FALSE);
+    return 1;
+}
+
 static void inline_cancel_timer(void)
 {
     if (!g_inline_timer)
@@ -486,6 +609,7 @@ static void inline_begin(const ld_caret_hit* hit)
         g_inline_run_offset = 0; /* hit-test puo' restituire -1 */
 
     inline_cancel_timer();
+    inline_preview_clear();
     inline_clear_batch();
     inline_snapshot_clear(&g_inline_applied);
     /* Un commit della sessione precedente puo' essere ancora in volo: il suo
@@ -552,6 +676,7 @@ static void inline_begin(const ld_caret_hit* hit)
 static void inline_end(const char *why)
 {
     inline_cancel_timer();
+    inline_preview_clear();
     if (!g_inline_active)
         return;
 
@@ -725,10 +850,20 @@ static void inline_apply_edit(int op, const char* text)
      * trailing-edge: il testo shadow e' gia' aggiornato qui sopra. */
     g_inline_flush_deferred = 0;
 
-    /* Nessun refresh del layout: solo il caret viene ridisegnato nella
-     * posizione stimata. Il re-layout avverra' dopo il job coalescito.
+    /* Nessun refresh del layout: il testo digitato viene mostrato solo come
+     * preview temporanea, se la DLL ha potuto provare che il run e' semplice.
      * Ogni tasto riavvia il timer: e' un debounce trailing-edge. */
-    InvalidateRect(g_hwnd, NULL, FALSE);
+    if (inline_preview_refresh())
+    {
+        /* Invalida solo il text leaf/preview, con margine per il caret. */
+        if (!inline_preview_invalidate(g_inline_preview.measured_w))
+            InvalidateRect(g_hwnd, NULL, FALSE);
+    }
+    else
+    {
+        /* Run non supportato: comportamento preesistente invariato. */
+        InvalidateRect(g_hwnd, NULL, FALSE);
+    }
     if (!inline_schedule_timer(0))
         inline_handle_schedule_failure();
     if (g_inline_flush_retry_now)
@@ -745,6 +880,7 @@ static void inline_apply_edit(int op, const char* text)
  * ma rilascia comunque lo stato di APPLYING per non bloccare la UI. */
 static void inline_release_orphan_result(const EditResult *r)
 {
+    inline_preview_clear();
     inline_log("ORPHAN result token=%u epoch=%u/%u run=%d/%d vs %d/%d",
                r->token, r->epoch, g_inline_job.epoch,
                g_inline_job.para, g_inline_job.run,
@@ -775,6 +911,7 @@ static void inline_release_orphan_result(const EditResult *r)
 static void inline_restore_applied(void)
 {
     inline_cancel_timer();
+    inline_preview_clear();
     free(g_inline_run_text);
     g_inline_run_text = inline_dup(g_inline_applied.text
                                    ? g_inline_applied.text : "");
@@ -823,6 +960,10 @@ static void inline_handle_result(EditResult* r)
         inline_release_orphan_result(r);
         return;
     }
+
+    /* Il documento definitivo e' stato applicato: la preview non deve
+     * sopravvivere al risultato del job (ne' in caso di errore). */
+    inline_preview_clear();
 
     /* Rilascio dello stato del job ESATTAMENTE una volta. */
     g_inline_commit_in_flight = 0;

@@ -415,6 +415,26 @@ typedef struct InlineSnapshot
 static InlineSnapshot g_inline_applied;  /* baseline confermata dal worker */
 static InlineSnapshot g_inline_job;      /* snapshot spedito al worker */
 
+/* ---- Preview visiva temporanea dello shadow text (solo run semplici) ----
+ * Compilata da ld_run_preview_info() e consumata solo da WM_PAINT.  Il font
+ * e' borrowed: la validita' e' legata a g_layout_epoch, che cambia a ogni
+ * render/caricamento.  Nessuna modifica al documento o al DOM. */
+typedef struct InlinePreview
+{
+    int       valid;
+    unsigned  epoch;
+    int       para;
+    int       run;
+    int       x, y, w, h;    /* box della riga selezionata, coordinate documento */
+    int       measured_w;    /* larghezza stringa preview (px layout) */
+    int       safe_w;        /* limite sicuro sulla riga */
+    void     *font;          /* borrowed, mai liberato qui */
+    COLORREF  color;
+    char     *text;          /* copia posseduta della riga di shadow text */
+} InlinePreview;
+
+static InlinePreview g_inline_preview;
+
 /* Coppia UTF-16 -> UTF-8: i surrogati arrivano su due WM_CHAR distinti. */
 static WCHAR     g_inline_high_surrogate = 0;
 
@@ -436,6 +456,8 @@ static int  inline_resume_deferred(void);
 static int inline_handle_key(WPARAM wp, LPARAM lp);
 static int inline_handle_char(WPARAM wp);
 static void inline_reanchor_caret(void);
+static void inline_preview_clear(void);
+static int  inline_preview_refresh(void);
 
 
 
