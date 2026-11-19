@@ -346,6 +346,11 @@ static void on_render_done(void *doc, int used_w)
     g_render_used_w = -1;
     layout_update_scrollbars(g_hwnd, g_doc_h);
     InvalidateRect(g_hwnd, NULL, FALSE);
+
+    /* Transizione a IDLE: recupera un flush rimasto deferred per occupazione
+     * (SetTimer/allocazione falliti). Invia al massimo un job, senza riarmare
+     * il debounce pieno perche' non e' arrivato un nuovo input. */
+    inline_resume_deferred();
 }
 
 static void start_async_load(const char *path)
@@ -452,4 +457,7 @@ static void resume_pending_render(void)
             request_render(w);
         }
     }
+    /* Ultimo punto di transizione a IDLE: stesso recovery dell'errore di
+     * edit/render. Se il job non puo' ancora partire, il flag resta attivo. */
+    inline_resume_deferred();
 }

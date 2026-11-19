@@ -139,15 +139,20 @@ static void inline_snapshot_clear(InlineSnapshot *s)
     ZeroMemory(s, sizeof(*s));
 }
 
-static void inline_snapshot_set(InlineSnapshot *s, const char *text,
-                                int para, int run, int run_off, int para_off,
-                                int caret_off, int caret_rs, int caret_re,
-                                int caret_x, unsigned epoch)
+/* Variante con ownership transfer del testo: permette di completare tutte
+ * le allocazioni del job PRIMA di incrementare token/stato busy. */
+static void inline_snapshot_set_owned(InlineSnapshot *s, char *owned_text,
+                                      int para, int run, int run_off, int para_off,
+                                      int caret_off, int caret_rs, int caret_re,
+                                      int caret_x, unsigned epoch)
 {
     if (!s)
+    {
+        free(owned_text);
         return;
+    }
     free(s->text);
-    s->text       = inline_dup(text ? text : "");
+    s->text       = owned_text;
     s->para       = para;
     s->run        = run;
     s->run_offset = run_off;
@@ -157,6 +162,17 @@ static void inline_snapshot_set(InlineSnapshot *s, const char *text,
     s->caret_run_end = caret_re;
     s->caret_x    = caret_x;
     s->epoch      = epoch;
+}
+
+static void inline_snapshot_set(InlineSnapshot *s, const char *text,
+                                int para, int run, int run_off, int para_off,
+                                int caret_off, int caret_rs, int caret_re,
+                                int caret_x, unsigned epoch)
+{
+    inline_snapshot_set_owned(s, inline_dup(text ? text : ""),
+                              para, run, run_off, para_off,
+                              caret_off, caret_rs, caret_re,
+                              caret_x, epoch);
 }
 
 /* Azzera solo i contatori del batch corrente: i totali di sessione restano. */
@@ -201,11 +217,12 @@ static void inline_cancel_timer(void)
  * scatta quindi solo dopo LD_INLINE_DEBOUNCE_MS dall'ULTIMO input
  * (trailing-edge), non a intervalli dal primo tasto.
  * retry=1 viene usato quando lo scheduler e' occupato: ritardo breve
- * (LD_INLINE_RETRY_MS), senza toccare testo ne' offset. */
-static void inline_schedule_timer(int retry)
+ * (LD_INLINE_RETRY_MS), senza toccare testo ne' offset.
+ * Ritorna 1 se il timer e' armato, 0 in caso di fallimento. */
+static int inline_schedule_timer(int retry)
 {
     if (!g_inline_active || !g_hwnd || !g_doc)
-        return;
+        return 0;
 
     /* Trailing-edge: azzera sempre il timer prima di riarmarlo. */
     inline_cancel_timer();
@@ -219,33 +236,52 @@ static void inline_schedule_timer(int retry)
         inline_log("timer %s id=%u delay=%ums",
                    retry ? "RETRY armed" : "restarted",
                    (unsigned)g_inline_timer, delay);
+        return 1;
+    }
+
+    /* Nessun timer: il testo resta integralmente nei buffer shadow. */
+    g_inline_timer_retry = 0;
+    inline_log("SetTimer FAILED (%lu) - pending text kept",
+               (unsigned long)GetLastError());
+    return 0;
+}
+
+/* Recovery quando neppure il timer puo' essere armato. Non si azzera nulla:
+ * se siamo IDLE si richiede un flush immediato (gestito dal chiamante),
+ * altrimenti si segna il batch come deferred da riprendere a IDLE. Niente
+ * PostMessage immediati ne' retry periodici non limitati. */
+static void inline_handle_schedule_failure(void)
+{
+    if (!g_inline_active || !inline_has_pending())
+        return;
+    if (g_doc_state == DOC_STATE_IDLE && !g_render_busy && !g_load_active &&
+        g_pending_apply_token == 0)
+    {
+        g_inline_flush_retry_now = 1;
+        inline_log("schedule failed while IDLE: immediate flush requested");
     }
     else
     {
-        /* SetTimer fallito: il testo resta pending nei buffer shadow
-         * (g_inline_coalesce / g_inline_run_text), senza perdita. Verra'
-         * spedito al prossimo input oppure al prossimo giro di scheduler. */
-        g_inline_timer_retry = 0;
-        inline_log("SetTimer FAILED (%lu) - pending text kept, will retry",
-                   (unsigned long)GetLastError());
+        g_inline_flush_deferred = 1;
+        inline_log("schedule failed while busy: flush deferred until IDLE");
     }
 }
 
-/* Invia (se possibile) un unico job con lo stato corrente del shadow.
- * from_timer=1 -> chiamata da WM_TIMER; in caso di stato non IDLE non
- * perde i dati: arma un retry breve e riprova senza inviare un altro job. */
-static int inline_flush_pending(int from_timer)
+/* Tentativo singolo di flush. Ritorna 1 solo se un job e' stato davvero
+ * accodato (o eseguito in fallback sincrono). from_timer: 1=WM_TIMER,
+ * 2=flush differito/recovery, 0=chiamata esplicita. */
+static int inline_flush_attempt(int from_timer)
 {
     if (!g_inline_active || !g_doc || !g_inline_run_text)
         return 0;
 
-    /* Il timer e' sempre consumed, anche se non c'e' nulla da spedire:
+    /* Il timer e' sempre consumato, anche se non c'e' nulla da spedire:
      * SetTimer con hWnd e' periodico, non one-shot. */
     inline_cancel_timer();
 
     if (!inline_has_pending())
     {
-        if (from_timer)
+        if (from_timer == 1)
             inline_log("timer fired with no accumulated chars: no job");
         return 0;
     }
@@ -259,38 +295,42 @@ static int inline_flush_pending(int from_timer)
         inline_log("retry reason: state=%d busy=%d load=%d token=%u",
                    g_doc_state, g_render_busy, g_load_active,
                    g_pending_apply_token);
-        inline_schedule_timer(1);
+        if (!inline_schedule_timer(1))
+            g_inline_flush_deferred = 1; /* occupato: niente flush immediato */
         return 0;
     }
 
     char *final_text = inline_dup(g_inline_run_text);
+    char *snap_text = NULL;
+    char *marked = NULL;
+    Job *j = NULL;
+
     if (!final_text)
-        return 0;
+        goto flush_fail;
 
     /* Marker 0xFF 0xFF: il worker riconosce il testo completo del run. */
     size_t text_len = strlen(final_text);
-    char *marked = (char *)malloc(text_len + 3);
+    marked = (char *)malloc(text_len + 3);
     if (!marked)
-    {
-        free(final_text);
-        return 0;
-    }
+        goto flush_fail;
     marked[0] = (char)0xFF;
     marked[1] = (char)0xFF;
     memcpy(marked + 2, final_text, text_len + 1);
 
-    Job *j = NULL;
     if (g_worker_started)
     {
         j = alloc_job(JOB_RUN_APPLY_EDIT);
         if (!j)
-        {
-            free(marked);
-            free(final_text);
-            return 0;
-        }
+            goto flush_fail;
     }
 
+    /* Anche la copia dello snapshot deve riuscire PRIMA di toccare
+     * token/stato: in caso di errore il batch resta intatto e ritentabile. */
+    snap_text = inline_dup(final_text);
+    if (!snap_text)
+        goto flush_fail;
+
+    /* Tutte le allocazioni sono riuscite: da qui in poi non si torna indietro. */
     unsigned token = ++g_apply_token;
     g_pending_apply_token = token;
     g_pending_apply_epoch = g_layout_epoch;
@@ -298,12 +338,15 @@ static int inline_flush_pending(int from_timer)
     /* Snapshot di cio' che il worker sta per ricevere: serve a riconoscere
      * il risultato e a capire se l'utente ha digitato ancora nel frattempo. */
     inline_snapshot_clear(&g_inline_job);
-    inline_snapshot_set(&g_inline_job, final_text,
-                        g_inline_para, g_inline_run,
-                        g_inline_run_offset, g_inline_offset,
-                        g_caret_offset, g_caret_run_start, g_caret_run_end,
-                        g_caret_x, g_pending_apply_epoch);
+    inline_snapshot_set_owned(&g_inline_job, snap_text,
+                              g_inline_para, g_inline_run,
+                              g_inline_run_offset, g_inline_offset,
+                              g_caret_offset, g_caret_run_start, g_caret_run_end,
+                              g_caret_x, g_pending_apply_epoch);
+    snap_text = NULL; /* ownership trasferita a g_inline_job */
     g_inline_jobs_total++;
+    g_inline_commit_in_flight = 1;
+    g_inline_commit_closed = 0;
 
     inline_log("JOB SENT: chars_total=%u chars_batch=%d dels=%d "
                "para=%d run=%d bytes=%d gen=%u epoch=%u token=%u "
@@ -352,7 +395,60 @@ static int inline_flush_pending(int from_timer)
     }
 
     inline_clear_batch();
+    g_inline_flush_deferred = 0;
+    g_inline_flush_retry_now = 0;
     return 1;
+
+flush_fail:
+    /* Ogni buffer viene liberato una sola volta; token/stato/busy intatti. */
+    free(j);
+    free(marked);
+    free(snap_text);
+    free(final_text);
+    inline_log("alloc failure: shadow kept, no token/busy change");
+    if (!inline_schedule_timer(1))
+        inline_handle_schedule_failure();
+    return 0;
+}
+
+/* Wrapper con guardia anti-ricorsione: se il recovery richiede un flush
+ * immediato mentre siamo gia' dentro un tentativo, esegue al massimo un
+ * secondo giro. Niente loop infiniti ne' PostMessage immediati. */
+static int inline_flush_pending(int from_timer)
+{
+    int rc = 0;
+    int tries = 0;
+    do
+    {
+        g_inline_flush_retry_now = 0;
+        rc = inline_flush_attempt(from_timer);
+    } while (g_inline_flush_retry_now && ++tries < 2);
+    return rc;
+}
+
+/* Richiamato solo alle transizioni a IDLE gia' esistenti (completamento
+ * edit/render, gestione errore, resume): consuma un flush rimasto deferred
+ * senza riarmare il debounce completo, perche' non c'e' stato un nuovo input. */
+static int inline_resume_deferred(void)
+{
+    if (!g_inline_active)
+        return 0;
+    if (!g_inline_flush_deferred && !g_inline_flush_retry_now)
+        return 0;
+    if (!inline_has_pending())
+    {
+        g_inline_flush_deferred = 0;
+        g_inline_flush_retry_now = 0;
+        return 0;
+    }
+    if (g_load_active || g_render_busy || g_doc_state != DOC_STATE_IDLE ||
+        g_pending_apply_token != 0)
+        return 0; /* riprova alla prossima transizione */
+
+    g_inline_flush_deferred = 0;
+    g_inline_flush_retry_now = 0;
+    inline_log("deferred flush resumed (no new input)");
+    return inline_flush_pending(2);
 }
 
 /* ---------------- sessione inline ---------------- */
@@ -392,7 +488,10 @@ static void inline_begin(const ld_caret_hit* hit)
     inline_cancel_timer();
     inline_clear_batch();
     inline_snapshot_clear(&g_inline_applied);
-    inline_snapshot_clear(&g_inline_job);
+    /* Un commit della sessione precedente puo' essere ancora in volo: il suo
+     * snapshot serve a riconoscerne il risultato tardivo e non va cancellato. */
+    if (!g_inline_commit_in_flight)
+        inline_snapshot_clear(&g_inline_job);
     free(g_inline_run_text);
     g_inline_run_text = NULL;
     free(g_inline_last_char);
@@ -401,6 +500,8 @@ static void inline_begin(const ld_caret_hit* hit)
     g_inline_high_surrogate = 0;
     g_inline_chars_total = 0;
     g_inline_jobs_total = 0;
+    g_inline_flush_deferred = 0;  /* nuovo input: riparte il trailing-edge */
+    g_inline_flush_retry_now = 0;
 
     /* Testo del run dal paragrafo, usando i boundary del caret hit. */
     char *para_text = ld_paragraph_get_text(g_doc, hit->para_index);
@@ -444,25 +545,35 @@ static void inline_begin(const ld_caret_hit* hit)
 }
 
 /* Termina la modalita' inline. I caratteri non ancora confermati vengono
- * annullati (comportamento storico del buffer su Escape/click altrove);
- * se un job e' in volo il documento ricevera' comunque il suo testo, quindi
- * il shadow viene riportato a quel snapshot per non mostrare testo fantasma. */
+ * annullati (comportamento storico del buffer su Escape/click altrove).
+ * Se un job e' gia' in volo non puo' essere interrotto: il suo snapshot e
+ * i flag di commit vengono conservati per consumarne il risultato tardivo
+ * senza riattivare sessione/caret, e senza liberare busy/token qui. */
 static void inline_end(const char *why)
 {
     inline_cancel_timer();
     if (!g_inline_active)
         return;
 
-    int had_job = (g_pending_apply_token != 0 && g_inline_job.text != NULL);
+    int had_job = g_inline_commit_in_flight && g_pending_apply_token != 0 &&
+                  g_inline_job.text != NULL;
     int had_pending = inline_has_pending();
 
     free(g_inline_run_text);
-    g_inline_run_text = inline_dup(had_job && g_inline_job.text
-                                   ? g_inline_job.text
-                                   : (g_inline_applied.text
-                                      ? g_inline_applied.text : ""));
-
-    inline_snapshot_clear(&g_inline_job);
+    if (had_job)
+    {
+        /* Sessione chiusa: nessun shadow locale da mostrare. Il documento
+         * verra' aggiornato dal job in volo. */
+        g_inline_run_text = NULL;
+        g_inline_commit_closed = 1;
+        /* g_inline_job resta intatto fino a inline_handle_result. */
+    }
+    else
+    {
+        g_inline_run_text = inline_dup(g_inline_applied.text
+                                       ? g_inline_applied.text : "");
+        inline_snapshot_clear(&g_inline_job);
+    }
     inline_snapshot_clear(&g_inline_applied);
     inline_clear_batch();
     g_inline_high_surrogate = 0;
@@ -476,6 +587,8 @@ static void inline_end(const char *why)
     g_inline_pending_backspaces = 0;
     g_inline_pending_op = -1;
     g_inline_char_w     = 0;
+    g_inline_flush_deferred = 0;  /* modifiche locali annullate */
+    g_inline_flush_retry_now = 0;
 
     inline_log("end (%s): pending=%d job_in_flight=%d chars=%u jobs=%u",
                why ? why : "?", had_pending, had_job,
@@ -608,11 +721,22 @@ static void inline_apply_edit(int op, const char* text)
     g_inline_pending_op = op;
     g_inline_coalesce = 1;
 
+    /* Un nuovo input sostituisce eventuali retry deferred con un nuovo
+     * trailing-edge: il testo shadow e' gia' aggiornato qui sopra. */
+    g_inline_flush_deferred = 0;
+
     /* Nessun refresh del layout: solo il caret viene ridisegnato nella
      * posizione stimata. Il re-layout avverra' dopo il job coalescito.
      * Ogni tasto riavvia il timer: e' un debounce trailing-edge. */
     InvalidateRect(g_hwnd, NULL, FALSE);
-    inline_schedule_timer(0);
+    if (!inline_schedule_timer(0))
+        inline_handle_schedule_failure();
+    if (g_inline_flush_retry_now)
+    {
+        g_inline_flush_retry_now = 0;
+        inline_log("SetTimer failed while IDLE: immediate flush");
+        inline_flush_pending(2);
+    }
 }
 
 /* ---------------- risultato del worker ---------------- */
@@ -630,6 +754,11 @@ static void inline_release_orphan_result(const EditResult *r)
     g_render_busy = 0;
     g_render_doc = NULL;
     g_doc_state = DOC_STATE_IDLE;
+    /* Il commit (anche di una sessione chiusa) e' stato consumato. */
+    g_inline_commit_in_flight = 0;
+    g_inline_commit_closed = 0;
+    g_inline_flush_deferred = 0;
+    g_inline_flush_retry_now = 0;
     inline_snapshot_clear(&g_inline_job);
     g_layout_complete = 0;
     g_first_rendered_page = -1;
@@ -661,10 +790,15 @@ static void inline_restore_applied(void)
     inline_clear_batch();
 }
 
-/* Gestisce il risultato di un edit inline (chiamato da on_edit_applied). */
+/* Gestisce il risultato di un edit inline (chiamato da on_edit_applied).
+ * Viene accettato anche se la sessione e' stata chiusa: in quel caso il
+ * risultato viene solo consumato (busy/token rilasciati) e il documento
+ * riceve il render necessario, senza toccare sessione/caret/shadow. */
 static void inline_handle_result(EditResult* r)
 {
-    if (!r || !g_inline_active || !g_pending_apply_token)
+    if (!r || !g_pending_apply_token)
+        return;
+    if (!g_inline_active && !g_inline_commit_in_flight)
         return;
 
     /* Stale: documento, generazione o token diversi -> si continua ad
@@ -673,24 +807,67 @@ static void inline_handle_result(EditResult* r)
         r->token != g_pending_apply_token)
         return;
 
+    int detached = g_inline_commit_closed;
+    int active = g_inline_active && !detached;
+
     /* Verifica esplicita di epoch e di run/paragrafo: un risultato che
      * appartiene a un layout o a un run diverso non puo' aggiornare il
-     * shadow corrente. */
+     * shadow corrente. Per un commit "staccato" dalla sessione il run e'
+     * quello dello snapshot del job, non quello della sessione nuova. */
     if (r->epoch != g_pending_apply_epoch ||
         r->epoch != g_inline_job.epoch ||
-        g_inline_job.para != g_inline_para ||
-        g_inline_job.run != g_inline_run ||
-        !g_inline_job.text)
+        !g_inline_job.text ||
+        (active && (g_inline_job.para != g_inline_para ||
+                    g_inline_job.run != g_inline_run)))
     {
         inline_release_orphan_result(r);
         return;
     }
 
+    /* Rilascio dello stato del job ESATTAMENTE una volta. */
+    g_inline_commit_in_flight = 0;
+    g_inline_commit_closed = 0;
     g_pending_apply_token = 0;
     g_pending_apply_epoch = 0;
     g_render_busy = 0;
     g_render_doc = NULL;
     g_doc_state = DOC_STATE_IDLE;
+
+    if (!active)
+    {
+        /* Sessione chiusa (Escape/click/cambio run/documento) o nuova
+         * sessione apertasi prima di questo risultato: non ripristinare
+         * testo, non riancorare, non liberare il token della sessione nuova. */
+        inline_snapshot_clear(&g_inline_job);
+        if (r->ok)
+        {
+            inline_log("late result token=%u (session closed): document updated",
+                       r->token);
+            g_layout_complete = 0;
+            g_first_rendered_page = -1;
+            g_last_rendered_page = -1;
+            g_render_pending_width = -1;
+            g_render_pending_first_page = -1;
+            g_render_pending_last_page = -1;
+            g_layout_epoch++;
+            /* Se nel frattempo e' stata aperta una nuova sessione, il suo
+             * caret va lasciato intatto: siamo tenuti a non toccare solo
+             * quello della sessione chiusa. */
+            if (!g_inline_active)
+                viewer_caret_clear();
+            request_render(layout_content_width());
+            InvalidateRect(g_hwnd, NULL, TRUE);
+        }
+        else
+        {
+            inline_log("late result token=%u (session closed): edit failed '%s'",
+                       r->token, r->error[0] ? r->error : "");
+            MessageBoxA(g_hwnd, r->error[0] ? r->error : "Edit inline fallito",
+                        "d2dview", MB_OK | MB_ICONERROR);
+            resume_pending_render();
+        }
+        return;
+    }
 
     if (r->ok)
     {
@@ -711,7 +888,8 @@ static void inline_handle_result(EditResult* r)
                        r->token);
             /* Job in volo concluso: il testo piu' recente viene inviato
              * soltanto allo scadere del trailing-edge, non in parallelo. */
-            inline_schedule_timer(0);
+            if (!inline_schedule_timer(0))
+                inline_handle_schedule_failure();
         }
         else
         {
@@ -729,6 +907,17 @@ static void inline_handle_result(EditResult* r)
         g_render_pending_first_page = -1;
         g_render_pending_last_page = -1;
         g_layout_epoch++;
+
+        /* Un batch rimasto deferred per occupazione viene inviato ora, senza
+         * riarmare il debounce pieno (non c'e' stato un nuovo input). In tal
+         * caso il render di questo risultato e' superfluo: lo fara' il job
+         * successivo. */
+        if (inline_resume_deferred())
+        {
+            inline_log("deferred flush sent a new job: skip render for token=%u",
+                       r->token);
+            return;
+        }
 
         /* Salva lo stato logico del caret (g_caret_x resta la stima
          * calcolata durante il typing; il re-anchor la sostituisce

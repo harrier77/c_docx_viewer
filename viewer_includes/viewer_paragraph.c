@@ -44,8 +44,11 @@ static void on_edit_applied(EditResult *r)
         return;
     }
 
-    /* Se l'edit inline e' attivo, gestisci il risultato qui e ritorna. */
-    if (g_inline_active)
+    /* Se l'edit inline e' attivo, oppure esiste un commit inline partito da
+     * una sessione nel frattempo chiusa, gestisci il risultato qui e ritorna.
+     * Il percorso "paragrafo" non deve mai consumare il token di un job
+     * RUN_APPLY_EDIT: solo inline_handle_result puo' rilasciarne lo stato. */
+    if (g_inline_active || g_inline_commit_in_flight)
     {
         inline_handle_result(r);
         return;

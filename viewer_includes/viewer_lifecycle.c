@@ -128,6 +128,10 @@ static void viewer_on_destroy(void)
     g_doc_state = DOC_STATE_IDLE;
     g_pending_apply_token = 0;
     g_pending_apply_epoch = 0;
+    g_inline_commit_in_flight = 0;
+    g_inline_commit_closed = 0;
+    g_inline_flush_deferred = 0;
+    g_inline_flush_retry_now = 0;
     g_edit_apply = 0;
     if (g_tip_wnd)
     {

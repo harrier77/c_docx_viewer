@@ -378,6 +378,21 @@ static int       g_inline_pending_backspaces = 0; /* codepoint cancellati in att
 static UINT_PTR  g_inline_timer = 0;           /* 0 = nessun timer attivo */
 static int       g_inline_timer_retry = 0;     /* 1 = retry breve (worker occupato) */
 
+/* Recovery del debounce.
+ * g_inline_commit_in_flight: un JOB_RUN_APPLY_EDIT e' stato accodato e il suo
+ *   risultato non e' ancora stato consumato. Vive oltre la sessione inline.
+ * g_inline_commit_closed:      il risultato in volo appartiene a una sessione
+ *   chiusa (Escape/click/cambio run/documento): va consumato senza toccare
+ *   la sessione eventualmente riaperta nel frattempo.
+ * g_inline_flush_deferred:     esiste testo pending che non ha potuto essere
+ *   inviato (worker occupato e timer non armabile): riprova a IDLE.
+ * g_inline_flush_retry_now:    SetTimer e' fallito con documento IDLE: il
+ *   chiamante esegue un flush immediato (con guardia anti-ricorsione). */
+static int       g_inline_commit_in_flight = 0;
+static int       g_inline_commit_closed = 0;
+static int       g_inline_flush_deferred = 0;
+static int       g_inline_flush_retry_now = 0;
+
 /* Snapshot di cio' che e' confermato nel documento (ultimo job riuscito)
  * e di cio' che e' stato spedito al worker (job in volo). Servono per:
  * - non riscrivere g_inline_run_text con un risultato obsoleto;
@@ -417,6 +432,7 @@ static void inline_end(const char* why);
 static void inline_apply_edit(int op, const char* text);
 static void inline_handle_result(EditResult* r);
 static void inline_on_timer(void);
+static int  inline_resume_deferred(void);
 static int inline_handle_key(WPARAM wp, LPARAM lp);
 static int inline_handle_char(WPARAM wp);
 static void inline_reanchor_caret(void);
