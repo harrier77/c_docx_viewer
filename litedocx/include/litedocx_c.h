@@ -258,6 +258,18 @@ typedef struct ld_caret_hit
 
 int ld_run_caret_hit(void* doc, int x, int y, ld_caret_hit* out);
 
+/* Deterministic caret placement at an exact normalized UTF-8 byte offset
+ * within a run slot (used to re-anchor the caret after an inline edit
+ * without pixel-coordinate hit-test drift across mixed fonts). */
+int ld_run_caret_pos(void* doc, int para_index, int run_index,
+                     int run_char_offset, ld_caret_hit* out);
+
+/* Font character-advance metric (px) of a run slot, read-only.  Returns 0 when
+ * the paragraph/run index is invalid or no font metric is available.  Unlike
+ * ld_run_hit_test this does not need a pixel point, so it also works on mixed
+ * font-size lines where a point hit-test may miss the smaller text box. */
+int ld_run_font_ch_width(void* doc, int para_index, int run_index);
+
 /* Replace the plain text of a single run ("slot") of a paragraph, keeping the
  * formatting of every other run.  run_index is the same direct-child slot
  * index reported by ld_run_hit_test (DOM order, <br> excluded).  When the

@@ -18,6 +18,7 @@
 #include <litehtml/el_text.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <list>
@@ -2570,7 +2571,9 @@ static void ld_caret_scan_parts(const litehtml::element::ptr& el, int* offset,
             child->get_text(t);
             const int len = (int)ld_norm_text_len(t);
             const litehtml::position pos = child->get_placement();
-            const int bx = (int)pos.x;
+            /* Stesso arrotondamento di draw_text: evita una differenza di 1px
+             * tra la x del caret e il bordo effettivo del glifo disegnato. */
+            const int bx = static_cast<int>(floor(pos.x + 0.5f));
             const int by = (int)pos.y;
             const int bw = (int)pos.width;
             const int bh = (int)pos.height;
@@ -2823,6 +2826,280 @@ int ld_run_caret_hit(void* doc, int x, int y, ld_caret_hit* out)
         set_error("errore durante il caret hit-test");
         return 0;
     }
+}
+
+/* ---- Caret: posizione deterministica da offset logico (post-edit) ----
+ *
+ * Dopo una modifica inline il viewer conosce l'offset esatto del caret dentro
+ * il run (spazio testo normalizzato di ld_paragraph_get_text).  Chiedere al
+ * viewer un hit-test per coordinate sarebbe pericoloso: la stima approssimata
+ * del passo carattere puo' finire nel glifo successivo o in un run adiacente
+ * con font diverso.  Questa funzione restituisce invece la posizione esatta
+ * misurando i prefissi del testo con le stesse metriche del renderer, senza
+ * toccare testo, DOM o cache di layout. */
+
+/* Parte di testo di uno slot con geometria valida, in ordine DOM. */
+struct ld_caret_pos_part
+{
+    std::string            text;
+    int                    rel_off = 0; /* offset normalizzato dentro lo slot */
+    litehtml::position     pos;
+    litehtml::uint_ptr     font = 0;
+    bool                   valid = false;
+};
+
+static void ld_collect_caret_pos_parts(const litehtml::element::ptr& el,
+                                       int* rel_off,
+                                       std::vector<ld_caret_pos_part>& parts)
+{
+    if(!el)
+    {
+        return;
+    }
+    if(el->is_break())
+    {
+        *rel_off += 1; /* <br> conta come un carattere nel testo normalizzato */
+        return;
+    }
+    if(el->is_text())
+    {
+        std::string t;
+        el->get_text(t);
+        const litehtml::position pos = el->get_placement();
+        ld_caret_pos_part part;
+        part.text    = t;
+        part.rel_off = *rel_off;
+        part.pos     = pos;
+        part.valid   = ((int)pos.width > 0 && (int)pos.height > 0);
+        if(litehtml::element::ptr p = el->parent())
+        {
+            part.font = p->css().get_font();
+        }
+        parts.push_back(part);
+        *rel_off += (int)ld_norm_text_len(t);
+        return;
+    }
+    for(const auto& child : el->children())
+    {
+        ld_collect_caret_pos_parts(child, rel_off, parts);
+    }
+}
+
+/* Primo font con un advance positivo dentro uno slot (usato per ch_width). */
+static int ld_first_valid_ch_width(const litehtml::element::ptr& el)
+{
+    if(!el)
+    {
+        return 0;
+    }
+    if(el->css().get_font())
+    {
+        const int w = static_cast<int>(el->css().get_font_metrics().ch_width);
+        if(w > 0)
+        {
+            return w;
+        }
+    }
+    for(const auto& child : el->children())
+    {
+        const int w = ld_first_valid_ch_width(child);
+        if(w > 0)
+        {
+            return w;
+        }
+    }
+    return 0;
+}
+
+int ld_run_caret_pos(void* doc, int para_index, int run_index,
+                     int run_char_offset, ld_caret_hit* out)
+{
+    if(out)
+    {
+        memset(out, 0, sizeof(*out));
+        out->para_index      = -1;
+        out->run_index       = -1;
+        out->char_offset     = -1;
+        out->run_char_start  = -1;
+        out->run_char_end    = -1;
+        out->run_char_offset = -1;
+        out->caret_x         = -1;
+        out->caret_y         = -1;
+        out->caret_w         = 0;
+        out->caret_h         = 0;
+    }
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container || !h->container->paragraphs_valid ||
+       !out || run_index < 0)
+    {
+        return 0;
+    }
+    try
+    {
+        const ld_container::ParagraphInfo* info = h->container->find_paragraph(para_index);
+        if(!info || !info->element)
+        {
+            return 0;
+        }
+
+        /* Stesso criterio di ld_run_hit_test / ld_run_set_text: figli diretti
+         * in ordine DOM, <br> escluso dallo slot ma +1 sull'offset testo. */
+        litehtml::element::ptr slot;
+        int run_start = -1;
+        int run_end   = -1;
+        {
+            int offset     = 0;
+            int slot_index = 0;
+            for(const auto& child : info->element->children())
+            {
+                if(child->is_break())
+                {
+                    offset += 1;
+                    continue;
+                }
+                const int len = ld_subtree_norm_len(child);
+                if(slot_index == run_index)
+                {
+                    slot      = child;
+                    run_start = offset;
+                    run_end   = offset + len;
+                    break;
+                }
+                offset += len;
+                ++slot_index;
+            }
+        }
+        if(!slot || run_end < run_start)
+        {
+            return 0;
+        }
+
+        int rel = run_char_offset;
+        if(rel < 0) rel = 0;
+        if(rel > run_end - run_start) rel = run_end - run_start;
+
+        /* Raccoglie le parti di testo dello slot in ordine DOM: la parte che
+         * contiene l'offset (o l'ultima valida per l'offset finale) determina
+         * la riga e il font con cui misurare il prefisso. */
+        std::vector<ld_caret_pos_part> parts;
+        int rel_off = 0;
+        ld_collect_caret_pos_parts(slot, &rel_off, parts);
+
+        /* Ultima parte con geometria: l'offset finale va agganciato li',
+         * anche se in coda ci sono spazi collassati senza box. */
+        size_t last_valid = parts.size();
+        for(size_t i = 0; i < parts.size(); ++i)
+        {
+            if(parts[i].valid)
+            {
+                last_valid = i;
+            }
+        }
+
+        bool placed = false;
+        for(size_t i = 0; i < parts.size() && !placed; ++i)
+        {
+            const ld_caret_pos_part& part = parts[i];
+            if(!part.valid)
+            {
+                continue;
+            }
+            const int len  = (int)ld_norm_text_len(part.text);
+            const bool last = (i == last_valid);
+            if(rel < part.rel_off + len || (rel == part.rel_off + len && last))
+            {
+                int intra = rel - part.rel_off;
+                if(intra < 0) intra = 0;
+                if(intra > len) intra = len;
+
+                int w = 0;
+                if(intra > 0 && part.font && h->container)
+                {
+                    const std::string pre = ld_norm_prefix_bytes(part.text, intra);
+                    w = h->container->text_width(pre.c_str(), part.font);
+                }
+
+                out->caret_x = static_cast<int>(floor(part.pos.x + 0.5f)) +
+                               static_cast<int>(w + 0.5f);
+                out->caret_y = static_cast<int>(floor(part.pos.y + 0.5f));
+                out->caret_w = 1;
+                out->caret_h = static_cast<int>(floor(part.pos.height + 0.5f));
+                placed = true;
+            }
+        }
+
+        if(!placed)
+        {
+            /* Run vuoto (o senza geometria): fallback sicuro sullo slot,
+             * poi sul paragrafo. */
+            litehtml::position anchor = slot->get_placement();
+            if((int)anchor.height <= 0)
+            {
+                anchor = info->element->get_placement();
+            }
+            out->caret_x = static_cast<int>(floor(anchor.x + 0.5f));
+            out->caret_y = static_cast<int>(floor(anchor.y + 0.5f));
+            out->caret_w = 1;
+            out->caret_h = static_cast<int>(floor(anchor.height + 0.5f));
+            if(out->caret_h <= 0)
+            {
+                out->caret_h = 1;
+            }
+        }
+
+        out->para_index      = para_index;
+        out->run_index       = run_index;
+        out->run_char_start  = run_start;
+        out->run_char_end    = run_end;
+        out->run_char_offset = rel;
+        out->char_offset     = run_start + rel;
+
+        set_error("");
+        return 1;
+    } catch(...)
+    {
+        set_error("errore durante il calcolo della posizione del caret");
+        return 0;
+    }
+}
+
+int ld_run_font_ch_width(void* doc, int para_index, int run_index)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if(!h || !h->doc || !h->container || !h->container->paragraphs_valid ||
+       run_index < 0)
+    {
+        return 0;
+    }
+    try
+    {
+        const ld_container::ParagraphInfo* info = h->container->find_paragraph(para_index);
+        if(!info || !info->element)
+        {
+            return 0;
+        }
+        int slot_index = 0;
+        for(const auto& child : info->element->children())
+        {
+            if(child->is_break())
+            {
+                continue;
+            }
+            if(slot_index == run_index)
+            {
+                /* Un run senza span e' un nodo di testo: il font e' sul
+                 * padre (come in el_text::compute_styles). */
+                litehtml::element::ptr font_el =
+                    child->is_text() ? child->parent() : child;
+                return ld_first_valid_ch_width(font_el);
+            }
+            ++slot_index;
+        }
+    } catch(...)
+    {
+        return 0;
+    }
+    return 0;
 }
 
 char* ld_paragraph_get_text(void* doc, int index)

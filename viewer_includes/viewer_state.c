@@ -203,6 +203,7 @@ typedef enum JobKind
     JOB_HIT_TEST,
     JOB_RUN_HIT_TEST,
     JOB_CARET_HIT,
+    JOB_CARET_POS,
     JOB_APPLY_EDIT,
     JOB_RUN_APPLY_EDIT,
     JOB_GET_PARA_XML,
@@ -228,7 +229,8 @@ typedef struct Job
     unsigned    epoch;
     unsigned    token;
     int         para_index;
-    int         run_index;    /* slot del run per JOB_RUN_APPLY_EDIT */
+    int         run_index;    /* slot del run per JOB_RUN_APPLY_EDIT / JOB_CARET_POS */
+    int         run_char_offset; /* offset logico dentro il run per JOB_CARET_POS */
     int         doc_x;
     int         doc_y;
     char       *text;        /* plain text for ld_paragraph_set_text */

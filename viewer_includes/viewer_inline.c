@@ -30,6 +30,8 @@ static void inline_begin(const ld_caret_hit* hit)
     if (g_inline_run_offset < 0) g_inline_run_offset = 0; /* FIX: hit-test potrebbe restituire -1 */
     g_inline_coalesce = 0;
     g_inline_pending_backspaces = 0;
+    /* Nuova sessione: la metrica del run precedente non e' piu' valida. */
+    g_inline_char_w = 0;
     free(g_inline_buffer);
     g_inline_buffer = NULL;
     free(g_inline_last_char);
@@ -81,6 +83,7 @@ static void inline_end(const char* why)
     g_inline_coalesce = 0;
     g_inline_pending_backspaces = 0;
     g_inline_pending_op = -1;
+    g_inline_char_w = 0;
     free(g_inline_buffer);
     g_inline_buffer = NULL;
     free(g_inline_run_text);
@@ -376,20 +379,11 @@ static void inline_handle_result(EditResult* r)
 
         /* Salva lo stato del caret prima di cancellarlo, poi lo ripristina
          * subito: inline_reanchor_caret() (chiamata da on_render_done)
-         * richiede g_caret_valid == 1 per lavorare. */
-        /* Salva lo stato del caret prima di cancellarlo.
+         * richiede g_caret_valid == 1 per lavorare.
          *
-         * FIX: NON ripristiniamo g_caret_x/saved_caret_x qui: dopo
-         * l'aggiornamento qui sotto (che applica la STIMA di avanzata
-         * del caret), g_caret_x e' gia' alla nuova posizione stimata.
-         * inline_reanchor_caret() usera' quel valore per il JOB_CARET_HIT;
-         * se la DLL restituisce una x piu' grande, la adottiamo; se
-         * e' uguale o minore (cache stalla o risposta pre-edit),
-         * non regredisce la posizione.
-         *
-         * Gli altri campi (para, run, offset, y, w, h) si ripristinano
-         * dallo stato salvato: il run non cambia, l'offset si aggiorna
-         * qui sotto. */
+         * g_caret_x viene aggiornato qui sotto solo come stima visiva
+         * provvisoria: il re-anchor usa JOB_CARET_POS sull'offset logico,
+         * quindi la DLL restituisce la posizione esatta e la sovrascrive. */
         int saved_caret_para     = g_caret_para;
         int saved_caret_run      = g_caret_run;
         int saved_caret_offset   = g_caret_offset;
@@ -411,9 +405,9 @@ static void inline_handle_result(EditResult* r)
         g_caret_run_start = saved_caret_rs;
         g_caret_run_end   = saved_caret_re;
         /* g_caret_x is NOT restored from saved state: it stays at the
-         * current value (the estimate applied below is the correct
-         * post-edit position). The re-anchor (JOB_CARET_HIT) will
-         * refine it to the exact position via the DLL. */
+         * current value (the provisional estimate applied below). The
+         * re-anchor (JOB_CARET_POS) replaces it with the exact position
+         * computed by the DLL from the logical run offset. */
         g_caret_y      = saved_caret_y;
         g_caret_w      = saved_caret_w > 0 ? saved_caret_w : 1;
         g_caret_h      = saved_caret_h;
@@ -421,7 +415,7 @@ static void inline_handle_result(EditResult* r)
         /* Update the local run text for the next edit.
          * g_doc_state is already DOC_STATE_IDLE, so request_render
          * actually starts (not queued as pending). on_render_done
-         * calls inline_reanchor_caret which issues JOB_CARET_HIT;
+         * calls inline_reanchor_caret which issues JOB_CARET_POS;
          * the DLL (with text_width_cache cleared by ld_render after
          * a content change) returns the exact post-edit position. */
         if (g_inline_run_text && g_inline_pending_op >= 0)
@@ -556,27 +550,29 @@ static int inline_handle_char(WPARAM wp)
 }
 
 /* Riancora il caret dopo un edit completato (layout finito).
- * Chiama ld_run_caret_hit alla posizione documento del caret precedente. */
+ * Chiede alla DLL la posizione esatta dell'offset logico corrente
+ * (ld_run_caret_pos): nessun hit-test per coordinate, quindi nessun drift
+ * verso destra con font proporzionali stretti/larghi o run misti. */
 static void inline_reanchor_caret(void)
 {
-    fprintf(stderr, "[CARET line 569] reanchor x=%d\n", g_caret_x);
     if (!g_inline_active || !g_doc || !g_caret_valid)
         return;
 
     if (!g_worker_started || g_doc_state != DOC_STATE_IDLE)
     {
-        fprintf(stderr, "[CARET line 575] reanchor skip\n");
+        fprintf(stderr, "[CARET] reanchor skip\n");
         return;
     }
 
-    Job* j = alloc_job(JOB_CARET_HIT);
+    Job* j = alloc_job(JOB_CARET_POS);
     if (!j)
         return;
     j->doc = g_doc;
     j->gen = g_load_gen;
     j->epoch = g_layout_epoch;
-    j->doc_x = g_caret_x;
-    j->doc_y = g_caret_y + (g_caret_h > 0 ? g_caret_h / 2 : 0);
+    j->para_index = g_inline_para;
+    j->run_index = g_inline_run;
+    j->run_char_offset = g_inline_run_offset;
     g_doc_state = DOC_STATE_HITTEST;
     enqueue_job(j);
 }

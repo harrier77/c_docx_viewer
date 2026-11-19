@@ -397,8 +397,6 @@ static void handle_caret_result(CaretHitResult *r)
         free(r);
         return;
     }
-    if (r->hit && r->ch_width > 0) /* FIX char_w CARET: only cache a valid font-derived width. */
-        g_inline_char_w = r->ch_width; /* FIX char_w CARET: refresh the cached caret step from the current run font. */
     if (g_doc_state == DOC_STATE_HITTEST)
         g_doc_state = DOC_STATE_IDLE;
     resume_pending_render();
@@ -445,6 +443,9 @@ static void handle_caret_result(CaretHitResult *r)
         g_caret_offset = r->info.char_offset;
         g_caret_run_start = r->info.run_char_start;
         g_caret_run_end = r->info.run_char_end;
+        /* Adotta sempre le coordinate esatte restituite dalla DLL: l'offset
+         * logico e' gia' stato risolto in litedocx (ld_run_caret_pos per il
+         * post-edit), quindi non va ritoccato qui. */
         g_caret_y      = r->info.caret_y;
         g_caret_w      = r->info.caret_w > 0 ? r->info.caret_w : 1;
         g_caret_h      = r->info.caret_h;
@@ -457,6 +458,12 @@ static void handle_caret_result(CaretHitResult *r)
         {
             inline_begin(&r->info);
         }
+
+        /* La metrica va impostata DOPO inline_begin(): quest'ultimo azzera
+         * lo stato della sessione precedente, qui invece impostiamo
+         * l'advance del font del run corrente appena risolto. */
+        if (r->ch_width > 0)
+            g_inline_char_w = r->ch_width;
     }
     else
     {

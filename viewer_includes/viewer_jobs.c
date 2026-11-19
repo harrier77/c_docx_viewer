@@ -215,7 +215,35 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                             ld_run_hit rh = {0}; /* FIX char_w CARET: zero-initialized result receiving font metrics. */
                             if (ld_run_hit_test(j->doc, j->doc_x, j->doc_y, &rh) && rh.font_ch_width > 0) /* FIX char_w CARET: accept only a valid font-derived width. */
                                 r->ch_width = rh.font_ch_width; /* FIX char_w CARET: cache the width for the inline caret advance. */
+                            /* Mixed font heights: the point hit-test can miss the
+                             * small text box even though the caret hit succeeded.
+                             * Fall back to the run's font metric by index. */
+                            else if (r->hit && r->info.para_index >= 0 && r->info.run_index >= 0)
+                                r->ch_width = ld_run_font_ch_width(j->doc, r->info.para_index, r->info.run_index);
                         }
+                        PostMessageA(j->hwnd, WM_APP_CARET_RESULT, 0, (LPARAM)r);
+                    }
+                }
+                break;
+            }
+
+            case JOB_CARET_POS:
+            {
+                /* Re-anchoring after an inline edit: ask the DLL for the exact
+                 * caret placement of the logical (para, run, run_char_offset)
+                 * instead of re-hit-testing an estimated pixel coordinate. */
+                if (!g_shutdown && j->doc && j->para_index >= 0 && j->run_index >= 0)
+                {
+                    CaretHitResult *r = (CaretHitResult *)calloc(1, sizeof(CaretHitResult));
+                    if (r)
+                    {
+                        r->doc   = j->doc;
+                        r->gen   = j->gen;
+                        r->epoch = j->epoch;
+                        r->hit   = ld_run_caret_pos(j->doc, j->para_index, j->run_index,
+                                                    j->run_char_offset, &r->info);
+                        if (r->hit)
+                            r->ch_width = ld_run_font_ch_width(j->doc, j->para_index, j->run_index);
                         PostMessageA(j->hwnd, WM_APP_CARET_RESULT, 0, (LPARAM)r);
                     }
                 }
