@@ -1,98 +1,61 @@
 /*
- * viewer_inline.c - gestione edit inline (prototipo in-memory).
+ * viewer_inline.c - gestione edit inline (prototipo in-memory) con debounce.
  *
  * Modulo del viewer d2dview. Incluso da maind2dv.c (build unity):
  * condivide tipi, macro e stato globale definiti nel file principale.
  *
- * Prototipo per documento piccolo: solo insert/delete a confine carattere,
- * caratteri stampabili + Backspace, niente frecce/selection/undo.
- * Persistenza OOXML disattivata durante il typing, attivata solo su salita.
+ * Il typing viene applicato SUBITO a g_inline_run_text (shadow UI-only,
+ * nessun ld_run_* e nessun request_render per carattere). Un timer Win32
+ * (LD_INLINE_DEBOUNCE_MS) invia un solo JOB_RUN_APPLY_EDIT con il testo
+ * finale del run. Il job e' quindi una sostituzione completa del run, non
+ * un'operazione per tasto: insert/backspace/delete consecutivi vengono
+ * naturalmente coalesciati dal fatto che il shadow e' gia' aggiornato.
+ *
+ * Non viene toccata la semantica pubblica delle funzioni ld_run_* ne'
+ * l'implementazione del caret/undo: qui cambia solo la macchina degli edit.
  */
 
 #include "litedocx_c.h"
+#include <stdarg.h>
 
-#define LD_INLINE_OP_INSERT     0
-#define LD_INLINE_OP_BACKSPACE  1
-#define LD_INLINE_OP_DELETE     2
-
-/* Avvia la modalita' inline sul run indicato dall'hit-test del caret.
- * Viene chiamato dopo aver ottenuto un ld_run_caret_hit valido. */
-static void inline_begin(const ld_caret_hit* hit)
+#if LD_INLINE_DEBUG_LOG
+static void inline_log(const char *fmt, ...)
 {
-    if (!hit || hit->para_index < 0 || hit->run_index < 0)
-        return;
+    va_list ap;
+    fprintf(stderr, "[INLINE] ");
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
+#else
+static void inline_log(const char *fmt, ...)
+{
+    (void)fmt;
+}
+#endif
 
-    g_inline_active  = 1;
-    g_inline_para    = hit->para_index;
-    g_inline_run     = hit->run_index;
-    g_inline_offset     = hit->char_offset; /* offset nel paragrafo (spazio normalizzato) */
-    g_inline_run_offset = hit->run_char_offset; /* offset dentro il run */
-    if (g_inline_run_offset < 0) g_inline_run_offset = 0; /* FIX: hit-test potrebbe restituire -1 */
-    g_inline_coalesce = 0;
-    g_inline_pending_backspaces = 0;
-    /* Nuova sessione: la metrica del run precedente non e' piu' valida. */
-    g_inline_char_w = 0;
-    free(g_inline_buffer);
-    g_inline_buffer = NULL;
-    free(g_inline_last_char);
-    g_inline_last_char = NULL;
-    free(g_inline_run_text);
-    g_inline_run_text = NULL;
+/* ---------------- UTF-8 / UTF-16 helpers ---------------- */
 
-    /* Ottieni il testo del run dal paragrafo usando i boundary dal caret hit. */
-    char* para_text = ld_paragraph_get_text(g_doc, hit->para_index);
-    if (para_text && hit->run_char_start >= 0 && hit->run_char_end >= hit->run_char_start)
-    {
-        int run_len = hit->run_char_end - hit->run_char_start;
-        if (run_len > 0 && hit->run_char_start + run_len <= (int)strlen(para_text))
-        {
-            g_inline_run_text = (char*)malloc(run_len + 1);
-            if (g_inline_run_text)
-            {
-                memcpy(g_inline_run_text, para_text + hit->run_char_start, run_len);
-                g_inline_run_text[run_len] = '\0';
-            }
-        }
-        else if (run_len == 0)
-        {
-            /* Run vuoto: allocare un buffer vuoto perche' inline_apply_edit
-             * fa strlen(g_inline_run_text) e non gestisce NULL. */
-            g_inline_run_text = (char*)malloc(1);
-            if (g_inline_run_text) g_inline_run_text[0] = '\0';
-            g_inline_run_offset = 0;
-        }
-    }
-    if (para_text) ld_free_string(para_text);
-
-    // fprintf(stderr, "[INLINE] begin para=%d run=%d para_off=%d run_off=%d run_text='%s'\n",
-    //         g_inline_para, g_inline_run, g_inline_offset, g_inline_run_offset, g_inline_run_text ? g_inline_run_text : "");
+static int inline_dup_len(const char *s)
+{
+    return s ? (int)strlen(s) : 0;
 }
 
-/* Termina la modalita' inline. */
-static void inline_end(const char* why)
+static char *inline_dup(const char *s)
 {
-    if (!g_inline_active)
-        return;
-
-    // fprintf(stderr, "[INLINE] end (%s)\n", why ? why : "?");
-    g_inline_active  = 0;
-    g_inline_para    = -1;
-    g_inline_run     = -1;
-    g_inline_offset     = -1;
-    g_inline_run_offset = -1;
-    g_inline_coalesce = 0;
-    g_inline_pending_backspaces = 0;
-    g_inline_pending_op = -1;
-    g_inline_char_w = 0;
-    free(g_inline_buffer);
-    g_inline_buffer = NULL;
-    free(g_inline_run_text);
-    free(g_inline_last_char);
-    g_inline_run_text = NULL;
-    g_inline_last_char = NULL;
+    size_t n;
+    char *p;
+    if (!s)
+        return NULL;
+    n = strlen(s) + 1;
+    p = (char *)malloc(n);
+    if (p)
+        memcpy(p, s, n);
+    return p;
 }
 
-/* Restituisce l'offset in byte dell'inizio del codepoint UTF-8 precedente. */
+/* Offset in byte dell'inizio del codepoint precedente (backspace UTF-8 safe). */
 static int utf8_prev_char_offset(const char *s, int offset)
 {
     if (!s || offset <= 0)
@@ -103,456 +66,770 @@ static int utf8_prev_char_offset(const char *s, int offset)
     return pos;
 }
 
-/* Applica un singolo edit inline (insert/backspace) sul run corrente.
- * Chiama ld_run_edit sul worker thread (tramite job asincrono). */
+/* Offset in byte del codepoint successivo (Delete UTF-8 safe). */
+static int utf8_next_char_offset(const char *s, int offset, int len)
+{
+    if (!s || offset < 0 || offset >= len)
+        return len;
+    int pos = offset + 1;
+    while (pos < len && (((unsigned char)s[pos] & 0xC0) == 0x80))
+        pos++;
+    return pos;
+}
+
+static int utf8_count_chars(const char *s)
+{
+    int n = 0;
+    if (!s)
+        return 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; ++p)
+    {
+        if ((*p & 0xC0) != 0x80)
+            n++;
+    }
+    return n;
+}
+
+/* Codifica un codepoint Unicode in UTF-8 in out[5] (4 byte + NUL). */
+static int inline_utf16_to_utf8(unsigned cp, char out[5])
+{
+    if (cp <= 0x7F)
+    {
+        out[0] = (char)cp;
+        out[1] = '\0';
+        return 1;
+    }
+    if (cp <= 0x7FF)
+    {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        out[2] = '\0';
+        return 2;
+    }
+    if (cp <= 0xFFFF)
+    {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        out[3] = '\0';
+        return 3;
+    }
+    if (cp <= 0x10FFFF)
+    {
+        out[0] = (char)(0xF0 | (cp >> 18));
+        out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[3] = (char)(0x80 | (cp & 0x3F));
+        out[4] = '\0';
+        return 4;
+    }
+    return inline_utf16_to_utf8(0xFFFD, out); /* cp non valido */
+}
+
+#define INLINE_IS_HIGH_SURROGATE(w) (((w) >= 0xD800) && ((w) <= 0xDBFF))
+#define INLINE_IS_LOW_SURROGATE(w)  (((w) >= 0xDC00) && ((w) <= 0xDFFF))
+
+/* ---------------- snapshot / timer / stato pending ---------------- */
+
+static void inline_snapshot_clear(InlineSnapshot *s)
+{
+    if (!s)
+        return;
+    free(s->text);
+    ZeroMemory(s, sizeof(*s));
+}
+
+static void inline_snapshot_set(InlineSnapshot *s, const char *text,
+                                int para, int run, int run_off, int para_off,
+                                int caret_off, int caret_rs, int caret_re,
+                                int caret_x, unsigned epoch)
+{
+    if (!s)
+        return;
+    free(s->text);
+    s->text       = inline_dup(text ? text : "");
+    s->para       = para;
+    s->run        = run;
+    s->run_offset = run_off;
+    s->para_offset = para_off;
+    s->caret_offset = caret_off;
+    s->caret_run_start = caret_rs;
+    s->caret_run_end = caret_re;
+    s->caret_x    = caret_x;
+    s->epoch      = epoch;
+}
+
+/* Azzera solo i contatori del batch corrente: i totali di sessione restano. */
+static void inline_clear_batch(void)
+{
+    free(g_inline_buffer);
+    g_inline_buffer = NULL;
+    free(g_inline_last_char);
+    g_inline_last_char = NULL;
+    g_inline_pending_backspaces = 0;
+    g_inline_pending_op = -1;
+    g_inline_coalesce = 0;
+}
+
+static int inline_has_pending(void)
+{
+    if (g_inline_coalesce ||
+        (g_inline_buffer && g_inline_buffer[0]) ||
+        g_inline_pending_backspaces > 0 ||
+        g_inline_pending_op >= 0)
+        return 1;
+    /* Condizione finale di sicurezza: il shadow e' diverso dall'ultima
+     * baseline confermata (utili se i contatori sono stati azzerati dal
+     * flush while il job e' ancora in volo). */
+    return (g_inline_run_text && g_inline_applied.text &&
+            strcmp(g_inline_run_text, g_inline_applied.text) != 0);
+}
+
+static void inline_cancel_timer(void)
+{
+    if (!g_inline_timer)
+        return;
+    KillTimer(g_hwnd, g_inline_timer);
+    g_inline_timer = 0;
+    inline_log("timer cancelled");
+}
+
+static void inline_schedule_timer(void)
+{
+    if (!g_inline_active || !g_hwnd || !g_doc || g_inline_timer)
+        return;
+    g_inline_timer = SetTimer(g_hwnd, LD_INLINE_TIMER_ID,
+                              LD_INLINE_DEBOUNCE_MS, NULL);
+    if (g_inline_timer)
+        inline_log("timer opened id=%u delay=%dms",
+                   (unsigned)g_inline_timer, LD_INLINE_DEBOUNCE_MS);
+    else
+        inline_log("timer FAILED");
+}
+
+/* Invia (se possibile) un unico job con lo stato corrente del shadow.
+ * from_timer=1 -> chiamata da WM_TIMER; in caso di stato non IDLE non
+ * perde i dati: riapre il timer e riprova dopo un altro debounce. */
+static int inline_flush_pending(int from_timer)
+{
+    if (!g_inline_active || !g_doc || !g_inline_run_text)
+        return 0;
+
+    /* Il timer e' sempre consumed, anche se non c'e' nulla da spedire:
+     * SetTimer con hWnd e' periodico, non one-shot. */
+    inline_cancel_timer();
+
+    if (!inline_has_pending())
+    {
+        if (from_timer)
+            inline_log("timer fired with no accumulated chars: no job");
+        return 0;
+    }
+
+    if (g_load_active || g_render_busy || g_doc_state != DOC_STATE_IDLE ||
+        g_pending_apply_token != 0)
+    {
+        /* Un solo edit in volo al massimo. Il batch resta intatto. */
+        inline_log("flush deferred: state=%d busy=%d load=%d token=%u",
+                   g_doc_state, g_render_busy, g_load_active,
+                   g_pending_apply_token);
+        inline_schedule_timer();
+        return 0;
+    }
+
+    char *final_text = inline_dup(g_inline_run_text);
+    if (!final_text)
+        return 0;
+
+    /* Marker 0xFF 0xFF: il worker riconosce il testo completo del run. */
+    size_t text_len = strlen(final_text);
+    char *marked = (char *)malloc(text_len + 3);
+    if (!marked)
+    {
+        free(final_text);
+        return 0;
+    }
+    marked[0] = (char)0xFF;
+    marked[1] = (char)0xFF;
+    memcpy(marked + 2, final_text, text_len + 1);
+
+    Job *j = NULL;
+    if (g_worker_started)
+    {
+        j = alloc_job(JOB_RUN_APPLY_EDIT);
+        if (!j)
+        {
+            free(marked);
+            free(final_text);
+            return 0;
+        }
+    }
+
+    unsigned token = ++g_apply_token;
+    g_pending_apply_token = token;
+    g_pending_apply_epoch = g_layout_epoch;
+
+    /* Snapshot di cio' che il worker sta per ricevere: serve a riconoscere
+     * il risultato e a capire se l'utente ha digitato ancora nel frattempo. */
+    inline_snapshot_clear(&g_inline_job);
+    inline_snapshot_set(&g_inline_job, final_text,
+                        g_inline_para, g_inline_run,
+                        g_inline_run_offset, g_inline_offset,
+                        g_caret_offset, g_caret_run_start, g_caret_run_end,
+                        g_caret_x, g_pending_apply_epoch);
+    g_inline_jobs_total++;
+
+    inline_log("JOB SENT: chars_total=%u chars_batch=%d dels=%d "
+               "para=%d run=%d bytes=%d gen=%u epoch=%u token=%u "
+               "(jobs=%u / chars=%u)",
+               g_inline_chars_total,
+               utf8_count_chars(g_inline_buffer),
+               g_inline_pending_backspaces,
+               g_inline_para, g_inline_run, (int)text_len,
+               g_load_gen, g_pending_apply_epoch, token,
+               g_inline_jobs_total, g_inline_chars_total);
+
+    g_render_busy = 1;
+    g_render_doc = g_doc;
+    g_doc_state = DOC_STATE_APPLYING;
+
+    if (!g_worker_started)
+    {
+        /* Fallback sincrono: stesso percorso di JOB_RUN_APPLY_EDIT. */
+        EditResult r;
+        ZeroMemory(&r, sizeof(r));
+        r.doc   = g_doc;
+        r.gen   = g_load_gen;
+        r.epoch = g_pending_apply_epoch;
+        r.token = token;
+        r.ok = ld_run_set_text(g_doc, g_inline_para, g_inline_run, final_text);
+        if (!r.ok)
+        {
+            const char *err = ld_last_error();
+            lstrcpynA(r.error, err ? err : "", sizeof(r.error));
+        }
+        free(marked);
+        free(final_text);
+        on_edit_applied(&r); /* passa da inline_handle_result */
+    }
+    else
+    {
+        j->doc = g_doc;
+        j->gen = g_load_gen;
+        j->epoch = g_pending_apply_epoch;
+        j->token = token;
+        j->para_index = g_inline_para;
+        j->run_index = g_inline_run;
+        j->text = marked;
+        enqueue_job(j);
+        free(final_text);
+    }
+
+    inline_clear_batch();
+    return 1;
+}
+
+/* ---------------- sessione inline ---------------- */
+
+/* Avvia la modalita' inline sul run indicato dall'hit-test del caret. */
+static void inline_begin(const ld_caret_hit* hit)
+{
+    if (!hit || hit->para_index < 0 || hit->run_index < 0)
+        return;
+
+    /* Un cambio di run/paragrafo non e' coalescibile: chiude la sessione
+     * precedente dopo aver spedito (se possibile) il suo batch. */
+    if (g_inline_active)
+    {
+        int run_changed = (g_inline_para != hit->para_index ||
+                           g_inline_run != hit->run_index);
+        inline_log("begin on %d/%d (active=%d run_changed=%d pending=%d)",
+                   hit->para_index, hit->run_index, g_inline_active,
+                   run_changed, inline_has_pending());
+        if (run_changed && inline_has_pending() &&
+            !g_pending_apply_token && !g_render_busy && !g_load_active &&
+            g_doc_state == DOC_STATE_IDLE)
+        {
+            inline_flush_pending(0);
+        }
+        inline_end(run_changed ? "run changed" : "restart");
+    }
+
+    g_inline_active     = 1;
+    g_inline_para       = hit->para_index;
+    g_inline_run        = hit->run_index;
+    g_inline_offset     = hit->char_offset;       /* offset nel paragrafo */
+    g_inline_run_offset = hit->run_char_offset;   /* offset dentro il run */
+    if (g_inline_run_offset < 0)
+        g_inline_run_offset = 0; /* hit-test puo' restituire -1 */
+
+    inline_cancel_timer();
+    inline_clear_batch();
+    inline_snapshot_clear(&g_inline_applied);
+    inline_snapshot_clear(&g_inline_job);
+    free(g_inline_run_text);
+    g_inline_run_text = NULL;
+    free(g_inline_last_char);
+    g_inline_last_char = NULL;
+    g_inline_char_w = 0;
+    g_inline_high_surrogate = 0;
+    g_inline_chars_total = 0;
+    g_inline_jobs_total = 0;
+
+    /* Testo del run dal paragrafo, usando i boundary del caret hit. */
+    char *para_text = ld_paragraph_get_text(g_doc, hit->para_index);
+    if (para_text && hit->run_char_start >= 0 &&
+        hit->run_char_end >= hit->run_char_start)
+    {
+        int run_len = hit->run_char_end - hit->run_char_start;
+        if (run_len > 0 &&
+            hit->run_char_start + run_len <= (int)strlen(para_text))
+        {
+            g_inline_run_text = (char *)malloc((size_t)run_len + 1);
+            if (g_inline_run_text)
+            {
+                memcpy(g_inline_run_text, para_text + hit->run_char_start,
+                       (size_t)run_len);
+                g_inline_run_text[run_len] = '\0';
+            }
+        }
+        else if (run_len == 0)
+        {
+            /* Run vuoto: buffer vuoto, inline_apply_edit fa strlen(). */
+            g_inline_run_text = inline_dup("");
+            g_inline_run_offset = 0;
+        }
+    }
+    if (para_text)
+        ld_free_string(para_text);
+    if (!g_inline_run_text)
+        g_inline_run_text = inline_dup("");
+
+    /* Baseline: cio' che il documento contiene davvero a inizio sessione. */
+    inline_snapshot_set(&g_inline_applied, g_inline_run_text,
+                        g_inline_para, g_inline_run,
+                        g_inline_run_offset, g_inline_offset,
+                        g_caret_offset, g_caret_run_start, g_caret_run_end,
+                        g_caret_x, g_layout_epoch);
+
+    inline_log("begin done para=%d run=%d run_off=%d run_text='%s'",
+               g_inline_para, g_inline_run, g_inline_run_offset,
+               g_inline_run_text ? g_inline_run_text : "");
+}
+
+/* Termina la modalita' inline. I caratteri non ancora confermati vengono
+ * annullati (comportamento storico del buffer su Escape/click altrove);
+ * se un job e' in volo il documento ricevera' comunque il suo testo, quindi
+ * il shadow viene riportato a quel snapshot per non mostrare testo fantasma. */
+static void inline_end(const char *why)
+{
+    inline_cancel_timer();
+    if (!g_inline_active)
+        return;
+
+    int had_job = (g_pending_apply_token != 0 && g_inline_job.text != NULL);
+    int had_pending = inline_has_pending();
+
+    free(g_inline_run_text);
+    g_inline_run_text = inline_dup(had_job && g_inline_job.text
+                                   ? g_inline_job.text
+                                   : (g_inline_applied.text
+                                      ? g_inline_applied.text : ""));
+
+    inline_snapshot_clear(&g_inline_job);
+    inline_snapshot_clear(&g_inline_applied);
+    inline_clear_batch();
+    g_inline_high_surrogate = 0;
+
+    g_inline_active     = 0;
+    g_inline_para       = -1;
+    g_inline_run        = -1;
+    g_inline_offset     = -1;
+    g_inline_run_offset = -1;
+    g_inline_coalesce   = 0;
+    g_inline_pending_backspaces = 0;
+    g_inline_pending_op = -1;
+    g_inline_char_w     = 0;
+
+    inline_log("end (%s): pending=%d job_in_flight=%d chars=%u jobs=%u",
+               why ? why : "?", had_pending, had_job,
+               g_inline_chars_total, g_inline_jobs_total);
+}
+
+/* ---------------- edit locale + scheduling ---------------- */
+
+static int inline_caret_step(void)
+{
+    return g_inline_char_w > 0 ? g_inline_char_w : 8;
+}
+
+/* Applica un singolo edit SOLO al shadow locale e (ri)apre il timer.
+ * Nessun JOB_RUN_APPLY_EDIT e nessun request_render per carattere. */
 static void inline_apply_edit(int op, const char* text)
 {
     if (!g_inline_active || !g_doc || g_inline_para < 0 || g_inline_run < 0)
         return;
 
-    if (op == LD_INLINE_OP_BACKSPACE)
-    {
-        if (!g_inline_run_text || g_inline_run_offset <= 0)
-            return;
-    }
-
-    /* Se il worker e' occupato, accumula il tasto per coalescing. */
-    if (g_render_busy || g_doc_state != DOC_STATE_IDLE)
-    {
-        fprintf(stderr, "[CARET line 100] busy %d\n", op);
-        if (op == LD_INLINE_OP_INSERT && text && *text)
-        {
-            size_t old_len = g_inline_buffer ? strlen(g_inline_buffer) : 0;
-            size_t add_len = strlen(text);
-            char* new_buf = (char*)realloc(g_inline_buffer, old_len + add_len + 1);
-            if (new_buf)
-            {
-                g_inline_buffer = new_buf;
-                memcpy(g_inline_buffer + old_len, text, add_len + 1);
-                g_inline_coalesce = 1;
-            }
-        }
-        else if (op == LD_INLINE_OP_BACKSPACE)
-        {
-            /* Per backspace non accumuliamo nel buffer: accodiamo un job
-             * separato con op=1. Il coalescing per backspace e' piu' delicato
-             * perche' l'offset cambia. Per il prototipo lo mandiamo subito. */
-            g_inline_pending_backspaces++;
-        }
+    if (!g_inline_run_text)
+        g_inline_run_text = inline_dup("");
+    if (!g_inline_run_text)
         return;
-    }
 
-    /* Manda il job al worker. Usiamo lo stesso meccanismo di JOB_RUN_APPLY_EDIT
-     * ma con ld_run_edit invece di ld_run_set_text. Per ora usiamo un job
-     * sincrono (fallback) per semplicita', poi lo renderemo asincrono. */
+    int len = (int)strlen(g_inline_run_text);
+    int step = inline_caret_step();
 
-    if (!g_worker_started)
+    if (op == LD_INLINE_OP_INSERT)
     {
-        fprintf(stderr, "[CARET line 128] sync %d\n", op);
-        /* Fallback sincrono: usa ld_run_set_text con testo completo del run */
-        int ok = 0;
-        if (g_inline_run_text)
-        {
-            if (op == LD_INLINE_OP_INSERT && text) //inizio blocco per offset in run
-            {
-                int run_len = (int)strlen(g_inline_run_text);
-                int txt_len = (int)strlen(text);
-                int ins_pos = (g_inline_run_offset >= 0 && g_inline_run_offset <= run_len) ? g_inline_run_offset : run_len;
-                int new_len = run_len + txt_len + 1;
-                char* new_text = (char*)malloc(new_len);
-                if (new_text)
-                {
-                    memcpy(new_text, g_inline_run_text, ins_pos);
-                    memcpy(new_text + ins_pos, text, txt_len);
-                    memcpy(new_text + ins_pos + txt_len, g_inline_run_text + ins_pos, run_len - ins_pos); //Sync insert Grok corretto
-                    new_text[new_len - 1] = '\0';
-                    ok = ld_run_set_text(g_doc, g_inline_para, g_inline_run, new_text);
-                    if (ok)
-                    {
-                        free(g_inline_run_text);
-                        free(g_inline_last_char);
-                        g_inline_run_text = new_text;
-                        g_inline_run_offset += txt_len;
-                    }
-                    else
-                    {
-                        free(new_text);
-                    }
-                }
-            }
-            else if (op == LD_INLINE_OP_BACKSPACE && strlen(g_inline_run_text) > 0)
-            {
-                int len = (int)strlen(g_inline_run_text);
-                int del_pos = utf8_prev_char_offset(g_inline_run_text, g_inline_run_offset);
-                int del_len = g_inline_run_offset - del_pos;
-                if (del_pos >= 0 && del_len > 0 && del_pos + del_len <= len)
-                {
-                    memmove(g_inline_run_text + del_pos, g_inline_run_text + del_pos + del_len, (size_t)(len - (del_pos + del_len) + 1));
-                    ok = ld_run_set_text(g_doc, g_inline_para, g_inline_run, g_inline_run_text);
-                    g_inline_run_offset = del_pos;
-                    if (g_inline_offset >= del_len) g_inline_offset -= del_len;
-                    if (g_caret_offset >= del_len) g_caret_offset -= del_len;
-                    if (g_caret_run_end >= del_len) g_caret_run_end -= del_len;
-                }
-            }
-        }
-        
-        if (ok)
-        {
-            fprintf(stderr, "[CARET sinc line 175] sync ok x=%d\n", g_caret_x);
-            /* Aggiorna offset caret locale */
-            if (op == LD_INLINE_OP_INSERT && text)
-            {
-                g_inline_offset += (int)strlen(text);
-                /* g_inline_run_offset e' gia' stato aggiornato sopra nel ramo ok */
-            }
-            else if (op == LD_INLINE_OP_BACKSPACE && g_inline_offset > 0)
-            {
-                g_inline_offset -= 1;
-                if (g_inline_run_offset > 0) g_inline_run_offset -= 1;
-            }
-
-            /* Avanza offset caret globale prima di salvare */
-            if (op == LD_INLINE_OP_INSERT && text)
-            {
-                int add_len = (int)strlen(text);
-                g_caret_offset += add_len;
-                g_caret_run_end += add_len;
-            }
-            else if (op == LD_INLINE_OP_BACKSPACE)
-            {
-                if (g_caret_offset > 0) g_caret_offset -= 1;
-                if (g_caret_run_end > g_caret_run_start) g_caret_run_end -= 1;
-            }
-
-            /* Richiedi re-layout e riancora caret */
-            g_layout_complete      = 0;
-            g_first_rendered_page  = -1;
-            g_last_rendered_page   = -1;
-            g_layout_epoch++;
-
-            /* Salva e ripristina il caret per inline_reanchor_caret() */
-            {
-                int _sp = g_caret_para, _sr = g_caret_run, _so = g_caret_offset;
-                int _rs = g_caret_run_start, _re = g_caret_run_end;
-                int _sx = g_caret_x, _sy = g_caret_y, _sw = g_caret_w, _sh = g_caret_h;
-                viewer_caret_clear();
-                g_caret_valid  = 1;
-                g_caret_para   = _sp; g_caret_run    = _sr;
-                g_caret_offset = _so;
-                g_caret_run_start = _rs; g_caret_run_end = _re;
-                g_caret_x      = _sx;   g_caret_y      = _sy;
-                g_caret_w      = _sw > 0 ? _sw : 1;
-                g_caret_h      = _sh;
-            }
-            request_render(layout_content_width());
-            InvalidateRect(g_hwnd, NULL, TRUE);
-        }
-        return;
-    }
-
-    /* Job asincrono: usa ld_run_set_text con testo completo del run. */
-    {
-        fprintf(stderr, "[CARET line 229] job op=%d x=%d\n", op, g_caret_x);
-        Job* j = alloc_job(JOB_RUN_APPLY_EDIT); /* riutilizziamo lo stesso tipo */
-        if (!j)
+        if (!text || !*text)
             return;
-        j->doc = g_doc;
-        j->gen = g_load_gen;
-        j->epoch = g_layout_epoch;
-        j->token = ++g_apply_token;
-        j->para_index = g_inline_para;
-        j->run_index = g_inline_run;
-        
-        /* Calcola il nuovo testo completo del run */
-        char* new_run_text = NULL;
-        if (g_inline_run_text)
-        {
-            if (op == LD_INLINE_OP_INSERT && text)
-            {
-                int run_len = (int)strlen(g_inline_run_text);
-                int txt_len = (int)strlen(text);
-                int ins_pos = (g_inline_run_offset >= 0 && g_inline_run_offset <= run_len) ? g_inline_run_offset : run_len;
-                int new_len = run_len + txt_len + 1;
-                new_run_text = (char*)malloc(new_len);
-                if (new_run_text)
-                {
-                    memcpy(new_run_text, g_inline_run_text, ins_pos);
-                    memcpy(new_run_text + ins_pos, text, txt_len);
-                    //memcpy(new_run_text+ins_pos, g_inline_run_text + ins_pos, run_len - ins_pos); //aggiunto da Grok ma non va bene
-                    memcpy(new_run_text + ins_pos + txt_len, g_inline_run_text + ins_pos, run_len - ins_pos); //fix di Pi a codice Grok
-                    new_run_text[new_len - 1] = '\0';
-                }
-            }
-            else if (op == LD_INLINE_OP_BACKSPACE && strlen(g_inline_run_text) > 0)
-            {
-                int len = (int)strlen(g_inline_run_text);
-                int del_pos = utf8_prev_char_offset(g_inline_run_text, g_inline_run_offset);
-                int del_len = g_inline_run_offset - del_pos;
-                if (del_pos >= 0 && del_len > 0 && del_pos + del_len <= len)
-                {
-                    new_run_text = (char*)malloc(len + 1);
-                    if (new_run_text)
-                    {
-                        memcpy(new_run_text, g_inline_run_text, del_pos);
-                        memcpy(new_run_text + del_pos, g_inline_run_text + del_pos + del_len,
-                               (size_t)(len - (del_pos + del_len) + 1)); /* incluso '\0' */
-                    }
-                }
-            }
-        }
-        
-        j->doc = g_doc;
-        j->gen = g_load_gen;
-        j->epoch = g_layout_epoch;
-        j->token = ++g_apply_token;
-        j->para_index = g_inline_para;
-        j->run_index = g_inline_run;
-        /* Aggiungi marker 0xFF 0xFF per identificare edit inline */
-        char* marked_text = NULL;
-        if (new_run_text)
-        {
-            int marked_len = strlen(new_run_text) + 2 + 1;
-            marked_text = (char*)malloc(marked_len);
-            if (marked_text)
-            {
-                marked_text[0] = (char)0xFF;
-                marked_text[1] = (char)0xFF;
-                memcpy(marked_text + 2, new_run_text, strlen(new_run_text) + 1);
-            }
-            free(new_run_text);
-        }
-        
-        if (!marked_text)
-        {
-            free(j);
+
+        int add_len = inline_dup_len(text);
+        int ins_pos = (g_inline_run_offset >= 0 && g_inline_run_offset <= len)
+                        ? g_inline_run_offset : len;
+        char *new_text = (char *)malloc((size_t)len + (size_t)add_len + 1);
+        if (!new_text)
             return;
+        memcpy(new_text, g_inline_run_text, (size_t)ins_pos);
+        memcpy(new_text + ins_pos, text, (size_t)add_len);
+        memcpy(new_text + ins_pos + add_len,
+               g_inline_run_text + ins_pos, (size_t)(len - ins_pos));
+        new_text[len + add_len] = '\0';
+
+        free(g_inline_run_text);
+        g_inline_run_text = new_text;
+        g_inline_run_offset = ins_pos + add_len;
+        g_inline_offset += add_len;
+        g_caret_offset += add_len;
+        g_caret_run_end += add_len;
+        /* Stima visiva: avanza di un passo-font per codepoint UTF-8. */
+        g_caret_x += step * utf8_count_chars(text);
+
+        size_t old_len = g_inline_buffer ? strlen(g_inline_buffer) : 0;
+        char *new_buf = (char *)realloc(g_inline_buffer,
+                                        old_len + (size_t)add_len + 1);
+        if (new_buf)
+        {
+            g_inline_buffer = new_buf;
+            memcpy(g_inline_buffer + old_len, text, (size_t)add_len + 1);
         }
-
-        j->text = marked_text;  /* Testo completo del run con marker */
-
-        // fprintf(stderr, "[INLINE] enqueue job para=%d run=%d op=%d new_text_len=%d\n",
-        //         g_inline_para, g_inline_run, op, new_run_text ? (int)strlen(new_run_text) : 0);
-
-        /* Memorizza l'operazione per aggiornare l'offset al completamento */
-        g_inline_pending_op = op;
-        /* Memorizza l'ultimo carattere inserito per aggiornare g_inline_run_text */
         free(g_inline_last_char);
-        g_inline_last_char = text ? strdup(text) : NULL;
+        g_inline_last_char = inline_dup(text);
+        g_inline_chars_total += (unsigned)utf8_count_chars(text);
 
-        g_pending_apply_token = j->token;
-        g_doc_state = DOC_STATE_APPLYING;
-        g_render_busy = 1;
-        g_render_doc = g_doc;
-        enqueue_job(j);
+        inline_log("INSERT '%s' bytes=%d at run_off=%d -> len=%d x=%d",
+                   text, add_len, ins_pos, len + add_len, g_caret_x);
     }
+    else if (op == LD_INLINE_OP_BACKSPACE || op == LD_INLINE_OP_DELETE)
+    {
+        int del_pos, del_len;
+        if (op == LD_INLINE_OP_BACKSPACE)
+        {
+            if (g_inline_run_offset <= 0 || len <= 0)
+            {
+                inline_log("BACKSPACE stop (empty run / start of run)");
+                return; /* run vuoto o inizio run: stop, nessun job */
+            }
+            del_pos = utf8_prev_char_offset(g_inline_run_text,
+                                            g_inline_run_offset);
+            del_len = g_inline_run_offset - del_pos;
+        }
+        else
+        {
+            if (g_inline_run_offset >= len || len <= 0)
+            {
+                inline_log("DELETE stop (end of run)");
+                return;
+            }
+            del_pos = g_inline_run_offset;
+            del_len = utf8_next_char_offset(g_inline_run_text, del_pos, len)
+                      - del_pos;
+        }
+        if (del_len <= 0 || del_pos < 0 || del_pos + del_len > len)
+            return;
+
+        /* Cancellazione sempre a confine di codepoint: del_len e' un
+         *'intera sequenza UTF-8, quindi non si taglia mai a meta'. */
+        memmove(g_inline_run_text + del_pos,
+                g_inline_run_text + del_pos + del_len,
+                (size_t)(len - (del_pos + del_len) + 1));
+        if (op == LD_INLINE_OP_BACKSPACE)
+            g_inline_run_offset = del_pos;
+
+        g_inline_offset -= del_len;
+        if (g_inline_offset < 0) g_inline_offset = 0;
+        g_caret_offset -= del_len;
+        if (g_caret_offset < 0) g_caret_offset = 0;
+        g_caret_run_end -= del_len;
+        if (g_caret_run_end < g_caret_run_start)
+            g_caret_run_end = g_caret_run_start;
+
+        if (op == LD_INLINE_OP_BACKSPACE)
+        {
+            g_caret_x -= step; /* stima: un codepoint rimosso */
+            if (g_caret_x < 0) g_caret_x = 0;
+        }
+
+        g_inline_pending_backspaces++; /* conta i codepoint cancellati */
+        inline_log("%s bytes=%d at run_off=%d -> len=%d x=%d",
+                   op == LD_INLINE_OP_BACKSPACE ? "BACKSPACE" : "DELETE",
+                   del_len, del_pos, len - del_len, g_caret_x);
+    }
+    else
+    {
+        return;
+    }
+
+    g_inline_pending_op = op;
+    g_inline_coalesce = 1;
+
+    /* Nessun refresh del layout: solo il caret viene ridisegnato nella
+     * posizione stimata. Il re-layout avverra' dopo il job coalescito. */
+    InvalidateRect(g_hwnd, NULL, FALSE);
+    inline_schedule_timer();
+}
+
+/* ---------------- risultato del worker ---------------- */
+
+/* Result con token corrente ma epoch/run diversi: non toccare il testo,
+ * ma rilascia comunque lo stato di APPLYING per non bloccare la UI. */
+static void inline_release_orphan_result(const EditResult *r)
+{
+    inline_log("ORPHAN result token=%u epoch=%u/%u run=%d/%d vs %d/%d",
+               r->token, r->epoch, g_inline_job.epoch,
+               g_inline_job.para, g_inline_job.run,
+               g_inline_para, g_inline_run);
+    g_pending_apply_token = 0;
+    g_pending_apply_epoch = 0;
+    g_render_busy = 0;
+    g_render_doc = NULL;
+    g_doc_state = DOC_STATE_IDLE;
+    inline_snapshot_clear(&g_inline_job);
+    g_layout_complete = 0;
+    g_first_rendered_page = -1;
+    g_last_rendered_page = -1;
+    g_render_pending_width = -1;
+    g_render_pending_first_page = -1;
+    g_render_pending_last_page = -1;
+    g_layout_epoch++;
+    request_render(layout_content_width());
+    InvalidateRect(g_hwnd, NULL, TRUE);
+}
+
+/* Riporta il shadow all'ultima baseline confermata (edit fallito). */
+static void inline_restore_applied(void)
+{
+    inline_cancel_timer();
+    free(g_inline_run_text);
+    g_inline_run_text = inline_dup(g_inline_applied.text
+                                   ? g_inline_applied.text : "");
+    g_inline_para       = g_inline_applied.para;
+    g_inline_run        = g_inline_applied.run;
+    g_inline_run_offset = g_inline_applied.run_offset;
+    g_inline_offset     = g_inline_applied.para_offset;
+    g_caret_offset      = g_inline_applied.caret_offset;
+    g_caret_run_start   = g_inline_applied.caret_run_start;
+    g_caret_run_end     = g_inline_applied.caret_run_end;
+    g_caret_x           = g_inline_applied.caret_x;
+    inline_snapshot_clear(&g_inline_job);
+    inline_clear_batch();
 }
 
 /* Gestisce il risultato di un edit inline (chiamato da on_edit_applied). */
 static void inline_handle_result(EditResult* r)
 {
-    if (!r || !g_inline_active)
+    if (!r || !g_inline_active || !g_pending_apply_token)
         return;
 
-    if (r->doc != g_doc || r->gen != g_load_gen || r->token != g_pending_apply_token)
-        return; /* stale */
+    /* Stale: documento, generazione o token diversi -> si continua ad
+     * attendere il risultato del job corrente. */
+    if (r->doc != g_doc || r->gen != g_load_gen ||
+        r->token != g_pending_apply_token)
+        return;
+
+    /* Verifica esplicita di epoch e di run/paragrafo: un risultato che
+     * appartiene a un layout o a un run diverso non puo' aggiornare il
+     * shadow corrente. */
+    if (r->epoch != g_pending_apply_epoch ||
+        r->epoch != g_inline_job.epoch ||
+        g_inline_job.para != g_inline_para ||
+        g_inline_job.run != g_inline_run ||
+        !g_inline_job.text)
+    {
+        inline_release_orphan_result(r);
+        return;
+    }
 
     g_pending_apply_token = 0;
+    g_pending_apply_epoch = 0;
     g_render_busy = 0;
     g_render_doc = NULL;
+    g_doc_state = DOC_STATE_IDLE;
 
     if (r->ok)
     {
-        /* Ripristina lo stato del documento per permettere il disegno */
-        g_doc_state = DOC_STATE_IDLE;
+        /* Conferma: la baseline diventa cio' che il worker ha applicato. */
+        InlineSnapshot confirmed = g_inline_job;
+        ZeroMemory(&g_inline_job, sizeof(g_inline_job)); /* ownership transfer */
+        free(g_inline_applied.text);
+        g_inline_applied = confirmed;
 
-        /* L'edit e' riuscito: riancora il caret facendo un nuovo caret hit-test
-         * alla posizione aggiornata. Per ora ricomputiamo l'offset locale e
-         * richiediamo un nuovo caret hit-test asincrono. */
-        // fprintf(stderr, "[INLINE] edit ok, re-anchoring caret\n");
+        /* L'utente puo' aver digitato mentre il job era in volo: il shadow
+         * locale e' piu' avanti. In quel caso NON viene riscritto: resta
+         * pending e verra' spedito dal timer con un secondo job. */
+        int has_newer = (g_inline_run_text &&
+                         strcmp(g_inline_run_text, g_inline_applied.text) != 0);
+        if (has_newer)
+        {
+            inline_log("edit ok token=%u: newer local text, re-arm timer",
+                       r->token);
+            inline_schedule_timer();
+        }
+        else
+        {
+            inline_log("edit ok token=%u: batch confirmed, clear",
+                       r->token);
+            inline_clear_batch();
+        }
 
-        /* Reset cache paginazione per forzare il re-layout. */
-        g_layout_complete      = 0;
-        g_first_rendered_page  = -1;
-        g_last_rendered_page   = -1;
+        /* Reset paginazione e UN solo re-layout (on_render_done fa il
+         * re-anchor del caret una sola volta). */
+        g_layout_complete = 0;
+        g_first_rendered_page = -1;
+        g_last_rendered_page = -1;
+        g_render_pending_width = -1;
+        g_render_pending_first_page = -1;
+        g_render_pending_last_page = -1;
         g_layout_epoch++;
 
-        /* Salva lo stato del caret prima di cancellarlo, poi lo ripristina
-         * subito: inline_reanchor_caret() (chiamata da on_render_done)
-         * richiede g_caret_valid == 1 per lavorare.
-         *
-         * g_caret_x viene aggiornato qui sotto solo come stima visiva
-         * provvisoria: il re-anchor usa JOB_CARET_POS sull'offset logico,
-         * quindi la DLL restituisce la posizione esatta e la sovrascrive. */
-        int saved_caret_para     = g_caret_para;
-        int saved_caret_run      = g_caret_run;
-        int saved_caret_offset   = g_caret_offset;
-        int saved_caret_rs       = g_caret_run_start;
-        int saved_caret_re       = g_caret_run_end;
-        /* caret_x e caret_y NON vengono salvati/ripristinati qui:
-         * caret_x viene aggiornato in-place dalla stima qui sotto;
-         * caret_y non cambia durante la modalita' inline. */
-        int saved_caret_y        = g_caret_y;
-        int saved_caret_w        = g_caret_w;
-        int saved_caret_h        = g_caret_h;
+        /* Salva lo stato logico del caret (g_caret_x resta la stima
+         * calcolata durante il typing; il re-anchor la sostituisce
+         * con la posizione esatta calcolata dalla DLL). */
+        int sp = g_caret_para, sr = g_caret_run, so = g_caret_offset;
+        int rs = g_caret_run_start, re = g_caret_run_end;
+        int sy = g_caret_y, sw = g_caret_w, sh = g_caret_h;
         viewer_caret_clear();
-
-        fprintf(stderr, "[CARET line 375] res x=%d\n", g_caret_x);
-        g_caret_valid  = 1;
-        g_caret_para   = saved_caret_para;
-        g_caret_run    = saved_caret_run;
-        g_caret_offset = saved_caret_offset;
-        g_caret_run_start = saved_caret_rs;
-        g_caret_run_end   = saved_caret_re;
-        /* g_caret_x is NOT restored from saved state: it stays at the
-         * current value (the provisional estimate applied below). The
-         * re-anchor (JOB_CARET_POS) replaces it with the exact position
-         * computed by the DLL from the logical run offset. */
-        g_caret_y      = saved_caret_y;
-        g_caret_w      = saved_caret_w > 0 ? saved_caret_w : 1;
-        g_caret_h      = saved_caret_h;
-
-        /* Update the local run text for the next edit.
-         * g_doc_state is already DOC_STATE_IDLE, so request_render
-         * actually starts (not queued as pending). on_render_done
-         * calls inline_reanchor_caret which issues JOB_CARET_POS;
-         * the DLL (with text_width_cache cleared by ld_render after
-         * a content change) returns the exact post-edit position. */
-        if (g_inline_run_text && g_inline_pending_op >= 0)
-        {
-            if (g_inline_pending_op == LD_INLINE_OP_INSERT && g_inline_last_char)
-            {
-                /* 
-                 * CRITICAL REGRESSION FIX:
-                 * When inserting characters (especially mid-run or sequentially), we must insert 
-                 * the new text at the exact cursor position (`ins_pos`) rather than blindly 
-                 * appending it to the end of the run buffer. 
-                 * Advancing offsets first and then slicing the buffer via memcpy ensures 
-                 * correct character ordering and prevents text inversion/overwriting issues.
-                 */
-                int old_len = (int)strlen(g_inline_run_text);
-                int add_len = (int)strlen(g_inline_last_char);
-                
-                g_inline_run_offset += add_len;
-                g_caret_offset += add_len;
-                g_caret_run_end += add_len;
-
-                int ins_pos = g_inline_run_offset - add_len;
-                if (ins_pos < 0) ins_pos = 0;
-                if (ins_pos > old_len) ins_pos = old_len;
-
-                char* new_text = (char*)malloc(old_len + add_len + 1);
-                if (new_text)
-                {
-                    memcpy(new_text, g_inline_run_text, ins_pos);
-                    memcpy(new_text + ins_pos, g_inline_last_char, add_len);
-                    memcpy(new_text + ins_pos + add_len, g_inline_run_text + ins_pos, old_len - ins_pos);
-                    new_text[old_len + add_len] = '\0';
-
-                    free(g_inline_run_text);
-                    g_inline_run_text = new_text;
-                }
-                /* FIX char_w CARET: use the font-derived width instead of g_caret_x / pre_edit_len. */
-                {
-                    int step = g_inline_char_w > 0 ? g_inline_char_w : 8; /* FIX char_w CARET: fall back to the measured 8px step when no font metric is available. */
-                    g_caret_x += step * add_len; /* FIX char_w CARET: advance by the same constant font metric on every keystroke. */
-                    /*Attention: the value to monitor is step, if decreases something is wrong */
-                    fprintf(stderr, "[CARET inline] est+ step=%d x=%d\n", step, g_caret_x); /* FIX char_w CARET: log the stable step for verification. */
-                }
-                free(g_inline_last_char);
-                g_inline_last_char = NULL;
-            }
-            else if (g_inline_pending_op == LD_INLINE_OP_BACKSPACE)
-            {
-                int len = (int)strlen(g_inline_run_text);
-                int del_pos = utf8_prev_char_offset(g_inline_run_text, g_inline_run_offset);
-                int del_len = g_inline_run_offset - del_pos;
-                if (del_len > 0 && del_pos >= 0 && del_pos + del_len <= len)
-                {
-                    memmove(g_inline_run_text + del_pos,
-                            g_inline_run_text + del_pos + del_len,
-                            (size_t)(len - (del_pos + del_len) + 1));
-                    g_inline_run_offset = del_pos;
-                    if (g_caret_offset >= del_len) g_caret_offset -= del_len;
-                    if (g_caret_run_end - del_len >= g_caret_run_start) g_caret_run_end -= del_len;
-
-                    int step = g_inline_char_w > 0 ? g_inline_char_w : 8;
-                    g_caret_x -= step;
-                    if (g_caret_x < 0) g_caret_x = 0;
-                }
-            }
-        }
+        g_caret_valid = 1;
+        g_caret_para = sp;
+        g_caret_run = sr;
+        g_caret_offset = so;
+        g_caret_run_start = rs;
+        g_caret_run_end = re;
+        g_caret_y = sy;
+        g_caret_w = sw > 0 ? sw : 1;
+        g_caret_h = sh;
 
         request_render(layout_content_width());
         InvalidateRect(g_hwnd, NULL, TRUE);
-        fprintf(stderr, "[CARET line 504] done x=%d\n", g_caret_x);
+        inline_log("EDIT COMPLETE token=%u -> request_render (jobs=%u chars=%u)",
+                   r->token, g_inline_jobs_total, g_inline_chars_total);
     }
     else
     {
-        // fprintf(stderr, "[INLINE] edit failed: %s\n", r->error);
+        inline_log("EDIT FAILED token=%u: '%s' -> restore baseline",
+                   r->token, r->error[0] ? r->error : "");
+        inline_restore_applied();
         g_doc_state = DOC_STATE_IDLE;
-        g_inline_pending_backspaces = 0;
         MessageBoxA(g_hwnd, r->error[0] ? r->error : "Edit inline fallito",
                     "d2dview", MB_OK | MB_ICONERROR);
         resume_pending_render();
     }
 }
 
-/* Gestione tasti per edit inline: caratteri stampabili + Backspace.
+/* Callback WM_TIMER: unica autorita' che decide il flush del batch. */
+static void inline_on_timer(void)
+{
+    if (!g_inline_active)
+    {
+        inline_cancel_timer();
+        return;
+    }
+    inline_flush_pending(1);
+}
+
+/* ---------------- input ---------------- */
+
+static void inline_emit_codepoint(unsigned cp)
+{
+    char utf8[5] = {0};
+    int len = inline_utf16_to_utf8(cp, utf8);
+    if (len > 0)
+        inline_apply_edit(LD_INLINE_OP_INSERT, utf8);
+}
+
+/* Gestione tasti per edit inline: Backspace, Delete, Escape.
  * Ritorna 1 se il tasto e' stato gestito (edit inline attivo), 0 altrimenti. */
 static int inline_handle_key(WPARAM wp, LPARAM lp)
 {
+    (void)lp;
     if (!g_inline_active || !g_doc)
         return 0;
 
-    /* Backspace */
     if (wp == VK_BACK)
     {
         inline_apply_edit(LD_INLINE_OP_BACKSPACE, NULL);
         return 1;
     }
-
-    /* Escape: esce dalla modalita' inline */
+    if (wp == VK_DELETE)
+    {
+        inline_apply_edit(LD_INLINE_OP_DELETE, NULL);
+        return 1;
+    }
     if (wp == VK_ESCAPE)
     {
+        /* Annulla i caratteri non confermati; se un job e' partito il suo
+         * effetto resta (stesso comportamento del vecchio buffer). */
         inline_end("escape");
         InvalidateRect(g_hwnd, NULL, FALSE);
         return 1;
     }
-
-    /* Caratteri stampabili: TranslateMessage ha gia' generato WM_CHAR.
-     * Qui intercettiamo solo WM_KEYDOWN per Backspace. Gli altri tasti
-     * (frecce, Delete, Enter, Tab) non sono supportati nel prototipo. */
     return 0;
 }
 
-/* Gestione WM_CHAR per caratteri stampabili. */
+/* Gestione WM_CHAR: UTF-16 -> UTF-8, inclusa la coppia surrogata per
+ * gli emoji fuori dal BMP. */
 static int inline_handle_char(WPARAM wp)
 {
     if (!g_inline_active || !g_doc)
         return 0;
-
-    /* Ignora caratteri di controllo (già gestiti da WM_KEYDOWN) */
     if (wp < 32)
         return 0;
 
-    /* Converti WPARAM (UTF-16 code unit) in UTF-8.
-     * Per il prototipo assumiamo BMP (singolo WCHAR). */
     WCHAR wc = (WCHAR)wp;
-    char utf8[5] = {0};
-    int len = WideCharToMultiByte(CP_UTF8, 0, &wc, 1, utf8, sizeof(utf8), NULL, NULL);
-    if (len > 0 && len < (int)sizeof(utf8))
+
+    if (g_inline_high_surrogate)
     {
-        inline_apply_edit(LD_INLINE_OP_INSERT, utf8);
+        if (INLINE_IS_LOW_SURROGATE(wc))
+        {
+            unsigned cp = 0x10000u +
+                          (((unsigned)g_inline_high_surrogate - 0xD800u) << 10) +
+                          ((unsigned)wc - 0xDC00u);
+            g_inline_high_surrogate = 0;
+            inline_emit_codepoint(cp); /* emoji: 4 byte UTF-8 */
+            return 1;
+        }
+        /* Surrogato alto non seguito da uno basso: emissione di U+FFFD. */
+        inline_emit_codepoint(0xFFFD);
+        g_inline_high_surrogate = 0;
+    }
+
+    if (INLINE_IS_HIGH_SURROGATE(wc))
+    {
+        g_inline_high_surrogate = wc;
+        return 1; /* attende il low surrogate del prossimo WM_CHAR */
+    }
+    if (INLINE_IS_LOW_SURROGATE(wc))
+    {
+        inline_emit_codepoint(0xFFFD); /* low surrogate isolato */
         return 1;
     }
-    return 0;
+
+    inline_emit_codepoint((unsigned)wc); /* accento, CJK, BMP */
+    return 1;
 }
 
 /* Riancora il caret dopo un edit completato (layout finito).
  * Chiede alla DLL la posizione esatta dell'offset logico corrente
- * (ld_run_caret_pos): nessun hit-test per coordinate, quindi nessun drift
- * verso destra con font proporzionali stretti/larghi o run misti. */
+ * (ld_run_caret_pos): nessun hit-test per coordinate. */
 static void inline_reanchor_caret(void)
 {
     if (!g_inline_active || !g_doc || !g_caret_valid)
@@ -560,7 +837,7 @@ static void inline_reanchor_caret(void)
 
     if (!g_worker_started || g_doc_state != DOC_STATE_IDLE)
     {
-        fprintf(stderr, "[CARET] reanchor skip\n");
+        inline_log("reanchor skip");
         return;
     }
 
@@ -575,4 +852,6 @@ static void inline_reanchor_caret(void)
     j->run_char_offset = g_inline_run_offset;
     g_doc_state = DOC_STATE_HITTEST;
     enqueue_job(j);
+    inline_log("reanchor: para=%d run=%d off=%d",
+               g_inline_para, g_inline_run, g_inline_run_offset);
 }

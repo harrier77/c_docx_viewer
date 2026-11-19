@@ -401,11 +401,13 @@ static void handle_caret_result(CaretHitResult *r)
         g_doc_state = DOC_STATE_IDLE;
     resume_pending_render();
 
-    log_msg("[CARET viewer line 404] hit=%d para=%d run=%d off=%d inRun=%d [%d..%d) caret=%d,%d %dx%d (doc %d,%d)\n",
+#if CONSOLE_LOGGING
+    fprintf(stderr, "[CARET] hit=%d para=%d run=%d off=%d inRun=%d [%d..%d) caret=%d,%d %dx%d (doc %d,%d)\n",
             r->hit, r->info.para_index, r->info.run_index, r->info.char_offset,
             r->info.run_char_offset, r->info.run_char_start, r->info.run_char_end,
             r->info.caret_x, r->info.caret_y, r->info.caret_w, r->info.caret_h,
             r->doc_x, r->doc_y);
+#endif
 
     /* Doppio click sinistro: il primo click del doppio ha accodato il job
      * del caret (al posto del JOB_RUN_HIT_TEST di prima); arrivato l'esito
@@ -435,7 +437,9 @@ static void handle_caret_result(CaretHitResult *r)
      * DLL (coordinate documento). */
     if (r->hit && r->info.caret_h > 0)
     {
+#if CONSOLE_LOGGING
         int old_cx = g_caret_x;
+#endif
         g_caret_valid  = 1;
         g_caret_epoch  = r->epoch;
         g_caret_para   = r->info.para_index;
@@ -450,8 +454,10 @@ static void handle_caret_result(CaretHitResult *r)
         g_caret_w      = r->info.caret_w > 0 ? r->info.caret_w : 1;
         g_caret_h      = r->info.caret_h;
         g_caret_x = r->info.caret_x;
+#if CONSOLE_LOGGING
         if (g_caret_x != old_cx)
-            fprintf(stderr, "[CARET viwer line 459] hit x %d->%d\n", old_cx, g_caret_x);
+            fprintf(stderr, "[CARET] hit x %d->%d\n", old_cx, g_caret_x);
+#endif
 
         /* Avvia modalita' inline se non stiamo aprendo l'editor del run. */
         if (!g_run_view_pending && !g_inline_active)
@@ -467,20 +473,17 @@ static void handle_caret_result(CaretHitResult *r)
     }
     else
     {
-        fprintf(stderr, "[CARET viewer line 469] miss\n");
+#if CONSOLE_LOGGING
+        fprintf(stderr, "[CARET] miss\n");
+#endif
         /* Click fuori dal testo (o paragrafo senza parole): niente caret. */
         viewer_caret_clear();
         inline_end("caret cleared");
     }
     InvalidateRect(g_hwnd, NULL, FALSE);
     free(r);
-
-    if (g_inline_active && g_inline_pending_backspaces > 0 &&
-        g_doc_state == DOC_STATE_IDLE && !g_render_busy)
-    {
-        g_inline_pending_backspaces--;
-        inline_apply_edit(LD_INLINE_OP_BACKSPACE, NULL);
-    }
+    /* I backspace non vengono piu' ripartiti qui: il timer inline li
+     * coalescia e invia un solo edit per tutti i tasti rapidi. */
 }
 
 static LRESULT viewer_on_mbuttondown(HWND hwnd, LPARAM lp)

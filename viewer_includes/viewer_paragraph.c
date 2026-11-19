@@ -31,11 +31,16 @@ static void on_edit_applied(EditResult *r)
     //         r->doc, r->gen, r->token, g_pending_apply_token, r->ok,
     //         r->error[0] ? r->error : "");
 
-    /* Solo il risultato del job corrente puo' chiudere la fase APPLYING. */
-    if (r->doc != g_doc || r->gen != g_load_gen || r->token != g_pending_apply_token)
+    /* Solo il risultato del job corrente puo' chiudere la fase APPLYING.
+     * Oltre a doc/gen/token viene verificata anche l'epoch del layout
+     * catturata quando il job e' stato accodato: un risultato di una
+     * generazione di layout diversa non deve mai aggiornare lo stato UI. */
+    if (r->doc != g_doc || r->gen != g_load_gen ||
+        r->token != g_pending_apply_token || r->epoch != g_pending_apply_epoch)
     {
-        // fprintf(stderr, "[XML][APPLY-DONE] scartato (stale): doc_match=%d gen_match=%d token_match=%d\n",
-        //         r->doc == g_doc, r->gen == g_load_gen, r->token == g_pending_apply_token);
+        // fprintf(stderr, "[XML][APPLY-DONE] scartato (stale): doc=%d gen=%d token=%d epoch=%d\n",
+        //         r->doc == g_doc, r->gen == g_load_gen,
+        //         r->token == g_pending_apply_token, r->epoch == g_pending_apply_epoch);
         return;
     }
 
@@ -92,6 +97,7 @@ static void request_paragraph_apply(const char *text)
     g_apply_token++;
     g_doc_state = DOC_STATE_APPLYING;
     g_pending_apply_token = g_apply_token;
+    g_pending_apply_epoch = g_layout_epoch;
 
     if (!g_worker_started)
     {
@@ -99,6 +105,7 @@ static void request_paragraph_apply(const char *text)
         ZeroMemory(&r, sizeof(r));
         r.doc = g_doc;
         r.gen = g_load_gen;
+        r.epoch = g_pending_apply_epoch;
         r.token = g_apply_token;
         r.ok = ld_paragraph_set_text(g_doc, g_edit_index, text);
         if (!r.ok)
@@ -153,6 +160,7 @@ static void request_run_apply(const char *text)
     g_apply_token++;
     g_doc_state = DOC_STATE_APPLYING;
     g_pending_apply_token = g_apply_token;
+    g_pending_apply_epoch = g_layout_epoch;
 
     if (!g_worker_started)
     {
@@ -160,6 +168,7 @@ static void request_run_apply(const char *text)
         ZeroMemory(&r, sizeof(r));
         r.doc = g_doc;
         r.gen = g_load_gen;
+        r.epoch = g_pending_apply_epoch;
         r.token = g_apply_token;
         r.ok = ld_run_set_text(g_doc, g_edit_index, g_edit_run_slot, text);
         if (!r.ok)
@@ -350,6 +359,7 @@ static void request_paragraph_apply_xml(const char *xml)
     g_apply_token++;
     g_doc_state = DOC_STATE_APPLYING;
     g_pending_apply_token = g_apply_token;
+    g_pending_apply_epoch = g_layout_epoch;
 
     if (!g_worker_started)
     {
@@ -357,6 +367,7 @@ static void request_paragraph_apply_xml(const char *xml)
         ZeroMemory(&r, sizeof(r));
         r.doc = g_doc;
         r.gen = g_load_gen;
+        r.epoch = g_pending_apply_epoch;
         r.token = g_apply_token;
         r.ok = ld_paragraph_set_ooxml(g_doc, g_edit_index, xml);
         // fprintf(stderr, "[XML][APPLY-SYNC-OOXML] ok=%d err='%s'\n",

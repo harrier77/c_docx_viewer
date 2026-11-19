@@ -122,8 +122,12 @@ static void viewer_on_destroy(void)
 {
     // log_msg("[DESTROY] Cleaning up\n");
     /* Un editor aperto viene annullato: nessuna modifica al documento. */
+    /* Chiude anche il timer di debounce: nessun WM_TIMER puo' arrivare dopo
+     * la distruzione della finestra e nessun job partially typed resta in volo. */
+    inline_end("destroy");
     g_doc_state = DOC_STATE_IDLE;
     g_pending_apply_token = 0;
+    g_pending_apply_epoch = 0;
     g_edit_apply = 0;
     if (g_tip_wnd)
     {

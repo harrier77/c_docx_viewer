@@ -16,6 +16,23 @@
  * ------------------------------------------------------------------ */
 #define CONSOLE_LOGGING 0
 
+/* Diagnostic logging specifico del coalescing inline edit.
+ * 0 = silenzioso (default), 1 = stampa: caratteri accumulati, timer
+ * aperti/annullati, job coalesciti inviati, rapporto job/caratteri,
+ * completamento edit e relativo re-layout richiesto.
+ * Si puo' attivare anche da riga di comando: -DLD_INLINE_DEBUG_LOG=1 */
+#ifndef LD_INLINE_DEBUG_LOG
+#define LD_INLINE_DEBUG_LOG 0
+#endif
+
+/* Debounce UI-side: i tasti consecutivi vengono applicati subito al solo
+ * shadow buffer locale; un solo JOB_RUN_APPLY_EDIT parte dopo questo ritardo.
+ * Costante singola, modificabile anche con -DLD_INLINE_DEBOUNCE_MS=N. */
+#ifndef LD_INLINE_DEBOUNCE_MS
+#define LD_INLINE_DEBOUNCE_MS 150
+#endif
+#define LD_INLINE_TIMER_ID 0x494E4C49  /* 'INLI' */
+
 /* Logging su file (logs.txt accanto all'eseguibile). 0 = disabilitato. */
 #define ENABLE_FILE_LOGGING 0
 
@@ -154,6 +171,7 @@ typedef struct EditResult
 {
     void    *doc;
     unsigned gen;
+    unsigned epoch;     /* epoch del layout al momento del job (anti-stale) */
     unsigned token;
     int      ok;
     char     error[256];
@@ -272,6 +290,7 @@ static DocState g_doc_state = DOC_STATE_IDLE;
 static unsigned g_layout_epoch = 1;
 static unsigned g_apply_token;
 static unsigned g_pending_apply_token;
+static unsigned g_pending_apply_epoch;  /* epoch attesa dal job di apply corrente */
 
 /* ---- Editor di paragrafo (finestra modale creata dinamicamente) ---- */
 #define LD_PARA_EDIT_CLASS L"LdParagraphEditorClass"
@@ -342,13 +361,46 @@ static int       g_inline_para   = -1;         /* paragrafo in editing */
 static int       g_inline_run    = -1;         /* run slot in editing */
 static int       g_inline_offset = -1;         /* offset caret nel paragrafo (spazio normalizzato) */
 static int       g_inline_run_offset = -1;     /* offset caret dentro il run (per inserimento) */
-static int       g_inline_coalesce = 0;        /* batch tasti mentre worker occupato */
-static char     *g_inline_buffer = NULL;       /* buffer caratteri accumulati */
-static int       g_inline_pending_op = -1;     /* operazione in corso (0=insert, 1=backspace) */
-static char     *g_inline_run_text = NULL;     /* testo corrente del run (UTF-8) */
-static char     *g_inline_last_char = NULL;    /* ultimo carattere inserito (UTF-8) */
+static int       g_inline_coalesce = 0;        /* 1 = esistono modifiche locali non ancora inviate */
+static char     *g_inline_buffer = NULL;       /* testo inserito accumulato (diagnostica/coalescing) */
+static int       g_inline_pending_op = -1;     /* ultima operazione locale (INSERT/BACKSPACE/DELETE) */
+static char     *g_inline_run_text = NULL;     /* shadow locale del run (UTF-8, sempre aggiornato) */
+static char     *g_inline_last_char = NULL;    /* ultimo chunk UTF-8 inserito (diagnostica) */
 static int       g_inline_char_w = 0;          /* FIX char_w CARET: cached font metric (ld_run_hit.font_ch_width) for caret advance */
-static int g_inline_pending_backspaces = 0;
+static int       g_inline_pending_backspaces = 0; /* codepoint cancellati in attesa di flush */
+
+/* Stato del timer Win32: un'unica autorita' UI-side per il flush. */
+static UINT_PTR  g_inline_timer = 0;           /* 0 = nessun timer attivo */
+
+/* Snapshot di cio' che e' confermato nel documento (ultimo job riuscito)
+ * e di cio' che e' stato spedito al worker (job in volo). Servono per:
+ * - non riscrivere g_inline_run_text con un risultato obsoleto;
+ * - distinguere modifiche locali piu' recenti del job in volo;
+ * - sapere quale run/paragrafo/epoch/token ci si aspetta indietro. */
+typedef struct InlineSnapshot
+{
+    char     *text;          /* UTF-8, owned, sempre non-NULL se snapshot valido */
+    int       para;
+    int       run;
+    int       run_offset;
+    int       para_offset;
+    int       caret_offset;
+    int       caret_run_start;
+    int       caret_run_end;
+    int       caret_x;
+    unsigned  epoch;
+} InlineSnapshot;
+
+static InlineSnapshot g_inline_applied;  /* baseline confermata dal worker */
+static InlineSnapshot g_inline_job;      /* snapshot spedito al worker */
+
+/* Coppia UTF-16 -> UTF-8: i surrogati arrivano su due WM_CHAR distinti. */
+static WCHAR     g_inline_high_surrogate = 0;
+
+/* Contatori diagnostici (caratteri digitati / job emessi nella sessione). */
+static unsigned  g_inline_chars_total = 0;
+static unsigned  g_inline_jobs_total = 0;
+
 #define LD_INLINE_OP_INSERT     0
 #define LD_INLINE_OP_BACKSPACE  1
 #define LD_INLINE_OP_DELETE     2
@@ -358,6 +410,7 @@ static void inline_begin(const ld_caret_hit* hit);
 static void inline_end(const char* why);
 static void inline_apply_edit(int op, const char* text);
 static void inline_handle_result(EditResult* r);
+static void inline_on_timer(void);
 static int inline_handle_key(WPARAM wp, LPARAM lp);
 static int inline_handle_char(WPARAM wp);
 static void inline_reanchor_caret(void);

@@ -154,6 +154,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         handle_caret_result((CaretHitResult *)lp);
         return 0;
 
+    case WM_TIMER:
+        /* Unico timer UI: flush del batch di edit inline dopo il debounce. */
+        if (wp == (WPARAM)LD_INLINE_TIMER_ID) {
+            inline_on_timer();
+            return 0;
+        }
+        break;
+
     case WM_KEYDOWN:
         /* Edit inline: Backspace e altri tasti di controllo */
         if (inline_handle_key(wp, lp))

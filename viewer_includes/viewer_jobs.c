@@ -298,6 +298,7 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
             {
                 r->doc = j->doc;
                 r->gen = j->gen;
+                r->epoch = j->epoch;
                 r->token = j->token;
                 r->ok = ok;
                 if (!ok)
@@ -349,6 +350,7 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
             {
                 r->doc = j->doc;
                 r->gen = j->gen;
+                r->epoch = j->epoch;
                 r->token = j->token;
                 r->ok = ok;
                 if (!ok)

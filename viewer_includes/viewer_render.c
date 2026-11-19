@@ -183,6 +183,7 @@ static void apply_loaded_doc(unsigned id, void *doc)
      * precedente e va scartato. */
     g_layout_epoch++;
     g_pending_apply_token = 0;
+    g_pending_apply_epoch = 0;
     viewer_caret_clear();
 
     if (doc)
@@ -305,15 +306,13 @@ static void on_render_done(void *doc, int used_w)
      * that was applied in inline_handle_result. */
     if (g_inline_active)
     {
-        fprintf(stderr, "[CARET render line 308] reanchor\n");
+#if CONSOLE_LOGGING
+        fprintf(stderr, "[INLINE] render done: reanchor caret\n");
+#endif
+        /* Un solo re-anchor per edit applicato: la decisione e' presa qui,
+         * dopo il render che ha ricostruito il layout. I backspace non vengono
+         * piu' ripartiti ad ogni render: sono coalesciati dal timer inline. */
         inline_reanchor_caret();
-    }
-
-    if (g_inline_active && g_inline_pending_backspaces > 0 &&
-        g_doc_state == DOC_STATE_IDLE && !g_render_busy)
-    {
-        g_inline_pending_backspaces--;
-        inline_apply_edit(LD_INLINE_OP_BACKSPACE, NULL);
     }
 
     /* Pending width (resize) ha priorità su pending range */
@@ -366,6 +365,10 @@ static void start_async_load(const char *path)
         return;
     }
 
+    /* Un cambio documento non puo' ereditare il timer/coalescing inline:
+     * si chiude la sessione (annulla i caratteri non ancora confermati). */
+    inline_end("load");
+
     init_callbacks();
     cw = layout_content_width();
 
@@ -375,7 +378,16 @@ static void start_async_load(const char *path)
     g_load_content_w = cw;
     g_doc_state = DOC_STATE_LOADING;
     g_layout_epoch++;
-    g_pending_apply_token = 0;
+    /* Se inline_end ha lasciato un edit in volo, il suo risultato verra'
+     * scartato (token azzerato): rilasciamo subito anche il flag di busy,
+     * altrimenti il render del nuovo documento resterebbe in coda per sempre. */
+    if (g_pending_apply_token)
+    {
+        g_pending_apply_token = 0;
+        g_pending_apply_epoch = 0;
+        g_render_busy = 0;
+        g_render_doc = NULL;
+    }
     g_render_pending_width = -1;
     g_render_pending_first_page = -1;
     g_render_pending_last_page = -1;
