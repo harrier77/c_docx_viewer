@@ -2519,7 +2519,9 @@ struct ld_caret_scan
     int         run_index      = -1; /* slot corrente (figlio diretto) */
     int         run_char_start = 0;  /* offset normalizzato di inizio slot */
     bool        exact          = false;
+    int         exact_vdist    = 1 << 30;
     bool        fb_valid       = false; /* candidata di fallback (gap) */
+    int         fb_dy          = 1 << 30;
     int         fb_dist        = 1 << 30;
     int         fb_slot        = -1;
     int         fb_offset      = 0;
@@ -2551,16 +2553,12 @@ static void ld_record_caret_hit(ld_caret_scan& s, int word_offset,
 static void ld_caret_scan_parts(const litehtml::element::ptr& el, int* offset,
                                 ld_caret_scan& s)
 {
-    if(s.exact || !el)
+    if(!el)
     {
         return;
     }
     for(const auto& child : el->children())
     {
-        if(s.exact)
-        {
-            return;
-        }
         if(child->is_break())
         {
             *offset += 1;
@@ -2591,6 +2589,15 @@ static void ld_caret_scan_parts(const litehtml::element::ptr& el, int* offset,
                 if(s.px >= bx && s.px < bx + bw &&
                    s.py >= by && s.py < by + bh)
                 {
+                    int cy = by + bh / 2;
+                    int vdist = s.py - cy;
+                    if(vdist < 0) vdist = -vdist;
+                    if(s.exact && vdist > s.exact_vdist)
+                    {
+                        *offset += len;
+                        continue;
+                    }
+                    s.exact_vdist = vdist;
                     int intra   = 0;
                     int caret_x = s.px;
                     if(len > 0 && font && s.host && s.host->container)
@@ -2645,27 +2652,33 @@ static void ld_caret_scan_parts(const litehtml::element::ptr& el, int* offset,
                     }
                     ld_record_caret_hit(s, *offset, pos, intra, caret_x);
                     s.exact = true;
-                    return;
+                    *offset += len;
+                    continue;
                 }
-                /* stessa banda verticale, fuori dal box: gap tra parole */
-                if(s.py >= by && s.py < by + bh)
+                /* Fuori dal box: calcola distanza verticale dy e orizzontale dx
+                 * per agganciare anche i click negli spazi interlinea o nei gap
+                 * tra parole all'interno del paragrafo. */
+                int dy = 0;
+                if(s.py < by)
+                    dy = by - s.py;
+                else if(s.py >= by + bh)
+                    dy = s.py - (by + bh - 1);
+
+                int dx = 0;
+                if(s.px < bx)
+                    dx = bx - s.px;
+                else if(s.px >= bx + bw)
+                    dx = s.px - (bx + bw);
+
+                if(dy < s.fb_dy || (dy == s.fb_dy && dx < s.fb_dist))
                 {
-                    int dx;
-                    if(s.px < bx)
-                        dx = bx - s.px;
-                    else if(s.px >= bx + bw)
-                        dx = s.px - (bx + bw);
-                    else
-                        dx = 0;
-                    if(dx < s.fb_dist)
-                    {
-                        s.fb_valid = true;
-                        s.fb_dist  = dx;
-                        s.fb_slot  = s.run_index;
-                        s.fb_offset = *offset;
-                        s.fb_intra = (s.px < bx) ? 0 : len;
-                        s.fb_pos   = pos;
-                    }
+                    s.fb_valid  = true;
+                    s.fb_dy     = dy;
+                    s.fb_dist   = dx;
+                    s.fb_slot   = s.run_index;
+                    s.fb_offset = *offset;
+                    s.fb_intra  = (s.px < bx) ? 0 : len;
+                    s.fb_pos    = pos;
                 }
             }
             *offset += len;
@@ -2776,10 +2789,6 @@ int ld_run_caret_hit(void* doc, int x, int y, ld_caret_hit* out)
                 scan.run_char_start = -1;
             }
             ld_caret_scan_parts(child, &offset, scan);
-            if(scan.exact)
-            {
-                break;
-            }
             ++slot;
         }
 

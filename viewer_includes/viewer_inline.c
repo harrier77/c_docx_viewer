@@ -541,7 +541,7 @@ static void inline_reanchor_caret(void)
     j->gen = g_load_gen;
     j->epoch = g_layout_epoch;
     j->doc_x = g_caret_x;
-    j->doc_y = g_caret_y;
+    j->doc_y = g_caret_y + (g_caret_h > 0 ? g_caret_h / 2 : 0);
     g_doc_state = DOC_STATE_HITTEST;
     enqueue_job(j);
 }

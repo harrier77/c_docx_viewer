@@ -183,7 +183,7 @@ namespace litedocx
                 if(p.line_rule.empty() || p.line_rule == "auto") {
                     char b[64]; std::snprintf(b, sizeof(b), "line-height:%.3f;", p.line / 240.0 * 1.0f) ; css += b;
                 } else {
-                    char b[32]; std::snprintf(b, sizeof(b), "line-height:%dpx;", twip_to_px(p.line) * 1.0f); css += b;
+                    char b[32]; std::snprintf(b, sizeof(b), "line-height:%dpx;", twip_to_px(p.line)); css += b;
                 }
             }
             if(!p.shading.empty()) css += "background-color:#" + p.shading + ";";
