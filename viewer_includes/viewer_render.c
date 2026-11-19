@@ -309,6 +309,13 @@ static void on_render_done(void *doc, int used_w)
         inline_reanchor_caret();
     }
 
+    if (g_inline_active && g_inline_pending_backspaces > 0 &&
+        g_doc_state == DOC_STATE_IDLE && !g_render_busy)
+    {
+        g_inline_pending_backspaces--;
+        inline_apply_edit(LD_INLINE_OP_BACKSPACE, NULL);
+    }
+
     /* Pending width (resize) ha priorità su pending range */
     if (!g_load_active && g_render_pending_width >= 0 && g_render_pending_width != used_w)
     {

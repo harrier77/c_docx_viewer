@@ -29,6 +29,7 @@ static void inline_begin(const ld_caret_hit* hit)
     g_inline_run_offset = hit->run_char_offset; /* offset dentro il run */
     if (g_inline_run_offset < 0) g_inline_run_offset = 0; /* FIX: hit-test potrebbe restituire -1 */
     g_inline_coalesce = 0;
+    g_inline_pending_backspaces = 0;
     free(g_inline_buffer);
     g_inline_buffer = NULL;
     free(g_inline_last_char);
@@ -78,6 +79,7 @@ static void inline_end(const char* why)
     g_inline_offset     = -1;
     g_inline_run_offset = -1;
     g_inline_coalesce = 0;
+    g_inline_pending_backspaces = 0;
     g_inline_pending_op = -1;
     free(g_inline_buffer);
     g_inline_buffer = NULL;
@@ -87,12 +89,29 @@ static void inline_end(const char* why)
     g_inline_last_char = NULL;
 }
 
+/* Restituisce l'offset in byte dell'inizio del codepoint UTF-8 precedente. */
+static int utf8_prev_char_offset(const char *s, int offset)
+{
+    if (!s || offset <= 0)
+        return 0;
+    int pos = offset - 1;
+    while (pos > 0 && (((unsigned char)s[pos] & 0xC0) == 0x80))
+        pos--;
+    return pos;
+}
+
 /* Applica un singolo edit inline (insert/backspace) sul run corrente.
  * Chiama ld_run_edit sul worker thread (tramite job asincrono). */
 static void inline_apply_edit(int op, const char* text)
 {
     if (!g_inline_active || !g_doc || g_inline_para < 0 || g_inline_run < 0)
         return;
+
+    if (op == LD_INLINE_OP_BACKSPACE)
+    {
+        if (!g_inline_run_text || g_inline_run_offset <= 0)
+            return;
+    }
 
     /* Se il worker e' occupato, accumula il tasto per coalescing. */
     if (g_render_busy || g_doc_state != DOC_STATE_IDLE)
@@ -115,6 +134,7 @@ static void inline_apply_edit(int op, const char* text)
             /* Per backspace non accumuliamo nel buffer: accodiamo un job
              * separato con op=1. Il coalescing per backspace e' piu' delicato
              * perche' l'offset cambia. Per il prototipo lo mandiamo subito. */
+            g_inline_pending_backspaces++;
         }
         return;
     }
@@ -159,14 +179,18 @@ static void inline_apply_edit(int op, const char* text)
             }
             else if (op == LD_INLINE_OP_BACKSPACE && strlen(g_inline_run_text) > 0)
             {
-                int len = strlen(g_inline_run_text);
-                int del_pos = g_inline_run_offset - 1;  // cancella il carattere PRIMA del cursore fix di Pi
-                if (len > 0)
-                  if (del_pos >= 0 && del_pos < len)
-                   {
-                       memmove(g_inline_run_text + del_pos, g_inline_run_text + del_pos + 1, len - del_pos);
-                       ok = ld_run_set_text(g_doc, g_inline_para, g_inline_run, g_inline_run_text);
-                   } //fine fix 
+                int len = (int)strlen(g_inline_run_text);
+                int del_pos = utf8_prev_char_offset(g_inline_run_text, g_inline_run_offset);
+                int del_len = g_inline_run_offset - del_pos;
+                if (del_pos >= 0 && del_len > 0 && del_pos + del_len <= len)
+                {
+                    memmove(g_inline_run_text + del_pos, g_inline_run_text + del_pos + del_len, (size_t)(len - (del_pos + del_len) + 1));
+                    ok = ld_run_set_text(g_doc, g_inline_para, g_inline_run, g_inline_run_text);
+                    g_inline_run_offset = del_pos;
+                    if (g_inline_offset >= del_len) g_inline_offset -= del_len;
+                    if (g_caret_offset >= del_len) g_caret_offset -= del_len;
+                    if (g_caret_run_end >= del_len) g_caret_run_end -= del_len;
+                }
             }
         }
         
@@ -259,18 +283,19 @@ static void inline_apply_edit(int op, const char* text)
             }
             else if (op == LD_INLINE_OP_BACKSPACE && strlen(g_inline_run_text) > 0)
             {
-                int len = strlen(g_inline_run_text);
-                int del_pos = g_inline_run_offset - 1;  // cancella il carattere PRIMA del cursore fix di Pi
-                if (del_pos >= 0 && del_pos < len)
-                   {
-                       new_run_text = (char*)malloc(len + 1);
-                       if (new_run_text)
-                       {
-                           memcpy(new_run_text, g_inline_run_text, del_pos);                // parte prima del char da cancellare
-                           memcpy(new_run_text + del_pos, g_inline_run_text + del_pos + 1, len - del_pos); // salta il char da cancellare
-                           new_run_text[len - 1] = '\0';
-                       }
-                   } //fine fix
+                int len = (int)strlen(g_inline_run_text);
+                int del_pos = utf8_prev_char_offset(g_inline_run_text, g_inline_run_offset);
+                int del_len = g_inline_run_offset - del_pos;
+                if (del_pos >= 0 && del_len > 0 && del_pos + del_len <= len)
+                {
+                    new_run_text = (char*)malloc(len + 1);
+                    if (new_run_text)
+                    {
+                        memcpy(new_run_text, g_inline_run_text, del_pos);
+                        memcpy(new_run_text + del_pos, g_inline_run_text + del_pos + del_len,
+                               (size_t)(len - (del_pos + del_len) + 1)); /* incluso '\0' */
+                    }
+                }
             }
         }
         
@@ -295,6 +320,12 @@ static void inline_apply_edit(int op, const char* text)
             free(new_run_text);
         }
         
+        if (!marked_text)
+        {
+            free(j);
+            return;
+        }
+
         j->text = marked_text;  /* Testo completo del run con marker */
 
         // fprintf(stderr, "[INLINE] enqueue job para=%d run=%d op=%d new_text_len=%d\n",
@@ -440,19 +471,20 @@ static void inline_handle_result(EditResult* r)
             else if (g_inline_pending_op == LD_INLINE_OP_BACKSPACE)
             {
                 int len = (int)strlen(g_inline_run_text);
-                /* Decrement the caret offset BEFORE the estimate.
-                 * The estimate uses g_inline_run_offset + 1 (the pre-edit
-                 * character count) to compute the average width. */
-                if (g_inline_run_offset > 0) g_inline_run_offset -= 1;
-                if (g_caret_offset > 0) g_caret_offset -= 1;
-                if (g_caret_run_end > g_caret_run_start) g_caret_run_end -= 1;
-                if (len > 0)
+                int del_pos = utf8_prev_char_offset(g_inline_run_text, g_inline_run_offset);
+                int del_len = g_inline_run_offset - del_pos;
+                if (del_len > 0 && del_pos >= 0 && del_pos + del_len <= len)
                 {
-                    /* FIX char_w CARET: retreat by the same font-derived step (symmetric with insert). */
-                    int step = g_inline_char_w > 0 ? g_inline_char_w : 8; /* FIX char_w CARET: fall back to 8px when the font metric is missing. */
-                    g_caret_x -= step; /* FIX char_w CARET: no decaying average, so the retreat stays constant. */
-                    g_inline_run_text[len - 1] = '\0'; /* FIX char_w CARET: drop the deleted character from the local run buffer. */
-                    fprintf(stderr, "[CARET inline] est- step=%d x=%d\n", step, g_caret_x); /* FIX char_w CARET: log the stable step for verification. */
+                    memmove(g_inline_run_text + del_pos,
+                            g_inline_run_text + del_pos + del_len,
+                            (size_t)(len - (del_pos + del_len) + 1));
+                    g_inline_run_offset = del_pos;
+                    if (g_caret_offset >= del_len) g_caret_offset -= del_len;
+                    if (g_caret_run_end - del_len >= g_caret_run_start) g_caret_run_end -= del_len;
+
+                    int step = g_inline_char_w > 0 ? g_inline_char_w : 8;
+                    g_caret_x -= step;
+                    if (g_caret_x < 0) g_caret_x = 0;
                 }
             }
         }
@@ -464,8 +496,11 @@ static void inline_handle_result(EditResult* r)
     else
     {
         // fprintf(stderr, "[INLINE] edit failed: %s\n", r->error);
+        g_doc_state = DOC_STATE_IDLE;
+        g_inline_pending_backspaces = 0;
         MessageBoxA(g_hwnd, r->error[0] ? r->error : "Edit inline fallito",
                     "d2dview", MB_OK | MB_ICONERROR);
+        resume_pending_render();
     }
 }
 

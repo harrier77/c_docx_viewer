@@ -346,6 +346,10 @@ static int       g_inline_pending_op = -1;     /* operazione in corso (0=insert,
 static char     *g_inline_run_text = NULL;     /* testo corrente del run (UTF-8) */
 static char     *g_inline_last_char = NULL;    /* ultimo carattere inserito (UTF-8) */
 static int       g_inline_char_w = 0;          /* FIX char_w CARET: cached font metric (ld_run_hit.font_ch_width) for caret advance */
+static int g_inline_pending_backspaces = 0;
+#define LD_INLINE_OP_INSERT     0
+#define LD_INLINE_OP_BACKSPACE  1
+#define LD_INLINE_OP_DELETE     2
 
 static void apply_pending_justification(void);
 static void inline_begin(const ld_caret_hit* hit);

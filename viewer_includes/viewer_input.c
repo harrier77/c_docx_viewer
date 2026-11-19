@@ -448,15 +448,7 @@ static void handle_caret_result(CaretHitResult *r)
         g_caret_y      = r->info.caret_y;
         g_caret_w      = r->info.caret_w > 0 ? r->info.caret_w : 1;
         g_caret_h      = r->info.caret_h;
-        /* During inline editing, g_caret_x holds the estimated post-edit
-         * position (set by inline_handle_result). The DLL may return a
-         * stale (lower) caret_x if its hit-test ran against the pre-edit
-         * layout. Keep the estimate if the DLL value is smaller; adopt
-         * it if the DLL value is larger (accurate post-edit position). */
-        if (g_inline_active && r->info.caret_x < g_caret_x)
-            g_caret_x = g_caret_x; /* keep */
-        else
-            g_caret_x = r->info.caret_x;
+        g_caret_x = r->info.caret_x;
         if (g_caret_x != old_cx)
             fprintf(stderr, "[CARET viwer line 459] hit x %d->%d\n", old_cx, g_caret_x);
 
@@ -475,6 +467,13 @@ static void handle_caret_result(CaretHitResult *r)
     }
     InvalidateRect(g_hwnd, NULL, FALSE);
     free(r);
+
+    if (g_inline_active && g_inline_pending_backspaces > 0 &&
+        g_doc_state == DOC_STATE_IDLE && !g_render_busy)
+    {
+        g_inline_pending_backspaces--;
+        inline_apply_edit(LD_INLINE_OP_BACKSPACE, NULL);
+    }
 }
 
 static LRESULT viewer_on_mbuttondown(HWND hwnd, LPARAM lp)
