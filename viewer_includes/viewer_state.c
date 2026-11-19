@@ -25,11 +25,16 @@
 #define LD_INLINE_DEBUG_LOG 0
 #endif
 
-/* Debounce UI-side: i tasti consecutivi vengono applicati subito al solo
- * shadow buffer locale; un solo JOB_RUN_APPLY_EDIT parte dopo questo ritardo.
- * Costante singola, modificabile anche con -DLD_INLINE_DEBOUNCE_MS=N. */
+/* Debounce UI-side (trailing-edge): i tasti consecutivi vengono applicati
+ * subito al solo shadow buffer locale; un solo JOB_RUN_APPLY_EDIT parte
+ * dopo che non arrivano altri input per questo ritardo.
+ * Costanti singole, modificabili anche via riga di comando:
+ *   -DLD_INLINE_DEBOUNCE_MS=N   -DLD_INLINE_RETRY_MS=N */
 #ifndef LD_INLINE_DEBOUNCE_MS
-#define LD_INLINE_DEBOUNCE_MS 150
+#define LD_INLINE_DEBOUNCE_MS 350
+#endif
+#ifndef LD_INLINE_RETRY_MS
+#define LD_INLINE_RETRY_MS 75
 #endif
 #define LD_INLINE_TIMER_ID 0x494E4C49  /* 'INLI' */
 
@@ -371,6 +376,7 @@ static int       g_inline_pending_backspaces = 0; /* codepoint cancellati in att
 
 /* Stato del timer Win32: un'unica autorita' UI-side per il flush. */
 static UINT_PTR  g_inline_timer = 0;           /* 0 = nessun timer attivo */
+static int       g_inline_timer_retry = 0;     /* 1 = retry breve (worker occupato) */
 
 /* Snapshot di cio' che e' confermato nel documento (ultimo job riuscito)
  * e di cio' che e' stato spedito al worker (job in volo). Servono per:

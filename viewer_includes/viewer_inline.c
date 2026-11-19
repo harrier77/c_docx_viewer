@@ -191,25 +191,49 @@ static void inline_cancel_timer(void)
         return;
     KillTimer(g_hwnd, g_inline_timer);
     g_inline_timer = 0;
+    g_inline_timer_retry = 0;
     inline_log("timer cancelled");
 }
 
-static void inline_schedule_timer(void)
+/* (Ri)arma l'unico timer della sessione. Ogni modifica effettiva del testo
+ * richiama questa funzione con retry=0: il timer precedente viene ucciso e
+ * ne viene armato uno nuovo con il pieno ritardo di debounce. Il flush
+ * scatta quindi solo dopo LD_INLINE_DEBOUNCE_MS dall'ULTIMO input
+ * (trailing-edge), non a intervalli dal primo tasto.
+ * retry=1 viene usato quando lo scheduler e' occupato: ritardo breve
+ * (LD_INLINE_RETRY_MS), senza toccare testo ne' offset. */
+static void inline_schedule_timer(int retry)
 {
-    if (!g_inline_active || !g_hwnd || !g_doc || g_inline_timer)
+    if (!g_inline_active || !g_hwnd || !g_doc)
         return;
-    g_inline_timer = SetTimer(g_hwnd, LD_INLINE_TIMER_ID,
-                              LD_INLINE_DEBOUNCE_MS, NULL);
+
+    /* Trailing-edge: azzera sempre il timer prima di riarmarlo. */
+    inline_cancel_timer();
+
+    unsigned delay = retry ? (unsigned)LD_INLINE_RETRY_MS
+                           : (unsigned)LD_INLINE_DEBOUNCE_MS;
+    g_inline_timer = SetTimer(g_hwnd, LD_INLINE_TIMER_ID, delay, NULL);
     if (g_inline_timer)
-        inline_log("timer opened id=%u delay=%dms",
-                   (unsigned)g_inline_timer, LD_INLINE_DEBOUNCE_MS);
+    {
+        g_inline_timer_retry = retry;
+        inline_log("timer %s id=%u delay=%ums",
+                   retry ? "RETRY armed" : "restarted",
+                   (unsigned)g_inline_timer, delay);
+    }
     else
-        inline_log("timer FAILED");
+    {
+        /* SetTimer fallito: il testo resta pending nei buffer shadow
+         * (g_inline_coalesce / g_inline_run_text), senza perdita. Verra'
+         * spedito al prossimo input oppure al prossimo giro di scheduler. */
+        g_inline_timer_retry = 0;
+        inline_log("SetTimer FAILED (%lu) - pending text kept, will retry",
+                   (unsigned long)GetLastError());
+    }
 }
 
 /* Invia (se possibile) un unico job con lo stato corrente del shadow.
  * from_timer=1 -> chiamata da WM_TIMER; in caso di stato non IDLE non
- * perde i dati: riapre il timer e riprova dopo un altro debounce. */
+ * perde i dati: arma un retry breve e riprova senza inviare un altro job. */
 static int inline_flush_pending(int from_timer)
 {
     if (!g_inline_active || !g_doc || !g_inline_run_text)
@@ -229,11 +253,13 @@ static int inline_flush_pending(int from_timer)
     if (g_load_active || g_render_busy || g_doc_state != DOC_STATE_IDLE ||
         g_pending_apply_token != 0)
     {
-        /* Un solo edit in volo al massimo. Il batch resta intatto. */
-        inline_log("flush deferred: state=%d busy=%d load=%d token=%u",
+        /* Un solo edit in volo al massimo. Il batch resta intatto:
+         * riproviamo tra poco con un retry breve, senza inviare un altro
+         * job e senza toccare testo/offset. */
+        inline_log("retry reason: state=%d busy=%d load=%d token=%u",
                    g_doc_state, g_render_busy, g_load_active,
                    g_pending_apply_token);
-        inline_schedule_timer();
+        inline_schedule_timer(1);
         return 0;
     }
 
@@ -583,9 +609,10 @@ static void inline_apply_edit(int op, const char* text)
     g_inline_coalesce = 1;
 
     /* Nessun refresh del layout: solo il caret viene ridisegnato nella
-     * posizione stimata. Il re-layout avverra' dopo il job coalescito. */
+     * posizione stimata. Il re-layout avverra' dopo il job coalescito.
+     * Ogni tasto riavvia il timer: e' un debounce trailing-edge. */
     InvalidateRect(g_hwnd, NULL, FALSE);
-    inline_schedule_timer();
+    inline_schedule_timer(0);
 }
 
 /* ---------------- risultato del worker ---------------- */
@@ -680,9 +707,11 @@ static void inline_handle_result(EditResult* r)
                          strcmp(g_inline_run_text, g_inline_applied.text) != 0);
         if (has_newer)
         {
-            inline_log("edit ok token=%u: newer local text, re-arm timer",
+            inline_log("edit ok token=%u: newer local text, re-arm debounce",
                        r->token);
-            inline_schedule_timer();
+            /* Job in volo concluso: il testo piu' recente viene inviato
+             * soltanto allo scadere del trailing-edge, non in parallelo. */
+            inline_schedule_timer(0);
         }
         else
         {
@@ -743,6 +772,9 @@ static void inline_on_timer(void)
         inline_cancel_timer();
         return;
     }
+    inline_log("timer expired (mode=%s)",
+               g_inline_timer_retry ? "retry" : "debounce");
+    g_inline_timer_retry = 0;
     inline_flush_pending(1);
 }
 
