@@ -146,6 +146,123 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                              (WPARAM)j->content_w, (LPARAM)j->doc);
             break;
 
+       case JOB_HIT_TEST:
+           {
+               if (!g_shutdown && j->doc)
+               {
+                   ld_paragraph_hit hit;
+                   char *text = NULL;
+                   int got = ld_paragraph_hit_test(j->doc, j->doc_x, j->doc_y, &hit, &text);
+                   HitResult *r = (HitResult *)calloc(1, sizeof(HitResult));
+                   if (r)
+                   {
+                       r->doc = j->doc;
+                       r->gen = j->gen;
+                       r->epoch = j->epoch;
+                       r->hit = got;
+                       r->index = got ? hit.index : -1;
+                       r->text = text;
+                       PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, (LPARAM)r);
+                   }
+                   else
+                   {
+                       ld_free_string(text);
+                       PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, 0);
+                   }
+               }
+               break;
+           }
+
+       case JOB_RUN_HIT_TEST:
+           {
+               /* Diagnostica read-only: ld_run_hit_test non tocca testo,
+                * DOM ne' cache di layout. Esito via WM_APP_RUN_HIT_RESULT. */
+               if (!g_shutdown && j->doc)
+               {
+                   RunHitResult *r = (RunHitResult *)calloc(1, sizeof(RunHitResult));
+                   if (r)
+                   {
+                       r->doc   = j->doc;
+                       r->gen   = j->gen;
+                       r->epoch = j->epoch;
+                       r->doc_x = j->doc_x;
+                       r->doc_y = j->doc_y;
+                       r->hit   = ld_run_hit_test(j->doc, j->doc_x, j->doc_y, &r->info);
+                       PostMessageA(j->hwnd, WM_APP_RUN_HIT_RESULT, 0, (LPARAM)r);
+                   }
+               }
+               break;
+           }
+
+           case JOB_GET_PARA_XML:
+           {
+               if (!g_shutdown && j->doc && j->para_index >= 0)
+               {
+                   ParaXmlResult *r = (ParaXmlResult *)calloc(1, sizeof(ParaXmlResult));
+                   if (r)
+                   {
+                       r->doc = j->doc;
+                       r->gen = j->gen;
+                       r->epoch = j->epoch;
+                       r->index = j->para_index;
+                       r->ok = ld_paragraph_get_xml(j->doc, j->para_index, &r->xml);
+                       if (!r->ok)
+                       {
+                           const char *err = ld_last_error();
+                           lstrcpynA(r->error, err ? err : "", sizeof(r->error));
+                       }
+                       PostMessageA(j->hwnd, WM_APP_PARA_XML_READY, 0, (LPARAM)r);
+                   }
+               }
+               break;
+           }
+
+           case JOB_APPLY_EDIT:
+        {
+            EditResult *r = (EditResult *)calloc(1, sizeof(EditResult));
+            int ok = 0;
+            if (!g_shutdown && j->doc)
+            {
+                if (j->xml_text)
+                {
+                    fprintf(stderr, "[XML][WORKER-APPLY] idx=%d bytes=%d ooxml=%d\n",
+                            j->para_index, (int)strlen(j->xml_text), j->ooxml);
+                    log_xml_block("WORKER-APPLY", j->para_index, j->xml_text);
+                    if (j->ooxml)
+                        ok = ld_paragraph_set_ooxml(j->doc, j->para_index, j->xml_text);
+                    else
+                        ok = ld_paragraph_set_xml(j->doc, j->para_index, j->xml_text);
+                    fprintf(stderr, "[XML][WORKER-APPLY] ok=%d err='%s'\n",
+                            ok, ok ? "" : ld_last_error());
+                }
+                else if (j->text)
+                {
+                    ok = ld_paragraph_set_text(j->doc, j->para_index, j->text);
+                }
+            }
+            if (r)
+            {
+                r->doc = j->doc;
+                r->gen = j->gen;
+                r->token = j->token;
+                r->ok = ok;
+                if (!ok)
+                {
+                    const char *err = ld_last_error();
+                    lstrcpynA(r->error, err ? err : "", sizeof(r->error));
+                }
+                if (!g_shutdown)
+                    PostMessageA(j->hwnd, WM_APP_EDIT_APPLIED, 0, (LPARAM)r);
+                else
+                    free(r);
+            }
+            free(j->text);
+            j->text = NULL;
+            free(j->xml_text);
+            j->xml_text = NULL;
+            break;
+        }
+
         case JOB_DESTROY:
             if (j->doc)
                 ld_destroy(j->doc);

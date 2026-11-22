@@ -171,7 +171,13 @@ namespace litedocx
         std::string                        theme_xml;
         std::string                        rels_xml;
         std::string                        file_name;
+        // OOXML fragments for each paragraph (indexed by data-ld-paragraph-index)
+        std::vector<std::string>           paragraph_ooxml;
+        bool                               dirty = false;
     };
+
+    // Serialize the full document.xml from the model
+    std::string serialize_document_xml(const DocxModel& model);
 
     /* Conversion helpers (twips -> CSS px at 96 dpi). */
     inline int twip_to_px(int tw)

@@ -58,6 +58,137 @@
 #include "viewer_includes/viewer_paint.c"
 #include "viewer_includes/viewer_input.c"
 #include "viewer_includes/viewer_commands.c"
+#include "viewer_includes/viewer_editor_ui.c"
+
+/* Handlers per messaggi asincroni (Fase 4) */
+static void handle_hit_result(HitResult *r)
+{
+    if (!r) return;
+    if (r->doc != g_doc || r->gen != g_load_gen || r->epoch != g_layout_epoch)
+    {
+        if (r->text) ld_free_string(r->text);
+        free(r);
+        if (g_doc_state == DOC_STATE_HITTEST)
+            g_doc_state = DOC_STATE_IDLE;
+        return;
+    }
+    if (g_doc_state == DOC_STATE_HITTEST)
+        g_doc_state = DOC_STATE_IDLE;
+    
+    if (r->hit && r->index >= 0)
+    {
+        fprintf(stderr, "[HIT] hit para=%d\n", r->index);
+        if (r->text) ld_free_string(r->text);
+        /* Per ora apriamo l'editor direttamente */
+        begin_paragraph_edit_at_index(r->index);
+    }
+    else
+    {
+        if (r->text) ld_free_string(r->text);
+        g_doc_state = DOC_STATE_IDLE;
+    }
+    free(r);
+}
+
+static void handle_run_hit_result(RunHitResult *r)
+{
+    if (!r) return;
+    if (r->doc != g_doc || r->gen != g_load_gen || r->epoch != g_layout_epoch)
+    {
+        free(r);
+        if (g_doc_state == DOC_STATE_HITTEST)
+            g_doc_state = DOC_STATE_IDLE;
+        return;
+    }
+    if (g_doc_state == DOC_STATE_HITTEST)
+        g_doc_state = DOC_STATE_IDLE;
+
+    log_msg("[RUN-HIT] hit=%d para=%d run=%d off=%d [%d..%d) inRun=%d box=%d,%d %dx%d\n",
+            r->hit, r->info.para_index, r->info.run_index, r->info.char_offset,
+            r->info.run_char_start, r->info.run_char_end, r->info.run_char_offset,
+            r->info.x, r->info.y, r->info.w, r->info.h);
+
+    if (g_run_view_pending)
+    {
+        g_run_view_pending = 0;
+        if (r->hit && r->info.para_index >= 0 &&
+            r->info.run_char_start >= 0 && r->info.run_char_end >= r->info.run_char_start &&
+            !g_edit_hwnd)
+        {
+            char *para = ld_paragraph_get_text(g_doc, r->info.para_index);
+            if (para)
+            {
+                int plen = (int)strlen(para);
+                int s = r->info.run_char_start;
+                int e = r->info.run_char_end;
+                if (s > plen) s = plen;
+                if (e > plen) e = plen;
+                if (e > s)
+                {
+                    int n = e - s;
+                    char *run_text = (char *)malloc((size_t)n + 1);
+                    if (run_text)
+                    {
+                        memcpy(run_text, para + s, (size_t)n);
+                        run_text[n] = '\0';
+                        g_doc_state = DOC_STATE_EDITOR;
+                        show_run_viewer(r->info.para_index, &r->info, run_text);
+                        free(run_text);
+                    }
+                }
+                free(para);
+            }
+        }
+    }
+    free(r);
+}
+
+static void handle_para_xml_ready(ParaXmlResult *r)
+{
+    if (!r) return;
+    if (r->doc != g_doc || r->gen != g_load_gen || r->epoch != g_layout_epoch)
+    {
+        if (r->xml) ld_free_string(r->xml);
+        free(r);
+        return;
+    }
+    if (r->ok && r->xml)
+    {
+        fprintf(stderr, "[XML] para_xml ready idx=%d\n", r->index);
+        ld_free_string(r->xml);
+    }
+    free(r);
+}
+
+static void handle_edit_applied(EditResult *r)
+{
+    if (!r) return;
+    if (r->doc != g_doc || r->gen != g_load_gen)
+    {
+        free(r);
+        return;
+    }
+    
+    if (r->ok)
+    {
+        fprintf(stderr, "[EDIT] Applicato con successo, richiedo re-render\n");
+        ld_invalidate_font_cache(g_doc);
+        ld_clear_page_cache(g_doc);
+        g_layout_complete = 0;
+        g_last_rendered_page = -1;
+        g_first_rendered_page = -1;
+        if (g_layout_cache)
+            layout_cache_invalidate(g_layout_cache);
+        request_render(layout_content_width());
+    }
+    else
+    {
+        fprintf(stderr, "[EDIT] Errore applicazione: %s\n", r->error);
+        g_doc_state = DOC_STATE_IDLE;
+        InvalidateRect(g_hwnd, NULL, FALSE);
+    }
+    free(r);
+}
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -107,6 +238,22 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_APP_RENDER_DONE:
         on_render_done((void *)lp, (int)wp);
+        return 0;
+
+    case WM_APP_HIT_RESULT:
+        handle_hit_result((HitResult *)lp);
+        return 0;
+
+    case WM_APP_RUN_HIT_RESULT:
+        handle_run_hit_result((RunHitResult *)lp);
+        return 0;
+
+    case WM_APP_PARA_XML_READY:
+        handle_para_xml_ready((ParaXmlResult *)lp);
+        return 0;
+
+    case WM_APP_EDIT_APPLIED:
+        handle_edit_applied((EditResult *)lp);
         return 0;
 
     case WM_COMMAND:

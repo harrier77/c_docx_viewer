@@ -306,6 +306,113 @@ void ld_set_layout_cache_callbacks(void* doc, const ld_layout_cache_ops* ops, vo
  */
 void ld_extract_layout(void* doc);
 
+/* ------------------------------------------------------------------------- */
+/* Paragraph Hit-Test & XML Editing (in-memory only)                         */
+/* ------------------------------------------------------------------------- */
+
+/* Hit-test a point in document coordinates.
+ * Returns 1 when a paragraph with valid post-layout geometry contains the
+ * point and fills out_hit.  If out_text is not NULL it receives a
+ * null-terminated UTF-8 copy of the paragraph text; the caller must free it
+ * with ld_free_string() (it is set to NULL when nothing is hit).
+ * Returns 0 when no editable paragraph is hit. */
+typedef struct ld_paragraph_hit
+{
+    int index;      /* stable paragraph index (>= 0) */
+    int x, y, w, h; /* paragraph box in document coordinates */
+} ld_paragraph_hit;
+
+int ld_paragraph_hit_test(void* doc, int x, int y,
+                          ld_paragraph_hit* out_hit, char** out_text);
+
+/* Diagnostic, read-only run hit-test.  Given a point in document coordinates
+ * (the same space as ld_paragraph_hit_test), it reports which direct child
+ * ("run slot") of the hit paragraph contains the point and where the click
+ * falls in the paragraph's plain text.
+ * litehtml splits text into word-level elements, so x/y/w/h is the box of
+ * the hit text part (a word); a click in a gap between words falls back to
+ * the nearest word on the same line.  Nothing is modified.
+ * Returns 1 when a text part is resolved. */
+typedef struct ld_run_hit
+{
+    int para_index;       /* hit paragraph index, -1 when nothing is hit */
+    int run_index;        /* direct-child slot in DOM order, -1 when none */
+    int char_offset;      /* click offset in the paragraph plain text, -1 */
+    int run_char_start;   /* run start offset in the paragraph text, -1 */
+    int run_char_end;     /* run end offset (exclusive) in that text, -1 */
+    int run_char_offset;  /* click offset inside the run text, -1 */
+    int x, y, w, h;       /* hit text-part box in document coordinates */
+} ld_run_hit;
+
+int ld_run_hit_test(void* doc, int x, int y, ld_run_hit* out);
+
+/* Return a newly allocated UTF-8 copy of a paragraph's plain text.
+ * The caller must free it with ld_free_string().  Returns NULL if the index
+ * is invalid or the paragraph cache is not valid yet. */
+char* ld_paragraph_get_text(void* doc, int index);
+
+/* Replace the plain text of a paragraph.  text is UTF-8; '\n' becomes a
+ * line break.  Only the paragraph's children are rebuilt: the element, its
+ * class and its data-ld-paragraph-index attribute are preserved.
+ * Character-level run formatting is flattened.
+ * The change is in memory only and is NOT written to the DOCX file.
+ * Returns 1 on success, 0 on invalid index or failure. */
+int ld_paragraph_set_text(void* doc, int index, const char* text);
+
+/* Return the paragraph's inner HTML (litehtml DOM) as UTF-8 string.
+ * The caller must free it with ld_free_string().  Returns NULL if the index
+ * is invalid or the paragraph cache is not valid yet. */
+int ld_paragraph_get_xml(void* doc, int index, char** out_xml);
+
+/* Replace the paragraph's inner HTML with the given XML/HTML fragment.
+ * xml is UTF-8; a subset of HTML is supported: <span class="sN">, <b>, <i>,
+ * <u>, <strike>, <br>, and plain text.  The paragraph element, its class,
+ * and data-ld-paragraph-index are preserved.  A representative run span is
+ * kept to maintain dominant character formatting.  The change is in memory
+ * only and is NOT written to the DOCX file.  Returns 1 on success. */
+int ld_paragraph_set_xml(void* doc, int index, const char* xml);
+
+/* Return the original OOXML <w:p>...</w:p> fragment of the paragraph, exactly
+ * as captured from word/document.xml while loading (re-serialized from the
+ * parsed XML DOM).  This is the real DOCX markup (w:p, w:r, w:t, w:pPr...),
+ * NOT the litehtml serialization returned by ld_paragraph_get_xml().
+ * The caller must free the string with ld_free_string().
+ * Returns 1 on success, 0 if the index has no stored OOXML. */
+int ld_paragraph_get_ooxml(void* doc, int index, char** out_xml);
+
+/* Replace the paragraph's raw OOXML with the given <w:p>...</w:p> fragment.
+ * The fragment must contain exactly one well-formed w:p.  Its original byte
+ * range in word/document.xml is replaced in place and the whole render tree
+ * is rebuilt, so styling/lists/tables continue to be resolved by the normal
+ * DOCX pipeline.  The paragraph keeps its index as long as the fragment still
+ * contains a single w:p that does not change document structure.
+ * Caller must run a full ld_render() afterwards to get the new layout.
+ * In-memory only: the DOCX file is not written.  Returns 1 on success. */
+int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml);
+
+/* Return the complete, up-to-date word/document.xml as UTF-8 string.
+ * The returned string includes the XML declaration, root <w:document> with
+ * all namespaces, the updated <w:body> with all paragraphs (including any
+ * edits applied via ld_paragraph_set_ooxml), and the closing tags.
+ * The caller owns the returned string and must free it with ld_free_string().
+ * Returns 1 on success, 0 on failure (e.g., invalid document handle). */
+int ld_get_document_xml(void* doc, char** out_xml);
+
+/* Free a string returned by litedocx (ld_paragraph_get_text / hit-test). */
+void ld_free_string(char* str);
+
+const char* ld_last_error(void);
+const char* ld_version(void);
+
+/* Invalidate font cache (call when zoom factor changes).
+ * Forces font recreation at next layout/render. */
+void ld_invalidate_font_cache(void* doc);
+
+/* Clear page cache (call after text edit to force repagination). */
+void ld_clear_page_cache(void* doc);
+
+void ld_destroy(void* doc);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

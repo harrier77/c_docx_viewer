@@ -260,4 +260,48 @@ namespace litedocx
 
         return true;
     }
+
+    std::string serialize_document_xml(const DocxModel& model)
+    {
+        std::string xml;
+        xml.reserve(model.document_xml.size() + 1024);
+        
+        // If we have modified paragraph OOXML, we need to rebuild the document body
+        if (!model.paragraph_ooxml.empty() && model.dirty)
+        {
+            // Parse the original document_xml and replace w:p elements
+            // For simplicity, we'll do a basic string replacement
+            // A full implementation would use an XML parser
+            xml = model.document_xml;
+            
+            // Find the w:body content and replace paragraphs
+            size_t body_start = xml.find("<w:body>");
+            size_t body_end = xml.find("</w:body>");
+            if (body_start != std::string::npos && body_end != std::string::npos)
+            {
+                std::string before = xml.substr(0, body_start + 8); // include <w:body>
+                std::string after = xml.substr(body_end);
+                
+                std::string body_content;
+                for (const auto& p : model.paragraph_ooxml)
+                {
+                    body_content += p;
+                }
+                
+                xml = before + body_content + after;
+            }
+        }
+        else
+        {
+            xml = model.document_xml;
+        }
+        
+        // Ensure XML declaration
+        if (xml.find("<?xml") != 0)
+        {
+            xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" + xml;
+        }
+        
+        return xml;
+    }
 } // namespace litedocx

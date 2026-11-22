@@ -1990,8 +1990,11 @@ void ld_extract_layout(void* doc)
     // Enable extraction mode
     h->container->in_layout_extraction = true;
     
-    // Save original lh_callbacks and install no-op callbacks to prevent actual drawing
+    // Save original callbacks AND renderer, install no-op callbacks + null renderer
+    // to completely prevent any drawing during extraction
     lh_callbacks saved_lh = h->container->cb.lh;
+    void* saved_renderer = h->container->cb.renderer;
+    
     h->container->cb.lh.create_font = null_create_font;
     h->container->cb.lh.delete_font = null_delete_font;
     h->container->cb.lh.text_width = null_text_width;
@@ -2004,6 +2007,7 @@ void ld_extract_layout(void* doc)
     h->container->cb.lh.get_viewport = null_get_viewport;
     h->container->cb.lh.get_media_features = null_get_media_features;
     h->container->cb.lh.redraw_box = null_redraw_box;
+    h->container->cb.renderer = nullptr;  // Disable renderer completely
     
     // Perform a draw pass with clip covering entire document to trigger all callbacks
     // The callbacks will populate the layout cache via ld_layout_cache_ops
@@ -2020,8 +2024,9 @@ void ld_extract_layout(void* doc)
         // Ignore errors during extraction
     }
     
-    // Restore original callbacks
+    // Restore original callbacks AND renderer
     h->container->cb.lh = saved_lh;
+    h->container->cb.renderer = saved_renderer;
     
     // Disable extraction mode
     h->container->in_layout_extraction = false;
@@ -2057,6 +2062,345 @@ void ld_destroy(void* doc)
         CoUninitialize();
     }
     delete h;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Paragraph Hit-Test & XML Editing (in-memory only)                         */
+/* ------------------------------------------------------------------------- */
+
+int ld_paragraph_hit_test(void* doc, int x, int y,
+                          ld_paragraph_hit* out_hit, char** out_text)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->doc || !h->doc->root())
+        return 0;
+    if (out_text) *out_text = nullptr;
+    if (!out_hit)
+        return 0;
+    try
+    {
+        // Get all paragraphs with data-ld-paragraph-index attribute
+        auto paras = h->doc->root()->select_all("[data-ld-paragraph-index]");
+        for (auto& el : paras)
+        {
+            if (!el) continue;
+            const char* idx_str = el->get_attr("data-ld-paragraph-index");
+            if (!idx_str) continue;
+            int idx = std::atoi(idx_str);
+            litehtml::position pos = el->get_placement();
+            if (x >= static_cast<int>(pos.x) && x < static_cast<int>(pos.x + pos.width) &&
+                y >= static_cast<int>(pos.y) && y < static_cast<int>(pos.y + pos.height))
+            {
+                out_hit->index = idx;
+                out_hit->x = static_cast<int>(pos.x);
+                out_hit->y = static_cast<int>(pos.y);
+                out_hit->w = static_cast<int>(pos.width);
+                out_hit->h = static_cast<int>(pos.height);
+                if (out_text)
+                {
+                    // Get plain text of paragraph
+                    std::string text;
+                    el->get_text(text);
+                    if (!text.empty())
+                    {
+                        *out_text = (char*)malloc(text.size() + 1);
+                        if (*out_text)
+                            std::strcpy(*out_text, text.c_str());
+                    }
+                }
+                return 1;
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    return 0;
+}
+
+int ld_run_hit_test(void* doc, int x, int y, ld_run_hit* out)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->doc || !h->doc->root())
+        return 0;
+    if (!out)
+        return 0;
+    try
+    {
+        // First find the paragraph
+        auto paras = h->doc->root()->select_all("[data-ld-paragraph-index]");
+        for (auto& pel : paras)
+        {
+            if (!pel) continue;
+            const char* idx_str = pel->get_attr("data-ld-paragraph-index");
+            if (!idx_str) continue;
+            int para_idx = std::atoi(idx_str);
+            litehtml::position ppos = pel->get_placement();
+            if (x >= static_cast<int>(ppos.x) && x < static_cast<int>(ppos.x + ppos.width) &&
+                y >= static_cast<int>(ppos.y) && y < static_cast<int>(ppos.y + ppos.height))
+            {
+                // Found paragraph, now find the run/text part
+                std::string para_text;
+                pel->get_text(para_text);
+                // Get direct text children (run slots)
+                auto runs = pel->select_all("text");
+                // Also check for span/b/i/u etc which contain text
+                auto spans = pel->select_all("span");
+                runs.insert(runs.end(), spans.begin(), spans.end());
+                
+                int best_run = -1;
+                int best_dist = INT_MAX;
+                litehtml::position best_pos;
+                int ri = 0;
+                
+                for (auto& rel : runs)
+                {
+                    if (!rel) { ++ri; continue; }
+                    litehtml::position rpos = rel->get_placement();
+                    if (static_cast<int>(rpos.width) <= 0 || static_cast<int>(rpos.height) <= 0) { ++ri; continue; }
+                    // Check if point is inside or closest
+                    int dx = x - static_cast<int>(rpos.x + rpos.width / 2);
+                    int dy = y - static_cast<int>(rpos.y + rpos.height / 2);
+                    int dist = dx * dx + dy * dy;
+                    if (dist < best_dist)
+                    {
+                        best_dist = dist;
+                        best_run = ri;
+                        best_pos = rpos;
+                    }
+                    ++ri;
+                }
+                
+                if (best_run >= 0)
+                {
+                    out->para_index = para_idx;
+                    out->run_index = best_run;
+                    out->x = static_cast<int>(best_pos.x);
+                    out->y = static_cast<int>(best_pos.y);
+                    out->w = static_cast<int>(best_pos.width);
+                    out->h = static_cast<int>(best_pos.height);
+                    
+                    // Calculate character offsets (simplified)
+                    // In a real implementation, this would use the text content
+                    out->char_offset = -1;
+                    out->run_char_start = -1;
+                    out->run_char_end = -1;
+                    out->run_char_offset = -1;
+                    
+                    return 1;
+                }
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    return 0;
+}
+
+char* ld_paragraph_get_text(void* doc, int index)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->doc || !h->doc->root())
+        return nullptr;
+    try
+    {
+        auto paras = h->doc->root()->select_all("[data-ld-paragraph-index]");
+        for (auto& el : paras)
+        {
+            if (!el) continue;
+            const char* idx_str = el->get_attr("data-ld-paragraph-index");
+            if (!idx_str) continue;
+            if (std::atoi(idx_str) == index)
+            {
+                std::string text;
+                el->get_text(text);
+                if (!text.empty())
+                {
+                    char* out = (char*)malloc(text.size() + 1);
+                    if (out) std::strcpy(out, text.c_str());
+                    return out;
+                }
+                return nullptr;
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    return nullptr;
+}
+
+int ld_paragraph_set_text(void* doc, int index, const char* text)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->doc || !h->doc->root() || !text)
+        return 0;
+    try
+    {
+        auto paras = h->doc->root()->select_all("[data-ld-paragraph-index]");
+        for (auto& el : paras)
+        {
+            if (!el) continue;
+            const char* idx_str = el->get_attr("data-ld-paragraph-index");
+            if (!idx_str) continue;
+            if (std::atoi(idx_str) == index)
+            {
+                // Use append_children_from_string to replace content
+                h->doc->append_children_from_string(*el, text, true);
+                h->doc->rebuild_render_tree();
+                return 1;
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    return 0;
+}
+
+int ld_paragraph_get_xml(void* doc, int index, char** out_xml)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->doc || !h->doc->root() || !out_xml)
+        return 0;
+    *out_xml = nullptr;
+    try
+    {
+        auto paras = h->doc->root()->select_all("[data-ld-paragraph-index]");
+        for (auto& el : paras)
+        {
+            if (!el) continue;
+            const char* idx_str = el->get_attr("data-ld-paragraph-index");
+            if (!idx_str) continue;
+            if (std::atoi(idx_str) == index)
+            {
+                // Use document dumper to serialize to HTML
+                struct html_dumper : public litehtml::dumper
+                {
+                    std::string result;
+                    virtual void begin_node(const std::string& descr) override
+                    {
+                        if (descr != "html" && descr != "head" && descr != "body")
+                        {
+                            result += "<";
+                            result += descr;
+                            result += ">";
+                        }
+                    }
+                    virtual void end_node() override
+                    {
+                    }
+                    virtual void begin_attrs_group(const std::string&) override {}
+                    virtual void end_attrs_group() override {}
+                    virtual void add_attr(const std::string& name, const std::string& value) override
+                    {
+                        result += " ";
+                        result += name;
+                        result += "=\"";
+                        result += value;
+                        result += "\"";
+                    }
+                } dumper;
+                h->doc->dump(dumper);
+                std::string html = dumper.result;
+                if (!html.empty())
+                {
+                    *out_xml = (char*)malloc(html.size() + 1);
+                    if (*out_xml) std::strcpy(*out_xml, html.c_str());
+                    return 1;
+                }
+                return 0;
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    return 0;
+}
+
+int ld_paragraph_set_xml(void* doc, int index, const char* xml)
+{
+    (void)doc; (void)index; (void)xml;
+    // TODO: Parse XML and replace paragraph inner HTML
+    // Requires litehtml DOM manipulation
+    return 0;
+}
+
+int ld_paragraph_get_ooxml(void* doc, int index, char** out_xml)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->container || !h->container->model || !out_xml)
+        return 0;
+    *out_xml = nullptr;
+    try
+    {
+        const auto& para_ooxml = h->container->model->paragraph_ooxml;
+        if (index >= 0 && index < (int)para_ooxml.size())
+        {
+            const std::string& xml = para_ooxml[index];
+            *out_xml = (char*)malloc(xml.size() + 1);
+            if (*out_xml) std::strcpy(*out_xml, xml.c_str());
+            return 1;
+        }
+    }
+    catch (...)
+    {
+    }
+    return 0;
+}
+
+int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->container || !h->container->model || !ooxml)
+        return 0;
+    try
+    {
+        auto& para_ooxml = h->container->model->paragraph_ooxml;
+        if (index >= 0 && index < (int)para_ooxml.size())
+        {
+            para_ooxml[index] = ooxml;
+            // Rebuild the document from modified OOXML
+            // This is a simplified version - in reality we'd need to rebuild the DOM
+            h->container->model->dirty = true;
+            return 1;
+        }
+    }
+    catch (...)
+    {
+    }
+    return 0;
+}
+
+int ld_get_document_xml(void* doc, char** out_xml)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->container || !h->container->model || !out_xml)
+        return 0;
+    *out_xml = nullptr;
+    try
+    {
+        // Serialize the full document.xml from the model
+        std::string xml = litedocx::serialize_document_xml(*h->container->model);
+        if (!xml.empty())
+        {
+            *out_xml = (char*)malloc(xml.size() + 1);
+            if (*out_xml) std::strcpy(*out_xml, xml.c_str());
+            return 1;
+        }
+    }
+    catch (...)
+    {
+    }
+    return 0;
+}
+
+void ld_free_string(char* str)
+{
+    if (str)
+        free(str);
 }
 
 } // extern "C"

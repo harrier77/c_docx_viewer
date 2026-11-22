@@ -5,6 +5,10 @@
  * condivide tipi, macro e stato globale definiti nel file principale.
  */
 
+/* Forward declarations for editor functions */
+extern void begin_paragraph_edit_at_index(int index);
+extern void show_run_viewer(int para_index, const ld_run_hit *hit, const char *run_text);
+
 static void viewer_on_size(HWND hwnd, WPARAM wp, LPARAM lp)
 {
     (void)wp;

@@ -28,3 +28,13 @@ EXPORTS
     ld_destroy
     ld_set_layout_cache_callbacks
     ld_extract_layout
+    ld_paragraph_hit_test
+    ld_run_hit_test
+    ld_paragraph_get_text
+    ld_paragraph_set_text
+    ld_paragraph_get_xml
+    ld_paragraph_set_xml
+    ld_paragraph_get_ooxml
+    ld_paragraph_set_ooxml
+    ld_get_document_xml
+    ld_free_string

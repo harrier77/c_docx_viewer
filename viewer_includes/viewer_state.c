@@ -95,14 +95,22 @@ static int g_cb_init;
 
 /* --------------------------- worker thread / jobs --------------------------- */
 
-#define WM_APP_DOC_READY    (WM_APP + 1)
-#define WM_APP_RENDER_DONE  (WM_APP + 3)
+#define WM_APP_DOC_READY        (WM_APP + 1)
+#define WM_APP_RENDER_DONE      (WM_APP + 3)
+#define WM_APP_HIT_RESULT       (WM_APP + 4)
+#define WM_APP_RUN_HIT_RESULT   (WM_APP + 5)
+#define WM_APP_PARA_XML_READY   (WM_APP + 6)
+#define WM_APP_EDIT_APPLIED     (WM_APP + 7)
 
 typedef enum JobKind
 {
     JOB_LOAD = 1,
     JOB_RENDER,
     JOB_RENDER_RANGE,
+    JOB_HIT_TEST,
+    JOB_RUN_HIT_TEST,
+    JOB_GET_PARA_XML,
+    JOB_APPLY_EDIT,
     JOB_DESTROY,
     JOB_QUIT
 } JobKind;
@@ -120,7 +128,58 @@ typedef struct Job
     void       *doc;
     int         first_page;
     int         last_page;
+    int         doc_x;
+    int         doc_y;
+    int         para_index;
+    int         gen;
+    int         epoch;
+    int         ooxml;
+    char       *text;
+    char       *xml_text;
+    unsigned    token;
 } Job;
+
+/* Result structures for async jobs */
+typedef struct HitResult
+{
+    void       *doc;
+    unsigned    gen;
+    int         epoch;
+    int         hit;
+    int         index;
+    char       *text;
+} HitResult;
+
+typedef struct RunHitResult
+{
+    void       *doc;
+    unsigned    gen;
+    int         epoch;
+    int         doc_x;
+    int         doc_y;
+    int         hit;
+    ld_run_hit  info;
+} RunHitResult;
+
+typedef struct ParaXmlResult
+{
+    void       *doc;
+    unsigned    gen;
+    int         epoch;
+    int         index;
+    int         ok;
+    char       *xml;
+    char        error[256];
+} ParaXmlResult;
+
+typedef struct EditResult
+{
+    void       *doc;
+    unsigned    gen;
+    unsigned    token;
+    int         ok;
+    char        error[256];
+} EditResult;
 
 static CRITICAL_SECTION g_job_lock;
 static Job             *g_job_head;
@@ -152,6 +211,42 @@ static int      g_layout_complete = 0;       /* layout completo dopo primo full 
 /* Layout Cache (Fase 3) */
 #include "layout_cache.h"
 static LayoutCache *g_layout_cache = NULL;
+
+/* Editor constants */
+#define LD_PARA_EDIT_CLASS   L"D2DParaEditClass"
+#define IDC_PARA_EDIT_XML    1001
+#define IDC_PARA_CANCEL      1002
+#define IDC_PARA_APPLY       1003
+#define IDC_PARA_HINT        1004
+
+/* Editor state (Fase 4) */
+typedef enum DocState
+{
+    DOC_STATE_IDLE       = 0,
+    DOC_STATE_HITTEST    = 1,
+    DOC_STATE_EDITOR     = 2,
+    DOC_STATE_APPLYING   = 3
+} DocState;
+
+static DocState  g_doc_state = DOC_STATE_IDLE;
+static int       g_edit_index = -1;
+static int       g_edit_apply = 0;
+static int       g_edit_is_xml = 0;
+static int       g_edit_readonly = 0;
+static HWND      g_edit_hwnd = NULL;
+static HWND      g_edit_ctl = NULL;
+static HWND      g_edit_ctl_xml = NULL;
+static HWND      g_edit_tab = NULL;
+static int       g_edit_tab_index = 0;
+static char     *g_edit_xml_original = NULL;
+static char     *g_edit_result_utf8 = NULL;
+static HACCEL    g_edit_accel = NULL;
+static int       g_run_view_pending = 0;
+static int       g_layout_epoch = 0;
+static int       g_editor_class_registered = 0;
+
+/* Shared function declarations */
+void log_xml_block(const char *tag, int index, const char *xml);
 
 
 /* REGRESSION WARNING: layout_content_width() = page_w - LAYOUT_PADDING_X is the

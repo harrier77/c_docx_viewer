@@ -385,3 +385,63 @@ static void load_docx_file(const char *path)
     if (!path || !path[0]) return;
     start_async_load(path);
 }
+
+/* Log XML block for debugging */
+void log_xml_block(const char *tag, int index, const char *xml)
+{
+    if (!xml) return;
+    fprintf(stderr, "[XML][%s] idx=%d:\n%s\n", tag, index, xml);
+}
+
+/* Riprende render in sospeso dopo editor/hit-test */
+void resume_pending_render(void)
+{
+    if (g_render_pending_width >= 0 && g_render_pending_width != g_doc_content_w)
+    {
+        int w = g_render_pending_width;
+        g_render_pending_width = -1;
+        request_render(w);
+    }
+    else if (g_render_pending_first_page >= 0)
+    {
+        int first = g_render_pending_first_page;
+        int last = g_render_pending_last_page;
+        g_render_pending_first_page = -1;
+        g_render_pending_last_page = -1;
+        request_render_range(first, last);
+    }
+}
+
+/* Accoda job per applicare modifica XML */
+void request_paragraph_apply_xml(const char *xml)
+{
+    if (!g_doc || !xml) return;
+    if (!g_worker_started) return;
+
+    Job *j = alloc_job(JOB_APPLY_EDIT);
+    if (!j) return;
+    j->doc = g_doc;
+    j->gen = g_load_gen;
+    j->para_index = g_edit_index;
+    j->xml_text = _strdup(xml);
+    j->ooxml = 1;
+    g_doc_state = DOC_STATE_APPLYING;
+    enqueue_job(j);
+}
+
+/* Accoda job per applicare modifica testo semplice */
+void request_paragraph_apply(const char *text)
+{
+    if (!g_doc || !text) return;
+    if (!g_worker_started) return;
+
+    Job *j = alloc_job(JOB_APPLY_EDIT);
+    if (!j) return;
+    j->doc = g_doc;
+    j->gen = g_load_gen;
+    j->para_index = g_edit_index;
+    j->text = _strdup(text);
+    j->ooxml = 0;
+    g_doc_state = DOC_STATE_APPLYING;
+    enqueue_job(j);
+}
