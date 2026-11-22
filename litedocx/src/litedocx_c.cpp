@@ -421,6 +421,18 @@ namespace
         litehtml::document::ptr doc;
         TextWidthCache       text_width_cache;
 
+        /* Layout cache extraction callbacks (set by ld_set_layout_cache_callbacks) */
+        const ld_layout_cache_ops* layout_cache_ops = nullptr;
+        void*                    layout_cache_user = nullptr;
+
+        /* Paragraph tracking for layout cache */
+        int                    last_para_y = -10000;
+        int                    last_para_id = 0;
+        int                    para_counter = 0;
+
+        /* Layout extraction mode - only fire cache callbacks during extraction */
+        bool                     in_layout_extraction = false;
+
         /* Renderer mode: the host owns the draw target.  In this mode the DLL
          * must not assume an HDC: text is measured/drawn through the host
          * callbacks and list markers are delegated when possible. */
@@ -728,6 +740,29 @@ namespace
             int w_px = static_cast<int>(floor(pos.width + 0.5f));
             int h_px = static_cast<int>(floor(pos.height + 0.5f));
 
+            /* Layout cache extraction: track paragraphs and emit text runs */
+            if (in_layout_extraction && layout_cache_ops && layout_cache_ops->on_text_run) {
+                // Heuristic: new paragraph if Y changes by more than ~line height
+                if (abs(y - last_para_y) > 30) {
+                    // New paragraph
+                    last_para_y = y;
+                    last_para_id = ++para_counter;
+                    if (layout_cache_ops->on_paragraph_start) {
+                        // Estimate paragraph bounds from first run
+                        layout_cache_ops->on_paragraph_start(layout_cache_user,
+                            last_para_id, x, y, w_px, h_px * 5, // rough height
+                            LD_LAYOUT_ALIGN_LEFT, 0, 0, 0, 0, 0, 0);
+                    }
+                }
+                int underline = 0, strike = 0;
+                // TODO: extract from font metrics
+                layout_cache_ops->on_text_run(layout_cache_user,
+                    last_para_id, text ? text : "",
+                    x, y, w_px, h_px,
+                    reinterpret_cast<void*>(hFont),
+                    to_cref(color), underline, strike);
+            }
+
             if(has_renderer())
             {
                 /* Delegate the whole text drawing to the host.  No SelectObject
@@ -790,6 +825,22 @@ namespace
             if(w <= 0 || h <= 0)
             {
                 return;
+            }
+
+            /* Layout cache extraction: list marker */
+            if (in_layout_extraction && layout_cache_ops && layout_cache_ops->on_list_marker) {
+                int type = LD_MARKER_OTHER;
+                switch(marker.marker_type)
+                {
+                    case litehtml::list_style_type_circle: type = LD_MARKER_CIRCLE; break;
+                    case litehtml::list_style_type_disc:   type = LD_MARKER_DISC;   break;
+                    case litehtml::list_style_type_square: type = LD_MARKER_SQUARE; break;
+                    case litehtml::list_style_type_none:   type = LD_MARKER_NONE;   break;
+                    default:                               type = LD_MARKER_OTHER;  break;
+                }
+                if (!marker.image.empty()) type = LD_MARKER_IMAGE;
+                layout_cache_ops->on_list_marker(layout_cache_user, x, y, w, h,
+                    type, to_cref(marker.color), marker.image.empty() ? nullptr : marker.image.c_str());
             }
 
             /* Renderer mode: let the host draw the marker.  If the callback
@@ -915,6 +966,11 @@ namespace
                 return;
             }
 
+            /* Layout cache extraction: image */
+            if (in_layout_extraction && layout_cache_ops && layout_cache_ops->on_image) {
+                layout_cache_ops->on_image(layout_cache_user, x, y, w, h, url.c_str());
+            }
+
             if(img->host && cb.draw_image_data)
             {
                 /* In renderer mode the target is the opaque renderer, not an
@@ -960,6 +1016,11 @@ namespace
             const int w = static_cast<int>(layer.border_box.width);
             const int h = static_cast<int>(layer.border_box.height);
             LDBG((std::string("[LITEDOCX_DRAW_FILL] at (") + std::to_string(x) + "," + std::to_string(y) + ") " + std::to_string(w) + "x" + std::to_string(h) + "\n").c_str());
+            
+            /* Layout cache extraction: background */
+            if (in_layout_extraction && layout_cache_ops && layout_cache_ops->on_background) {
+                layout_cache_ops->on_background(layout_cache_user, x, y, w, h, to_cref(color));
+            }
             
             /* Check if this is a table cell and call custom callback */
             if(cb.draw_table_cell_bg)
@@ -1015,6 +1076,22 @@ namespace
             const int y = static_cast<int>(pos.y);
             const int w = static_cast<int>(pos.width);
             const int h = static_cast<int>(pos.height);
+            
+            /* Layout cache extraction: borders */
+            if (in_layout_extraction && layout_cache_ops && layout_cache_ops->on_border) {
+                int left_w   = static_cast<int>(borders.left.width);
+                int top_w    = static_cast<int>(borders.top.width);
+                int right_w  = static_cast<int>(borders.right.width);
+                int bottom_w = static_cast<int>(borders.bottom.width);
+                if (left_w > 0)
+                    layout_cache_ops->on_border(layout_cache_user, x, y, left_w, h, 0, left_w, to_cref(borders.left.color));
+                if (top_w > 0)
+                    layout_cache_ops->on_border(layout_cache_user, x, y, w, top_w, 1, top_w, to_cref(borders.top.color));
+                if (right_w > 0)
+                    layout_cache_ops->on_border(layout_cache_user, x + w - right_w, y, right_w, h, 2, right_w, to_cref(borders.right.color));
+                if (bottom_w > 0)
+                    layout_cache_ops->on_border(layout_cache_user, x, y + h - bottom_w, w, bottom_w, 3, bottom_w, to_cref(borders.bottom.color));
+            }
             
             /* Check if this is a table cell and call custom callback */
             if(cb.draw_table_cell_borders)
@@ -1203,6 +1280,9 @@ namespace
         int                     m_last_rendered_page = -1;  // Highest page laid out (pagination)
         bool                    m_full_layout_done = false; // Full document::render completed
         bool                    m_fonts_invalidated = false; // Font cache invalidated, need render tree rebuild
+        // Layout cache extraction (Fase 2)
+        const ld_layout_cache_ops* layout_cache_ops = nullptr;
+        void*                   layout_cache_user = nullptr;
     };
 
     void fire_redraw(void* user, const litehtml::position& pos)
@@ -1862,6 +1942,89 @@ void ld_clear_page_cache(void* doc)
     h->m_last_rendered_page = -1;
     h->m_full_layout_done = false; // Reset anche flag full layout
     // Nota: non resettiamo m_page_height_px (stima CSS) per evitare di perderla
+}
+
+void ld_set_layout_cache_callbacks(void* doc, const ld_layout_cache_ops* ops, void* user)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->container)
+        return;
+    h->layout_cache_ops = ops;
+    h->layout_cache_user = user;
+    h->container->layout_cache_ops = ops;
+    h->container->layout_cache_user = user;
+    // Reset paragraph tracking
+    h->container->last_para_y = -10000;
+    h->container->last_para_id = 0;
+    h->container->para_counter = 0;
+    h->container->in_layout_extraction = false;
+}
+
+namespace {
+    // No-op callbacks for layout extraction - only fire ld_layout_cache_ops, don't actually draw
+    void* null_create_font(const char*, int, int, int, int, int, lh_font_metrics*) { return nullptr; }
+    void null_delete_font(void*) {}
+    int null_text_width(const char*, void*) { return 0; }
+    void null_draw_text(void*, const char*, void*, unsigned, int, int, int, int) {}
+    void null_draw_solid_fill(void*, int, int, int, int, unsigned) {}
+    void null_draw_borders(void*, int, int, int, int, int, int, int, int, unsigned, unsigned, unsigned, unsigned) {}
+    void null_set_caption(const char*) {}
+    void null_on_anchor_click(const char*) {}
+    void null_set_cursor(const char*) {}
+    void null_get_viewport(int* x, int* y, int* w, int* h) { if(x)*x=0; if(y)*y=0; if(w)*w=800; if(h)*h=600; }
+    void null_get_media_features(lh_media_features* m) { if(m) { m->type=0; m->width=800; m->height=600; m->device_width=800; m->device_height=600; m->color=8; m->color_index=256; m->monochrome=0; m->resolution=96; } }
+    void null_redraw_box(int, int, int, int) {}
+}
+
+void ld_extract_layout(void* doc)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->doc || !h->container)
+        return;
+    
+    // Reset paragraph tracking for fresh extraction
+    h->container->last_para_y = -10000;
+    h->container->last_para_id = 0;
+    h->container->para_counter = 0;
+    
+    // Enable extraction mode
+    h->container->in_layout_extraction = true;
+    
+    // Save original lh_callbacks and install no-op callbacks to prevent actual drawing
+    lh_callbacks saved_lh = h->container->cb.lh;
+    h->container->cb.lh.create_font = null_create_font;
+    h->container->cb.lh.delete_font = null_delete_font;
+    h->container->cb.lh.text_width = null_text_width;
+    h->container->cb.lh.draw_text = null_draw_text;
+    h->container->cb.lh.draw_solid_fill = null_draw_solid_fill;
+    h->container->cb.lh.draw_borders = null_draw_borders;
+    h->container->cb.lh.set_caption = null_set_caption;
+    h->container->cb.lh.on_anchor_click = null_on_anchor_click;
+    h->container->cb.lh.set_cursor = null_set_cursor;
+    h->container->cb.lh.get_viewport = null_get_viewport;
+    h->container->cb.lh.get_media_features = null_get_media_features;
+    h->container->cb.lh.redraw_box = null_redraw_box;
+    
+    // Perform a draw pass with clip covering entire document to trigger all callbacks
+    // The callbacks will populate the layout cache via ld_layout_cache_ops
+    int doc_w = static_cast<int>(h->doc->width());
+    int doc_h = static_cast<int>(h->doc->height());
+    litehtml::position clip(0, 0, doc_w, doc_h);
+    
+    try
+    {
+        h->doc->draw(0, 0, 0, &clip);
+    }
+    catch(...)
+    {
+        // Ignore errors during extraction
+    }
+    
+    // Restore original callbacks
+    h->container->cb.lh = saved_lh;
+    
+    // Disable extraction mode
+    h->container->in_layout_extraction = false;
 }
 
 void ld_destroy(void* doc)

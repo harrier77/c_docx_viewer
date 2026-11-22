@@ -149,6 +149,9 @@ static int      g_last_rendered_page = -1;   /* ultima pagina renderizzata */
 static int      g_page_h_est = 0;            /* altezza stimata singola pagina */
 static int      g_layout_complete = 0;       /* layout completo dopo primo full render */
 
+/* Layout Cache (Fase 3) */
+#include "layout_cache.h"
+static LayoutCache *g_layout_cache = NULL;
 
 
 /* REGRESSION WARNING: layout_content_width() = page_w - LAYOUT_PADDING_X is the

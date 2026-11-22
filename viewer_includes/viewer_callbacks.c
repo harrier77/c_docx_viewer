@@ -5,6 +5,8 @@
  * condivide tipi, macro e stato globale definiti nel file principale.
  */
 
+#include "layout_cache.h"
+
 static void cb_draw_text(void *hdc, const char *text, void *font, unsigned rgb, int x, int y, int w, int h)
 {
     // log_msg("[DRAW_TEXT] text='%s' at (%d,%d) w=%d h=%d\n", text ? text : "NULL", x, y, w, h);
@@ -97,6 +99,103 @@ static void cb_set_cursor(const char *cursor)
 {
     lstrcpynA(g_cur, cursor ? cursor : "arrow", sizeof(g_cur));
 }
+
+/* ------------------------------------------------------------------------- */
+/* Layout Cache Callbacks                                                    */
+/* ------------------------------------------------------------------------- */
+
+static void cache_on_paragraph_start(void *user,
+                                     int id, int x, int y, int w, int h,
+                                     int alignment, int line_spacing,
+                                     int space_before, int space_after,
+                                     int indent_left, int indent_right, int indent_first)
+{
+    (void)user;
+    if (!g_layout_cache)
+        return;
+    layout_cache_add_paragraph(g_layout_cache, NULL, id, x, y, w, h,
+                               (LayoutAlignment)alignment, line_spacing,
+                               space_before, space_after,
+                               indent_left, indent_right, indent_first);
+}
+
+static void cache_on_text_run(void *user,
+                              int para_id, const char *text, int x, int y, int w, int h,
+                              void *font_handle, unsigned color, int underline, int strike)
+{
+    (void)user;
+    if (!g_layout_cache)
+        return;
+    /* Trova il paragrafo per ID (semplificato: usa l'ultimo aggiunto) */
+    LayoutParagraph *para = g_layout_cache->root ? g_layout_cache->root->first_child : NULL;
+    while (para && para->id != para_id) {
+        para = para->next_sibling;
+    }
+    if (para) {
+        layout_cache_add_run(para, text, x, y, w, h,
+                             font_handle, (COLORREF)color, underline, strike);
+    }
+}
+
+static void cache_on_paragraph_end(void *user, int id)
+{
+    (void)user; (void)id;
+    /* Nulla da fare per ora */
+}
+
+static void cache_on_background(void *user, int x, int y, int w, int h, unsigned color)
+{
+    (void)user; (void)x; (void)y; (void)w; (void)h; (void)color;
+    /* I background sono gestiti dal renderer, non serve memorizzarli in cache */
+}
+
+static void cache_on_border(void *user, int x, int y, int w, int h,
+                            int side, int width, unsigned color)
+{
+    (void)user; (void)x; (void)y; (void)w; (void)h; (void)side; (void)width; (void)color;
+}
+
+static void cache_on_image(void *user, int x, int y, int w, int h, const char *src)
+{
+    (void)user; (void)x; (void)y; (void)w; (void)h; (void)src;
+}
+
+static void cache_on_list_marker(void *user, int x, int y, int w, int h,
+                                 int type, unsigned color, const char *image)
+{
+    (void)user; (void)x; (void)y; (void)w; (void)h; (void)type; (void)color; (void)image;
+}
+
+static void cache_on_table_cell(void *user,
+                                int table_idx, int row, int col,
+                                int x, int y, int w, int h,
+                                int is_header, unsigned bg_color,
+                                int border_left_w, int border_top_w,
+                                int border_right_w, int border_bottom_w,
+                                unsigned border_left_c, unsigned border_top_c,
+                                unsigned border_right_c, unsigned border_bottom_c,
+                                int padding_left, int padding_top,
+                                int padding_right, int padding_bottom,
+                                const char *valign)
+{
+    (void)user; (void)table_idx; (void)row; (void)col; (void)x; (void)y; (void)w; (void)h;
+    (void)is_header; (void)bg_color; (void)border_left_w; (void)border_top_w;
+    (void)border_right_w; (void)border_bottom_w; (void)border_left_c; (void)border_top_c;
+    (void)border_right_c; (void)border_bottom_c; (void)padding_left; (void)padding_top;
+    (void)padding_right; (void)padding_bottom; (void)valign;
+}
+
+/* Struttura callback per litedocx */
+static const ld_layout_cache_ops g_cache_ops = {
+    cache_on_paragraph_start,
+    cache_on_text_run,
+    cache_on_paragraph_end,
+    cache_on_background,
+    cache_on_border,
+    cache_on_image,
+    cache_on_list_marker,
+    cache_on_table_cell
+};
 
 static void init_callbacks(void)
 {

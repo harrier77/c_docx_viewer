@@ -184,6 +184,128 @@ void ld_invalidate_font_cache(void* doc);
 
 void ld_destroy(void* doc);
 
+/* ------------------------------------------------------------------------- */
+/* Layout Cache Extraction                                                   */
+/* ------------------------------------------------------------------------- */
+/*
+ * The layout cache allows the host to extract the computed layout
+ * (paragraphs, text runs, positions, styles) after ld_render/ld_draw,
+ * so that relayout is not needed for zoom/pan/transform operations.
+ */
+
+/* Layout element types */
+typedef enum ld_layout_element_type
+{
+    LD_LAYOUT_EL_NONE        = 0,
+    LD_LAYOUT_EL_PARAGRAPH   = 1,
+    LD_LAYOUT_EL_TEXT_RUN    = 2,
+    LD_LAYOUT_EL_TABLE       = 3,
+    LD_LAYOUT_EL_TABLE_ROW   = 4,
+    LD_LAYOUT_EL_TABLE_CELL  = 5,
+    LD_LAYOUT_EL_IMAGE       = 6,
+    LD_LAYOUT_EL_LIST_MARKER = 7,
+    LD_LAYOUT_EL_BORDER      = 8,
+    LD_LAYOUT_EL_BACKGROUND  = 9,
+} ld_layout_element_type;
+
+/* Paragraph alignment */
+typedef enum ld_layout_alignment
+{
+    LD_LAYOUT_ALIGN_LEFT   = 0,
+    LD_LAYOUT_ALIGN_CENTER = 1,
+    LD_LAYOUT_ALIGN_RIGHT  = 2,
+    LD_LAYOUT_ALIGN_JUSTIFY = 3,
+} ld_layout_alignment;
+
+/* Callback structure for layout extraction.
+ * Register with ld_set_layout_cache_callbacks(), then call ld_extract_layout().
+ * All coordinates are in document space (CSS pixels, unscaled).
+ */
+typedef struct ld_layout_cache_ops
+{
+    /* Called when a new paragraph/block starts.
+     * id: unique identifier for this paragraph (element pointer)
+     * x,y,w,h: bounding box in document coordinates
+     * alignment: text alignment
+     * line_spacing: inter-line spacing in px
+     * space_before/after: paragraph spacing
+     * indent_left/right/first: indentation
+     */
+    void (*on_paragraph_start)(void* user,
+                               int id, int x, int y, int w, int h,
+                               int alignment, int line_spacing,
+                               int space_before, int space_after,
+                               int indent_left, int indent_right, int indent_first);
+
+    /* Called for each text run within a paragraph.
+     * para_id: id from on_paragraph_start
+     * text: UTF-8 text (valid only during callback)
+     * x,y,w,h: run position/size in document coordinates
+     * font_handle: opaque font handle from litedocx
+     * color: text color (RGB)
+     * underline/strike: text decoration flags
+     */
+    void (*on_text_run)(void* user,
+                        int para_id, const char* text, int x, int y, int w, int h,
+                        void* font_handle, unsigned color, int underline, int strike);
+
+    /* Called when paragraph ends (optional, for cleanup). */
+    void (*on_paragraph_end)(void* user, int id);
+
+    /* Called for background fills (paragraph, table cell, etc.)
+     * x,y,w,h: rectangle in document coordinates
+     * color: fill color (RGB)
+     */
+    void (*on_background)(void* user, int x, int y, int w, int h, unsigned color);
+
+    /* Called for borders.
+     * side: 0=left, 1=top, 2=right, 3=bottom
+     * width: border width in px
+     * color: border color (RGB)
+     */
+    void (*on_border)(void* user, int x, int y, int w, int h,
+                      int side, int width, unsigned color);
+
+    /* Called for images.
+     * src: media path (e.g., "media/image1.png")
+     */
+    void (*on_image)(void* user, int x, int y, int w, int h, const char* src);
+
+    /* Called for list markers.
+     * type: ld_list_marker_type
+     * color: marker color
+     * image: image name if LD_MARKER_IMAGE, else NULL
+     */
+    void (*on_list_marker)(void* user, int x, int y, int w, int h,
+                           int type, unsigned color, const char* image);
+
+    /* Called for table cells.
+     * Provides cell geometry and style for potential custom rendering.
+     */
+    void (*on_table_cell)(void* user,
+                          int table_idx, int row, int col,
+                          int x, int y, int w, int h,
+                          int is_header, unsigned bg_color,
+                          int border_left_w, int border_top_w,
+                          int border_right_w, int border_bottom_w,
+                          unsigned border_left_c, unsigned border_top_c,
+                          unsigned border_right_c, unsigned border_bottom_c,
+                          int padding_left, int padding_top,
+                          int padding_right, int padding_bottom,
+                          const char* valign);
+} ld_layout_cache_ops;
+
+/* Register callbacks for layout extraction.
+ * Call before ld_extract_layout(). Pass NULL to disable.
+ */
+void ld_set_layout_cache_callbacks(void* doc, const ld_layout_cache_ops* ops, void* user);
+
+/* Extract layout by performing a draw pass with the registered callbacks.
+ * Must be called after ld_render() has completed layout.
+ * Does not produce visible output; only invokes the callbacks.
+ */
+void ld_extract_layout(void* doc);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

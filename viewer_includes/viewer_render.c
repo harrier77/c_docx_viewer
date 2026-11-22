@@ -17,6 +17,11 @@ static void request_render(int w)
     LOG_RENDER("request_render called");
     log_msg("[RENDER] request_render: w=%d g_render_busy=%d\n", w, g_render_busy);
 
+    /* Invalida layout cache se la larghezza di layout cambia (resize) */
+    if (g_layout_cache && g_layout_cache->layout_width != w) {
+        layout_cache_invalidate(g_layout_cache);
+    }
+
     if (!g_worker_started)
     {
         /* Fallback sincrono */
@@ -25,6 +30,20 @@ static void request_render(int w)
         g_doc_h = document_height(g_doc);
         layout_update_scrollbars(g_hwnd, g_doc_h);
         InvalidateRect(g_hwnd, NULL, FALSE);
+        /* Popola layout cache (Fase 3) */
+        if (g_layout_cache == NULL) {
+            g_layout_cache = layout_cache_create();
+        }
+        if (g_layout_cache) {
+            layout_cache_set_layout_params(g_layout_cache,
+                layout_content_width(),
+                LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X,
+                LAYOUT_VISUAL_PADDING_X,
+                LAYOUT_VISUAL_MARGIN_Y);
+            ld_set_layout_cache_callbacks(g_doc, &g_cache_ops, g_layout_cache);
+            ld_extract_layout(g_doc);
+            layout_cache_dump_stats(g_layout_cache);
+        }
         return;
     }
 
@@ -89,6 +108,20 @@ static void request_render_range(int first_page, int last_page)
         g_doc_h = document_height(g_doc);
         layout_update_scrollbars(g_hwnd, g_doc_h);
         InvalidateRect(g_hwnd, NULL, FALSE);
+        /* Popola layout cache (Fase 3) */
+        if (g_layout_cache == NULL) {
+            g_layout_cache = layout_cache_create();
+        }
+        if (g_layout_cache) {
+            layout_cache_set_layout_params(g_layout_cache,
+                layout_content_width(),
+                LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X,
+                LAYOUT_VISUAL_PADDING_X,
+                LAYOUT_VISUAL_MARGIN_Y);
+            ld_set_layout_cache_callbacks(g_doc, &g_cache_ops, g_layout_cache);
+            ld_extract_layout(g_doc);
+            layout_cache_dump_stats(g_layout_cache);
+        }
         return;
     }
 
@@ -149,6 +182,11 @@ static void apply_loaded_doc(unsigned id, void *doc)
             dispose_doc(g_doc);
         g_doc = doc;
         g_doc_content_w = g_load_content_w;
+
+        /* Invalida layout cache per nuovo documento */
+        if (g_layout_cache) {
+            layout_cache_invalidate(g_layout_cache);
+        }
 
         /* Set visual padding so layout box is centered inside visual box */
         ld_set_visual_padding(g_doc, LAYOUT_VISUAL_PADDING_X, LAYOUT_VISUAL_MARGIN_Y);
@@ -243,6 +281,27 @@ static void on_render_done(void *doc, int used_w)
     /* Layout completo dopo il primo full render */
     g_layout_complete = 1;
     LOG_RENDER("layout complete flag set");
+    fprintf(stderr, "[RENDER_DONE] g_layout_complete=1, creating/checking layout cache\n");
+
+    /* Popola layout cache (Fase 3) - solo dopo il primo full render */
+    if (g_layout_complete && g_layout_cache == NULL) {
+        fprintf(stderr, "[RENDER_DONE] creating new layout cache\n");
+        g_layout_cache = layout_cache_create();
+    }
+    if (g_layout_cache) {
+        fprintf(stderr, "[RENDER_DONE] setting layout cache params and extracting\n");
+        layout_cache_set_layout_params(g_layout_cache,
+            layout_content_width(),
+            LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X,
+            LAYOUT_VISUAL_PADDING_X,
+            LAYOUT_VISUAL_MARGIN_Y);
+        ld_set_layout_cache_callbacks(g_doc, &g_cache_ops, g_layout_cache);
+        ld_extract_layout(g_doc);
+        layout_cache_dump_stats(g_layout_cache);
+        fprintf(stderr, "[RENDER_DONE] layout cache extraction done\n");
+    } else {
+        fprintf(stderr, "[RENDER_DONE] ERROR: g_layout_cache is NULL!\n");
+    }
 
     /* Pending width (resize) ha priorità su pending range */
     if (!g_load_active && g_render_pending_width >= 0 && g_render_pending_width != used_w)

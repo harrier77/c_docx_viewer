@@ -26,3 +26,5 @@ EXPORTS
     ld_last_error
     ld_version
     ld_destroy
+    ld_set_layout_cache_callbacks
+    ld_extract_layout
