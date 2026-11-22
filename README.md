@@ -1,41 +1,73 @@
-# c_docx_viewer — Native Win32/GDI DOCX Viewer with litedocx
+# c_docx_viewer — Native Win32/Direct2D DOCX Viewer with litedocx
 
-A native `.docx` viewer for Windows written in pure C (TCC/GCC/MSVC compatible).
-No intermediate HTML: the document is converted directly to a `litehtml` tree
-and rendered via GDI.
+A native `.docx` viewer for Windows written in pure C (GCC/MinGW compatible).
+Uses **Direct2D/DirectWrite** for hardware-accelerated rendering.
+The document is converted directly to a `litehtml` tree by `litedocx.dll`
+and rendered via a modular Direct2D pipeline.
 
-## Architecture
+## Architecture (current `main` branch)
 
 ```
-docxview_new.c      → Win32 UI, worker thread, scroll, paint, double-buffering
-litedocx/           → C++ DLL (C ABI): OOXML → litehtml document tree
-  ├─ litedocx_c.cpp  → ABI: ld_open_file, ld_render, ld_draw, ld_get_page_count, ld_render_range
-  ├─ docx_builder.cpp→ WordprocessingML → litehtml elements conversion
-  ├─ docx_package.cpp→ ZIP reading + XML parsing (document.xml, styles.xml, numbering.xml)
-  └─ docx_model.cpp  → Intermediate data model (paragraphs, runs, tables, images, media)
-litehtml/           → HTML/CSS layout engine (submodule / header-only build)
+maind2dv.c              → Win32 entry point, message loop (unity build)
+viewer_includes/        → Modular viewer components (included by maind2dv.c)
+  ├─ viewer_state.c      → Configuration, types, global state (fonts, zoom, jobs, pagination)
+  ├─ viewer_log.c        → File logging & console diagnostics
+  ├─ viewer_fonts.c      → DirectWrite font cache & text callbacks
+  ├─ viewer_callbacks.c  → litedocx → renderer callbacks (draw text, fill, borders, images)
+  ├─ viewer_jobs.c       → Job queue & worker thread (load, render, range, destroy)
+  ├─ viewer_render.c     → Render requests, async loading, pagination state
+  ├─ viewer_lifecycle.c  → Window create/destroy (DWrite factory, D2D renderer)
+  ├─ viewer_paint.c      → WM_PAINT (D2D zoom transform, document_draw, Present)
+  ├─ viewer_input.c      → Resize, pan, scroll, zoom, mouse events
+  └─ viewer_commands.c   → File menu commands (Open, Reload, Exit, About)
+
+func_gdi/               → Shared layout & rendering primitives
+  ├─ layout.c/h          → Layout state, scroll, pan, zoom, content rect
+  ├─ renderer_d2d.c/h    → Direct2D renderer implementation
+  ├─ renderer.h          → Renderer vtable (FillRect, DrawText, DrawImage, etc.)
+  ├─ text_utf8.c/h       → UTF-8 ↔ UTF-16 conversion
+  └─ document.c/h        → Document drawing, page geometry, scrollbars
+
+litedocx/               → C++ DLL (C ABI): OOXML → litehtml document tree
+  ├─ litedocx_c.cpp      → ABI: ld_open_file, ld_render, ld_render_range, ld_draw, ld_get_page_count...
+  ├─ docx_builder.cpp    → WordprocessingML → litehtml elements conversion
+  ├─ docx_package.cpp    → ZIP reading + XML parsing (document.xml, styles.xml, numbering.xml)
+  └─ docx_model.cpp      → Intermediate data model (paragraphs, runs, tables, images, media)
+
+main_include/           → Legacy/original source files (preserved)
+  ├─ docxview_new.c      → Original GDI-based viewer (reference)
+  ├─ docxview.c          → Earlier HTML-based viewer
+  └─ ...                 → Other historical files (css, htmlbuf, wml, xmlbuf, zip, inflate)
+
+bak/                    → Historical builds and notes
 ```
 
 **Data flow:**
 ```
-.docx  →  ld_open_file()  →  ld_render() [worker]  →  ld_draw() [UI thread, clipped to viewport]
+.docx → ld_open_file() [worker] → ld_render() [worker, full layout]
+          ↓
+       UI thread: apply_loaded_doc() → request_render() [async]
+          ↓
+       WM_PAINT: document_draw() → D2D renderer → Present → screen
 ```
 
 ## Build
 
 ```bat
-build_viewer.bat
+build_d2dview.bat
 ```
-Generates `docxview_new.exe` and `litedocx.dll` in `bin/`.
+
+Generates `d2dview.exe` (and copies `litedocx.dll` + `liblitedocx.a` to working dir).
 
 Requires:
-- `litehtml` (header-only, included as submodule in `litehtml/`)
-- Windows SDK (GDI, COM, WIC for image decoding)
+- `litehtml` (header-only, included in `litehtml/`)
+- Windows SDK (Direct2D, DirectWrite, WIC for image decoding)
+- MinGW-w64 GCC (tested with `C:\Users\pr30565\Nim_code\mingw64\bin\gcc.exe`)
 
 ## Usage
 
 ```bat
-docxview_new.exe [path/to/file.docx]
+d2dview.exe [path/to/file.docx]
 ```
 
 Without arguments opens `File → Open` dialog.
@@ -44,75 +76,61 @@ Without arguments opens `File → Open` dialog.
 
 | Key / Action | Effect |
 |---|---|
-| Mouse wheel / ↑ ↓ / PgUp PgDn / Home End | Scroll |
+| Mouse wheel / ↑ ↓ / PgUp PgDn / Home End | Vertical scroll |
 | Middle-drag | Pan (horizontal + vertical, layout space) |
 | `Shift` + wheel | Pan horizontal |
-| `Ctrl` + wheel | Zoom (GDI: re-layout; D2D: pure scale, no re-layout) |
+| `Ctrl` + wheel | **Pure renderer zoom** (0.9x–3.0x, no re-layout) |
 | `Ctrl+O` | Open another `.docx` |
 | `F5` | Reload current file |
-| `Esc` | Close |
-| Click link | Open browser / jump anchor |
-| Window resize | Immediate re-layout (background) |
+| `Esc` / `File → Exit` | Close |
+| Click link | Shows link URL in message box |
+| Window resize | Background re-layout (non-blocking UI) |
 
-## Phase D — Background Full Layout + Non-blocking UI (✅ Complete)
+## Key Features (Phase D+ Complete)
 
-| Step | Description | Status |
-|---|---|---|
-| **D1** | `JOB_LOAD` calls only `ld_open_file`, no `ld_render` | ✅ |
-| **D2** | `apply_loaded_doc` launches **single** background layout job; estimates height without triggering render on UI thread | ✅ |
-| **D3** | `request_render_range` returns immediately if range already rendered; pending width (resize) and pending range (scroll) separated | ✅ |
-| **D4** | `on_render_done`: `g_layout_complete=1` after first full render; updates `g_last_rendered_page` and `g_page_h_est` with real values | ✅ |
-| **D5** | Scroll (`WM_VSCROLL`/`WM_MOUSEWHEEL`) doesn't call worker if layout complete | ✅ |
-| **D6** | `WM_PAINT`: `ld_draw` clip = intersection of content area ∩ viewport (not entire `doc_h`) | ✅ |
-| **D7** | `extract_page_geometry`: returns estimate if full layout not done (`m_full_layout_done` flag); real geometry only after `ld_render` | ✅ |
+- **Pure Direct2D zoom**: Layout stays at 1.0; zoom is a D2D transform applied at draw time — no re-layout, no text duplication.
+- **Background loading**: `ld_open_file` runs on worker thread; UI remains responsive.
+- **On-demand pagination**: First render does full layout; subsequent scrolls only render missing page ranges.
+- **Viewport-clipped painting**: Only visible content drawn; constant frame time on long documents.
+- **Font caching**: DirectWrite `IDWriteTextFormat` deduplicated by family/size/style.
+- **Worker-thread document lifecycle**: All `ld_*` calls on same thread (COM affinity).
 
-**Verified results (logs):**
-- Open: UI responds immediately (skeleton/blank page)
-- Single full layout in background on open
-- Jump to distant page: **no blank page**, **no worker job**
-- Smooth scroll post-layout: paint only, zero `JOB_RENDER_RANGE`
-- Paint long documents (200k+ px): viewport clip → constant frame time
-- Zero `ld_render`/`document::render` on UI thread before worker
+## Dev Tools (in `dev/`)
 
-## Phase B — Incremental Early-exit Layout (Optional)
+| Tool | Purpose |
+|---|---|
+| `check_justify.exe` | Test justified text layout in litehtml |
+| `check_litehtml.exe file.docx` | Convert DOCX → HTML → litehtml layout metrics |
+| `dump_html.exe file.docx [out.html]` | Export generated HTML for inspection |
+| `zip_test.exe file.docx` | Extract and print `word/document.xml` |
 
-Evaluate **only if** first-content-time > 1-2s on large documents (>100 pages).
-Would add `y_limit` to `document::render()` to lay out only up to visible page + lookahead.
+Build with:
+```bat
+cd dev
+..\build_dev_tools.bat   # (or compile manually with -Imain_include)
+```
 
 ## Diagnostic Logging
 
-Enabled by default in Phase D:
-- `logs.txt` (Desktop folder): UI events (JOB, RENDER, PAINT, SCROLL)
-- `stderr` (console/debug): litedocx ABI events (`LDLOG`)
+- **File** (`logs.txt` next to exe): `ENABLE_FILE_LOGGING=1` in `viewer_state.c`
+- **Console** (`stderr`): `CONSOLE_LOGGING=1` + `TABLE_DEBUG=1` for table layout traces
+- **litedocx DLL**: `LITEDOCX_CONSOLE_LOG` in `litedocx_c.cpp`
 
 ```c
-// In docxview_new.c
-#define LOG_JOB(kind, msg)    log_msg("[JOB] %s: %s\n", #kind, msg)
-#define LOG_RENDER(msg)       log_msg("[RENDER] %s\n", msg)
-#define LOG_PAINT(msg)        log_msg("[PAINT] %s\n", msg)
-#define LOG_SCROLL(msg)       log_msg("[SCROLL] %s\n", msg)
-
-// In litedocx_c.cpp
-#define LDLOG(fmt, ...) fprintf(stderr, "[LITEDOCX] " fmt "\n", ##__VA_ARGS__)
+// viewer_state.c
+#define CONSOLE_LOGGING 0      // set 1 for stderr logs
+#define ENABLE_FILE_LOGGING 0  // set 1 for logs.txt
+#define TABLE_DEBUG 0          // 1 = full table-layout trace
 ```
-
-## Key Files
-
-| File | Role |
-|---|---|
-| `docxview_new.c` | UI, worker thread, message loop, double-buffered paint |
-| `litedocx/src/litedocx_c.cpp` | C ABI: `ld_open_file`, `ld_render`, `ld_render_range`, `ld_draw`, `ld_get_page_count`, `ld_get_page_height`, `ld_destroy` |
-| `litedocx/src/docx_builder.cpp` | `litehtml` tree construction from `DocxModel` |
-| `litedocx/src/docx_package.cpp` | OOXML/ZIP parsing → `DocxModel` |
-| `litedocx/include/litedocx_c.h` | Public C ABI header |
 
 ## Known Limitations
 
-- Lists (`numbering.xml`): basic support (bullet/numbered), limited nesting
-- Complex tables: `colspan`/`rowspan` OK, custom borders via optional callback
-- Images: WIC decode (PNG/JPEG/BMP/GIF/TIFF), per-thread LRU cache
-- Float/positioned CSS: standard `litehtml` support, Phase B early-exit doesn't handle them
-- Pagination: based on `<div data-page-break>` injected by builder; not Word-perfect
+- **Lists** (`numbering.xml`): basic bullet/numbered support, limited nesting
+- **Complex tables**: `colspan`/`rowspan` OK, custom borders via optional callback
+- **Images**: WIC decode (PNG/JPEG/BMP/GIF/TIFF), per-thread LRU cache
+- **Float/positioned CSS**: standard `litehtml` support
+- **Pagination**: based on `<div data-page-break>` injected by builder; not Word-perfect
+- **No GDI fallback**: Direct2D only; requires Win7+ with Platform Update / Win8+
 
 ## License
 

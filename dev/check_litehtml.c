@@ -7,8 +7,8 @@
  *
  *     dev\check_litehtml.exe test.docx
  */
-#include "../docx.h"
-#include "litehtml_c.h"
+#include "../main_include/docx.h"
+#include "../main_include/litehtml_c.h"
 
 #include <windows.h>
 #include <stdio.h>

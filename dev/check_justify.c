@@ -7,7 +7,7 @@
  *
  *     dev\check_justify.exe
  */
-#include "litehtml_c.h"
+#include "../main_include/litehtml_c.h"
 
 #include <windows.h>
 #include <stdio.h>

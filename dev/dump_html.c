@@ -5,7 +5,7 @@
  * aprire una finestra. Uso:
  *     dev\dump_html.exe test.docx [out.html] [--fragment] [--css extra.css]
  */
-#include "../docx.h"
+#include "../main_include/docx.h"
 
 #include <stdio.h>
 #include <stdlib.h>
