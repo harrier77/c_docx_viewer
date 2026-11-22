@@ -271,6 +271,11 @@ namespace litedocx
         int                     m_page_w_px = 0;
         int                     m_page_h_px = 0;
         int                     m_page_break_count = 0;
+        /* Contatore progressivo paragrafi per assegnare data-ld-paragraph-index.
+         * Necessario per hit-test (ld_paragraph_hit_test) e editing OOXML in memoria.
+         * REGRESSION FIX: senza questo attributo, select_all("[data-ld-paragraph-index]")
+         * restituiva 0 elementi e doppio click non trovava nessun paragrafo. */
+        int                     m_para_index = 0;
         StyleCache              m_style_cache;
         // Reusable buffers for append_text (avoid substr allocations)
         std::string             m_nbsp_buf;

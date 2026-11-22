@@ -371,6 +371,10 @@ namespace litedocx
         if(m_body->children().empty())
         {
             auto p = make_element("p", std::string());
+            /* data-ld-paragraph-index: identificativo univoco paragrafo per hit-test e editing.
+             * Usato da ld_paragraph_hit_test -> select_all("[data-ld-paragraph-index]").
+             * REGRESSION FIX: senza questo attributo, hit-test non trovava paragrafi. */
+            p->set_attr("data-ld-paragraph-index", std::to_string(m_para_index++).c_str());
             m_body->appendChild(p);
             append_nbsp(p);
         }
@@ -511,6 +515,9 @@ namespace litedocx
                 list->appendChild(li);
                 auto sp = make_element("p", std::string());
                 sp->set_attr("class", p_cls.c_str());
+                /* data-ld-paragraph-index per paragrafi in liste annidate.
+                 * REGRESSION FIX: senza questo, paragrafi in liste non erano cliccabili. */
+                sp->set_attr("data-ld-paragraph-index", std::to_string(m_para_index++).c_str());
                 li->appendChild(sp);
                 append_nbsp(sp);
                 lists.back().item = li;
@@ -544,6 +551,12 @@ namespace litedocx
         const std::string& para_cls = get_para_class(props);
         litehtml::string_map attrs;
         if(!para_cls.empty()) attrs["class"] = para_cls;
+        int this_para_idx = m_para_index++;
+        /* data-ld-paragraph-index: chiave per hit-test e editing OOXML.
+         * ld_paragraph_hit_test fa select_all("[data-ld-paragraph-index]")
+         * e confronta coordinate con get_placement() dell'elemento.
+         * REGRESSION FIX: senza questo attributo, doppio click non trovava paragrafi. */
+        attrs["data-ld-paragraph-index"] = std::to_string(this_para_idx);
         auto        para = make_element("p", std::string(), attrs);
         parent->appendChild(para);
 

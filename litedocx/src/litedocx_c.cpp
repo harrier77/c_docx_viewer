@@ -1295,16 +1295,47 @@ namespace
         }
     }
 
-    void* open_impl(const void* data, size_t size, const std::string& file_name, const ld_callbacks* cb,
-                    int viewport_width, int viewport_height)
-    {
-        if(!data || size == 0)
-        {
-            set_error("dati DOCX vuoti");
-            return nullptr;
-        }
+/* Estrae tutti i <w:p>...</w:p> da document_xml e li salva in model.paragraph_ooxml.
+ * Necessario per ld_paragraph_get_ooxml() che serve all'editor in memoria.
+ * Indice nel vettore corrisponde a data-ld-paragraph-index assegnato in DocxBuilder.
+ * REGRESSION FIX: senza questo, ld_paragraph_get_ooxml restituiva 0 (vettore vuoto)
+ * e l'editor non si apriva ("Paragrafo N senza OOXML"). */
+static void extract_paragraph_ooxml(litedocx::DocxModel& model)
+{
+    fprintf(stderr, "[LITEDOCX_EXTRACT] start, document_xml size=%zu\n", model.document_xml.size());
+    model.paragraph_ooxml.clear();
+    const std::string& xml = model.document_xml;
+    size_t pos = 0;
+    int count = 0;
+    while (true) {
+        // Find next <w:p ...>
+        size_t start = xml.find("<w:p", pos);
+        if (start == std::string::npos) break;
+        // Find matching </w:p>
+        size_t end = xml.find("</w:p>", start);
+        if (end == std::string::npos) break;
+        end += 6; // include </w:p>
+        std::string p_xml = xml.substr(start, end - start);
+        model.paragraph_ooxml.push_back(p_xml);
+        pos = end;
+        count++;
+        if (count > 1000) break; // safety
+    }
+    fprintf(stderr, "[LITEDOCX_EXTRACT] extracted %zu paragraph OOXML fragments\n", model.paragraph_ooxml.size());
+}
 
-        auto* h = new (std::nothrow) ld_doc();
+void* open_impl(const void* data, size_t size, const std::string& file_name, const ld_callbacks* cb,
+                    int viewport_width, int viewport_height)
+{
+    fprintf(stderr, "[LITEDOCX_OPEN] entry\n");
+    if(!data || size == 0)
+    {
+        set_error("dati DOCX vuoti");
+        return nullptr;
+    }
+
+    auto* h = new (std::nothrow) ld_doc();
+    fprintf(stderr, "[LITEDOCX_OPEN] h allocated\n");
         if(!h)
         {
             set_error("memoria insufficiente");
@@ -1312,9 +1343,11 @@ namespace
         }
 
         HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        fprintf(stderr, "[LITEDOCX_OPEN] CoInitializeEx done\n");
         h->com_initialized = SUCCEEDED(hr);
 
         auto* container       = new (std::nothrow) ld_container();
+        fprintf(stderr, "[LITEDOCX_OPEN] container allocated\n");
         if(!container)
         {
             if(h->com_initialized)
@@ -1366,11 +1399,14 @@ namespace
                 return nullptr;
             }
 
+            fprintf(stderr, "[LITEDOCX_OPEN] before builder.build()\n");
             container->model = model.get();
             litedocx::DocxBuilder builder(*model, container);
             litehtml::document::ptr doc = builder.build();
+            fprintf(stderr, "[LITEDOCX_OPEN] after builder.build() doc=%p\n", doc.get());
             if(!doc)
             {
+                fprintf(stderr, "[LITEDOCX_OPEN] build failed\n");
                 set_error(builder.error().empty() ? "conversione DOCX fallita" : builder.error());
                 container->model = nullptr;
                 if(container->wic)
@@ -1390,11 +1426,21 @@ namespace
             h->page_w = builder.page_width();
             h->page_h = builder.page_height();
             h->m_page_height_px = builder.page_height();  // Cache for pagination
+            fprintf(stderr, "[LITEDOCX_OPEN] page_w=%d page_h=%d\n", h->page_w, h->page_h);
+
+            /* Extract paragraph OOXML for in-memory editing.
+             * Popola model.paragraph_ooxml da document_xml per ld_paragraph_get_ooxml.
+             * REGRESSION FIX: deve essere chiamato PRIMA di std::move(model) in container->owned_model.
+             * Indice nel vettore = data-ld-paragraph-index assegnato in DocxBuilder. */
+            fprintf(stderr, "[LITEDOCX_OPEN] calling extract_paragraph_ooxml\n");
+            extract_paragraph_ooxml(*model);
+            fprintf(stderr, "[LITEDOCX_OPEN] extract_paragraph_ooxml done\n");
 
             // Transfer model ownership into the container so that media data
             // remains valid for the whole document lifetime.
             container->owned_model = std::move(model);
             container->doc = doc;
+            fprintf(stderr, "[LITEDOCX_OPEN] success\n");
             set_error("");
             return h;
         } catch(const std::exception& ex)
@@ -2068,26 +2114,40 @@ void ld_destroy(void* doc)
 /* Paragraph Hit-Test & XML Editing (in-memory only)                         */
 /* ------------------------------------------------------------------------- */
 
+/* Hit-test paragrafo: x,y sono coordinate in spazio pagina litedocx (layout a zoom 1.0).
+ * Include visual padding (18,6) come impostato via ld_set_visual_padding.
+ * Cerca elementi con attributo data-ld-paragraph-index (assegnato in DocxBuilder).
+ * Confronta punto con get_placement() dell'elemento (coordinate relative a pagina).
+ * REGRESSION FIX: senza data-ld-paragraph-index, select_all restituiva 0 elementi.
+ * Coordinate: litedocx usa coordinate pagina INCLUSO visual padding. */
 int ld_paragraph_hit_test(void* doc, int x, int y,
                           ld_paragraph_hit* out_hit, char** out_text)
 {
     auto* h = static_cast<ld_doc*>(doc);
-    if (!h || !h->doc || !h->doc->root())
+    if (!h || !h->doc || !h->doc->root()) {
+        fprintf(stderr, "[LITEDOCX_HIT] early return: h=%p doc=%p root=%p\n",
+                h, h ? h->doc : nullptr, h && h->doc ? h->doc->root() : nullptr);
         return 0;
+    }
     if (out_text) *out_text = nullptr;
     if (!out_hit)
         return 0;
+    fprintf(stderr, "[LITEDOCX_HIT] ld_paragraph_hit_test x=%d y=%d\n", x, y);
     try
     {
         // Get all paragraphs with data-ld-paragraph-index attribute
         auto paras = h->doc->root()->select_all("[data-ld-paragraph-index]");
+        fprintf(stderr, "[LITEDOCX_HIT] select_all returned %zu elements\n", paras.size());
         for (auto& el : paras)
         {
             if (!el) continue;
             const char* idx_str = el->get_attr("data-ld-paragraph-index");
+            fprintf(stderr, "[LITEDOCX_HIT] element idx_str=%s\n", idx_str ? idx_str : "NULL");
             if (!idx_str) continue;
             int idx = std::atoi(idx_str);
             litehtml::position pos = el->get_placement();
+            fprintf(stderr, "[LITEDOCX_HIT] para idx=%d pos=(%.0f,%.0f %.0fx%.0f)\n",
+                    idx, pos.x, pos.y, pos.width, pos.height);
             if (x >= static_cast<int>(pos.x) && x < static_cast<int>(pos.x + pos.width) &&
                 y >= static_cast<int>(pos.y) && y < static_cast<int>(pos.y + pos.height))
             {
@@ -2328,6 +2388,11 @@ int ld_paragraph_set_xml(void* doc, int index, const char* xml)
     return 0;
 }
 
+/* Restituisce OOXML del paragrafo all'indice dato (popolato da extract_paragraph_ooxml).
+ * Indice corrisponde a data-ld-paragraph-index assegnato in DocxBuilder.
+ * Chiamato da begin_paragraph_edit_at_index per aprire editor XML modale.
+ * REGRESSION FIX: senza extract_paragraph_ooxml in open_impl, vettore era vuoto
+ * e questa funzione restituiva sempre 0 ("Paragrafo N senza OOXML"). */
 int ld_paragraph_get_ooxml(void* doc, int index, char** out_xml)
 {
     auto* h = static_cast<ld_doc*>(doc);

@@ -445,3 +445,37 @@ void request_paragraph_apply(const char *text)
     g_doc_state = DOC_STATE_APPLYING;
     enqueue_job(j);
 }
+
+/* Accoda hit-test asincrono per doppio click su paragrafo.
+ * doc_x, doc_y: coordinate in spazio pagina litedocx (layout a zoom 1.0),
+ *               INCLUSO visual padding (18,6) come impostato via ld_set_visual_padding.
+ * Imposta g_doc_state = DOC_STATE_HITTEST per bloccare ulteriori input.
+ * Risultato arriva via WM_APP_HIT_RESULT -> handle_hit_result -> begin_paragraph_edit_at_index.
+ * REGRESSION FIX: senza CS_DBLCLKS in window class + questa funzione, doppio click non funzionava. */
+void request_hit_test(int doc_x, int doc_y)
+{
+    fprintf(stderr, "[HIT_REQ] request_hit_test doc=(%d,%d) g_doc=%p g_doc_state=%d g_worker_started=%d\n",
+            doc_x, doc_y, g_doc, g_doc_state, g_worker_started);
+    if (!g_doc || g_doc_state != DOC_STATE_IDLE) {
+        fprintf(stderr, "[HIT_REQ] IGNORED: g_doc=%p g_doc_state=%d\n", g_doc, g_doc_state);
+        return;
+    }
+    if (!g_worker_started) {
+        fprintf(stderr, "[HIT_REQ] IGNORED: worker not started\n");
+        return;
+    }
+
+    Job *j = alloc_job(JOB_HIT_TEST);
+    if (!j) {
+        fprintf(stderr, "[HIT_REQ] alloc_job failed\n");
+        return;
+    }
+    j->doc = g_doc;
+    j->gen = g_load_gen;
+    j->epoch = g_layout_epoch;
+    j->doc_x = doc_x;
+    j->doc_y = doc_y;
+    g_doc_state = DOC_STATE_HITTEST;
+    fprintf(stderr, "[HIT_REQ] enqueue JOB_HIT_TEST gen=%u epoch=%d\n", j->gen, j->epoch);
+    enqueue_job(j);
+}

@@ -148,11 +148,15 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
 
        case JOB_HIT_TEST:
            {
+               fprintf(stderr, "[HIT_JOB] JOB_HIT_TEST start doc_x=%d doc_y=%d gen=%u epoch=%d\n",
+                       j->doc_x, j->doc_y, j->gen, j->epoch);
                if (!g_shutdown && j->doc)
                {
                    ld_paragraph_hit hit;
                    char *text = NULL;
                    int got = ld_paragraph_hit_test(j->doc, j->doc_x, j->doc_y, &hit, &text);
+                   fprintf(stderr, "[HIT_JOB] ld_paragraph_hit_test got=%d hit.index=%d text=%p\n",
+                           got, got ? hit.index : -1, text);
                    HitResult *r = (HitResult *)calloc(1, sizeof(HitResult));
                    if (r)
                    {
@@ -162,13 +166,17 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                        r->hit = got;
                        r->index = got ? hit.index : -1;
                        r->text = text;
+                       fprintf(stderr, "[HIT_JOB] PostMessage WM_APP_HIT_RESULT\n");
                        PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, (LPARAM)r);
                    }
                    else
                    {
+                       fprintf(stderr, "[HIT_JOB] calloc failed for HitResult\n");
                        ld_free_string(text);
                        PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, 0);
                    }
+               } else {
+                   fprintf(stderr, "[HIT_JOB] IGNORED: g_shutdown=%d j->doc=%p\n", g_shutdown, j->doc);
                }
                break;
            }
