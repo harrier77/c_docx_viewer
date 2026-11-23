@@ -43,6 +43,14 @@ typedef struct TextRun {
     COLORREF             color;          /* Colore testo */
     int                  underline;      /* 1 = sottolineato */
     int                  strike;         /* 1 = barrato */
+    /* Identita' del font e offset nel testo del paragrafo: usati dal caret
+     * inline per misurare i caratteri e collegare il run al testo modificabile. */
+    int                  char_start;     /* offset byte inizio nel paragrafo, -1 = sconosciuto */
+    int                  char_end;       /* offset byte fine (esclusivo), -1 = sconosciuto */
+    int                  font_size;
+    int                  bold;
+    int                  italic;
+    char                 family[64];
     struct TextRun      *next;           /* Linked list per paragrafo */
 } TextRun;
 

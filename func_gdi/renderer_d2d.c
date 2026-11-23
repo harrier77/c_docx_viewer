@@ -310,9 +310,9 @@ static void d2d_draw_text(Renderer *r, const char *utf8, void *font, COLORREF co
     /* Create text layout for measuring and drawing */
     hr = IDWriteFactory_CreateTextLayout(d->dw_factory, ws, lstrlenW(ws),
         format, (FLOAT)w, (FLOAT)h, &layout);
-    free(ws);
-    
+
     if (FAILED(hr) || !layout) {
+        free(ws);
         if (format) IDWriteTextFormat_Release(format);
         return;
     }
@@ -334,6 +334,8 @@ static void d2d_draw_text(Renderer *r, const char *utf8, void *font, COLORREF co
 
     IDWriteTextLayout_Release(layout);
     IDWriteTextFormat_Release(format);
+    /* Il layout referenzia ws: liberarlo solo dopo Release. */
+    free(ws);
 }
 
 static void d2d_draw_image(Renderer *r, void *native_bitmap, int src_w, int src_h,

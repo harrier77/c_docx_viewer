@@ -232,11 +232,20 @@ namespace litehtml
 
     inline std::shared_ptr<render_item> element::get_render_item()
     {
-        if(m_renders.empty())
+        /* m_renders accumulates weak_ptrs across rebuild_render_tree() calls
+         * and is never pruned: after a rebuild the front entries are expired.
+         * Skip them, otherwise callers get nullptr while a live render item
+         * exists at the back (crash in append_children_from_string). */
+        while(!m_renders.empty())
         {
-            return nullptr;
+            auto ri = m_renders.front().lock();
+            if(ri)
+            {
+                return ri;
+            }
+            m_renders.pop_front();
         }
-        return m_renders.front().lock();
+        return nullptr;
     }
 } // namespace litehtml
 

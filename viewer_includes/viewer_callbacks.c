@@ -138,8 +138,19 @@ static void cache_on_text_run(void *user,
         para = para->next_sibling;
     }
     if (para) {
-        layout_cache_add_run(para, text, x, y, w, h,
-                             font_handle, (COLORREF)color, underline, strike);
+        if (layout_cache_add_run(para, text, x, y, w, h,
+                                 font_handle, (COLORREF)color, underline, strike)) {
+            /* Copia l'identita' del font nel run: il puntatore puo' essere
+             * liberato dalla DLL, i campi restano validi per il caret. */
+            TextRun *r = para->runs_tail;
+            if (r && font_handle) {
+                DwFontHandle *fh = (DwFontHandle *)font_handle;
+                r->font_size = fh->size_px;
+                r->bold = fh->bold;
+                r->italic = fh->italic;
+                lstrcpynA(r->family, fh->family, sizeof(r->family));
+            }
+        }
     }
 }
 

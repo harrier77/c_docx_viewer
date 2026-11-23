@@ -41,6 +41,30 @@ static void viewer_on_size(HWND hwnd, WPARAM wp, LPARAM lp)
     InvalidateRect(hwnd, NULL, FALSE);
 }
 
+/* Click sinistro: apre il caret inline sul run sotto il puntatore.
+ * Le coordinate della cache sono in spazio documento (0-based), mentre il
+ * renderer D2D scala tutto di g_zoom dopo aver sommato rc_content. */
+static LRESULT viewer_on_lbuttondown(HWND hwnd, LPARAM lp)
+{
+    RECT rc_content;
+    int screen_x = (short)LOWORD(lp);
+    int screen_y = (short)HIWORD(lp);
+    double inv_zoom = g_zoom > 0.0f ? (1.0 / g_zoom) : 1.0;
+    int doc_x, doc_y;
+
+    sync_view_scale();
+    layout_content_rect(g_doc_h, &rc_content);
+    doc_x = (int)(screen_x * inv_zoom) - rc_content.left;
+    doc_y = (int)(screen_y * inv_zoom) - rc_content.top;
+
+    DLOG("[CARET] click screen=(%d,%d) zoom=%.2f content=(%ld,%ld) doc=(%d,%d)\n",
+            screen_x, screen_y, g_zoom, rc_content.left, rc_content.top, doc_x, doc_y);
+    if (!caret_begin_from_point(doc_x, doc_y))
+        caret_close();
+    (void)hwnd;
+    return 0;
+}
+
 static LRESULT viewer_on_setcursor(HWND hwnd, WPARAM wp, LPARAM lp)
 {
     /* Cursore "sposta" durante il pan col tasto centrale. */
@@ -121,6 +145,7 @@ static void viewer_on_vscroll(HWND hwnd, WPARAM wp)
     if (LAY->scroll != old_s) {
         SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
         InvalidateRect(hwnd, NULL, FALSE);
+        caret_on_zoom_or_scroll();
         LOG_SCROLL("WM_VSCROLL scroll changed");
         log_msg("[SCROLL] WM_VSCROLL: scroll=%d g_layout_complete=%d g_last_rendered_page=%d\n",
                 LAY->scroll, g_layout_complete, g_last_rendered_page);
@@ -147,6 +172,7 @@ static void viewer_on_mousewheel(HWND hwnd, WPARAM wp, LPARAM lp)
     (void)lp;
 #endif
     int delta = GET_WHEEL_DELTA_WPARAM(wp);
+    caret_on_zoom_or_scroll();
 
     if (wp & MK_CONTROL) {
         /* Zoom puro del renderer (sola scala, nessun pan, nessun

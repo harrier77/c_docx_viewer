@@ -134,6 +134,9 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
     handle->underline = underline;
     handle->strike = strike;
     handle->size_px = size;
+    lstrcpynA(handle->family, family ? family : "Aptos", sizeof(handle->family));
+    handle->bold = bold;
+    handle->italic = italic;
     
     /* Convert design units to pixels */
     if (metrics.designUnitsPerEm > 0) {
@@ -194,8 +197,7 @@ static int cb_text_width(const char *text, void *font)
 
     hr = IDWriteFactory_CreateTextLayout(g_dwrite_factory, ws, lstrlenW(ws),
         handle->format, 10000.0f, 10000.0f, &layout);
-    free(ws);
-    
+
     if (SUCCEEDED(hr) && layout) {
         hr = IDWriteTextLayout_GetMetrics(layout, &metrics);
         if (SUCCEEDED(hr)) {
@@ -203,6 +205,8 @@ static int cb_text_width(const char *text, void *font)
         }
         IDWriteTextLayout_Release(layout);
     }
+    /* Il layout referenzia ws: liberarlo solo dopo Release. */
+    free(ws);
 
     return width;
 }

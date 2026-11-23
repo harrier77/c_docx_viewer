@@ -44,6 +44,8 @@ static TextRun* run_alloc(const char *text, int x, int y, int w, int h,
     r->color = color;
     r->underline = underline;
     r->strike = strike;
+    r->char_start = -1;
+    r->char_end = -1;
     return r;
 }
 

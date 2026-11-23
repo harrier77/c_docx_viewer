@@ -1159,7 +1159,13 @@ namespace litehtml
         if(replace_existing)
         {
             parent.clearRecursive();
-            parent_render->children().clear();
+            /* parent_render can be null if the element's render item expired
+             * (e.g. after rebuild_render_tree). The caller rebuilds the render
+             * tree anyway; never dereference null here. */
+            if(parent_render)
+            {
+                parent_render->children().clear();
+            }
         }
 
         // Let's process created elements tree

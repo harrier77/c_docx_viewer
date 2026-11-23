@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <list>
 #include <map>
@@ -24,6 +25,7 @@
 #include <new>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "docx_builder.h"
@@ -409,9 +411,13 @@ namespace
         const ld_layout_cache_ops* layout_cache_ops = nullptr;
         void*                    layout_cache_user = nullptr;
 
-        /* Paragraph tracking for layout cache */
+        /* Paragraph tracking for layout cache.
+         * extract_paras holds the REAL data-ld-paragraph-index values together
+         * with their post-layout boxes, collected before the extraction draw
+         * pass.  The old Y-based synthetic IDs are kept only as fallback. */
+        std::vector<std::pair<int, litehtml::position>> extract_paras;
         int                    last_para_y = -10000;
-        int                    last_para_id = 0;
+        int                    last_para_id = -1;
         int                    para_counter = 0;
 
         /* Layout extraction mode - only fire cache callbacks during extraction */
@@ -724,27 +730,58 @@ namespace
             int w_px = static_cast<int>(floor(pos.width + 0.5f));
             int h_px = static_cast<int>(floor(pos.height + 0.5f));
 
-            /* Layout cache extraction: track paragraphs and emit text runs */
+            /* Layout cache extraction: track REAL paragraphs and emit text runs.
+             * Using data-ld-paragraph-index (instead of a Y heuristic) keeps
+             * cache paragraph IDs consistent with ld_paragraph_get_text() and
+             * makes caret editing possible. */
             if (in_layout_extraction && layout_cache_ops && layout_cache_ops->on_text_run) {
-                // Heuristic: new paragraph if Y changes by more than ~line height
-                if (abs(y - last_para_y) > 30) {
-                    // New paragraph
-                    last_para_y = y;
-                    last_para_id = ++para_counter;
-                    if (layout_cache_ops->on_paragraph_start) {
-                        // Estimate paragraph bounds from first run
-                        layout_cache_ops->on_paragraph_start(layout_cache_user,
-                            last_para_id, x, y, w_px, h_px * 5, // rough height
-                            LD_LAYOUT_ALIGN_LEFT, 0, 0, 0, 0, 0, 0);
+                int para_id = -1;
+                litehtml::position para_pos;
+                int best_dist = 2000000000;
+                for (const auto& ep : extract_paras) {
+                    const litehtml::position& pp = ep.second;
+                    int px = static_cast<int>(pp.x);
+                    int py = static_cast<int>(pp.y);
+                    int pw = static_cast<int>(pp.width);
+                    int ph = static_cast<int>(pp.height);
+                    if (x >= px && x < px + pw &&
+                        y >= py && y < py + ph) {
+                        para_id = ep.first;
+                        para_pos = pp;
+                        break;
+                    }
+                    // Fallback: closest paragraph below the click point
+                    int dx = x - px;
+                    int dy = y - py;
+                    if (dy > 0) {
+                        int dist = dx * dx + dy * dy;
+                        if (dist < best_dist) {
+                            best_dist = dist;
+                            para_id = ep.first;
+                            para_pos = pp;
+                        }
                     }
                 }
-                int underline = 0, strike = 0;
-                // TODO: extract from font metrics
-                layout_cache_ops->on_text_run(layout_cache_user,
-                    last_para_id, text ? text : "",
-                    x, y, w_px, h_px,
-                    reinterpret_cast<void*>(hFont),
-                    to_cref(color), underline, strike);
+                if (para_id >= 0) {
+                    if (para_id != last_para_id) {
+                        last_para_id = para_id;
+                        last_para_y = y;
+                        if (layout_cache_ops->on_paragraph_start) {
+                            layout_cache_ops->on_paragraph_start(layout_cache_user,
+                                para_id,
+                                static_cast<int>(para_pos.x), static_cast<int>(para_pos.y),
+                                static_cast<int>(para_pos.width), static_cast<int>(para_pos.height),
+                                LD_LAYOUT_ALIGN_LEFT, 0, 0, 0, 0, 0, 0);
+                        }
+                    }
+                    int underline = 0, strike = 0;
+                    // TODO: extract from font metrics
+                    layout_cache_ops->on_text_run(layout_cache_user,
+                        para_id, text ? text : "",
+                        x, y, w_px, h_px,
+                        reinterpret_cast<void*>(hFont),
+                        to_cref(color), underline, strike);
+                }
             }
 
             if(has_renderer())
@@ -2020,16 +2057,16 @@ void ld_set_layout_cache_callbacks(void* doc, const ld_layout_cache_ops* ops, vo
     h->container->layout_cache_user = user;
     // Reset paragraph tracking
     h->container->last_para_y = -10000;
-    h->container->last_para_id = 0;
+    h->container->last_para_id = -1;
     h->container->para_counter = 0;
+    h->container->extract_paras.clear();
     h->container->in_layout_extraction = false;
 }
 
 namespace {
-    // No-op callbacks for layout extraction - only fire ld_layout_cache_ops, don't actually draw
-    void* null_create_font(const char*, int, int, int, int, int, lh_font_metrics*) { return nullptr; }
-    void null_delete_font(void*) {}
-    int null_text_width(const char*, void*) { return 0; }
+    // No-op callbacks for layout extraction - only fire ld_layout_cache_ops, don't actually draw.
+    // Font creation/deletion and text measurement stay REAL so cache runs carry
+    // a valid font handle: the caret needs it to map a click to a character.
     void null_draw_text(void*, const char*, void*, unsigned, int, int, int, int) {}
     void null_draw_solid_fill(void*, int, int, int, int, unsigned) {}
     void null_draw_borders(void*, int, int, int, int, int, int, int, int, unsigned, unsigned, unsigned, unsigned) {}
@@ -2049,9 +2086,23 @@ void ld_extract_layout(void* doc)
     
     // Reset paragraph tracking for fresh extraction
     h->container->last_para_y = -10000;
-    h->container->last_para_id = 0;
+    h->container->last_para_id = -1;
     h->container->para_counter = 0;
-    
+    h->container->extract_paras.clear();
+
+    /* Collect the real paragraph indices and their post-layout boxes.  The
+     * draw_text callback below uses them to emit stable cache IDs. */
+    if (h->doc && h->doc->root()) {
+        auto paras = h->doc->root()->select_all("[data-ld-paragraph-index]");
+        for (auto& pel : paras) {
+            if (!pel) continue;
+            const char* idx_str = pel->get_attr("data-ld-paragraph-index");
+            if (!idx_str) continue;
+            h->container->extract_paras.push_back(
+                std::make_pair(std::atoi(idx_str), pel->get_placement()));
+        }
+    }
+
     // Enable extraction mode
     h->container->in_layout_extraction = true;
     
@@ -2060,9 +2111,6 @@ void ld_extract_layout(void* doc)
     lh_callbacks saved_lh = h->container->cb.lh;
     void* saved_renderer = h->container->cb.renderer;
     
-    h->container->cb.lh.create_font = null_create_font;
-    h->container->cb.lh.delete_font = null_delete_font;
-    h->container->cb.lh.text_width = null_text_width;
     h->container->cb.lh.draw_text = null_draw_text;
     h->container->cb.lh.draw_solid_fill = null_draw_solid_fill;
     h->container->cb.lh.draw_borders = null_draw_borders;

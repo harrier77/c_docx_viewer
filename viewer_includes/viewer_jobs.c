@@ -45,6 +45,33 @@ static Job *dequeue_job(void)
     return j;
 }
 
+/* Estrazione della layout cache: DEVE girare sul worker. ld_extract_layout
+ * attraversa il render tree e usa la font cache globale, entrambi di
+ * proprieta' del worker; farlo dal thread UI (on_render_done) correva con
+ * il job successivo e corrompeva la heap (crash in ld_paragraph_set_text).
+ * Durante l'estrazione g_render_busy=1, quindi UI/paint non leggono la
+ * cache; il flag valid viene settato qui e il ri-ancora del caret avviene
+ * in on_render_done sul thread UI. */
+static void worker_extract_layout(void *doc, int content_w)
+{
+    if (g_shutdown || !doc)
+        return;
+    if (!g_layout_cache)
+        g_layout_cache = layout_cache_create();
+    if (!g_layout_cache)
+        return;
+    layout_cache_invalidate(g_layout_cache);
+    layout_cache_set_layout_params(g_layout_cache,
+        content_w,
+        LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X,
+        LAYOUT_VISUAL_PADDING_X,
+        LAYOUT_VISUAL_MARGIN_Y);
+    ld_set_layout_cache_callbacks(doc, &g_cache_ops, g_layout_cache);
+    ld_extract_layout(doc);
+    g_layout_cache->valid = 1;
+    DLOG("[RENDER] worker_extract_layout done (w=%d)\n", content_w);
+}
+
 static void enqueue_destroy(void *doc)
 {
     Job *j;
@@ -126,6 +153,7 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
 #endif
             if (j->doc && !g_shutdown)
                 ld_render(j->doc, j->content_w);
+            worker_extract_layout(j->doc, j->content_w);
             LOG_JOB(JOB_RENDER, "ld_render done, posting WM_APP_RENDER_DONE");
             if (!g_shutdown)
                 PostMessageA(j->hwnd, WM_APP_RENDER_DONE,
@@ -140,6 +168,7 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                     ld_render_range(j->doc, p, j->viewport_h, j->content_w);
                 }
             }
+            worker_extract_layout(j->doc, j->content_w);
             LOG_JOB(JOB_RENDER_RANGE, "ld_render_range done, posting WM_APP_RENDER_DONE");
             if (!g_shutdown)
                 PostMessageA(j->hwnd, WM_APP_RENDER_DONE,
@@ -270,6 +299,7 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                 r->gen = j->gen;
                 r->token = j->token;
                 r->ok = ok;
+                r->caret = j->caret;
                 if (!ok)
                 {
                     const char *err = ld_last_error();

@@ -57,6 +57,7 @@
 #include "viewer_includes/viewer_jobs.c"
 #include "viewer_includes/viewer_render.c"
 #include "viewer_includes/viewer_save.c"
+#include "viewer_includes/viewer_caret.c"
 #include "viewer_includes/viewer_lifecycle.c"
 #include "viewer_includes/viewer_paint.c"
 #include "viewer_includes/viewer_input.c"
@@ -192,10 +193,11 @@ static void handle_edit_applied(EditResult *r)
          * Only clear APPLYING here: never clobber an active HITTEST/EDITOR state. */
         if (g_doc_state == DOC_STATE_APPLYING)
             g_doc_state = DOC_STATE_IDLE;
+        if (r->caret) caret_close();
         free(r);
         return;
     }
-    
+
     if (r->ok)
     {
         DLOG("[EDIT] Applicato con successo, richiedo re-render\n");
@@ -217,12 +219,19 @@ static void handle_edit_applied(EditResult *r)
             DLOG("[EDIT] Re-registering layout cache callbacks\n");
             ld_set_layout_cache_callbacks(g_doc, &g_cache_ops, g_layout_cache);
         }
+        if (r->caret)
+        {
+            /* Commit del caret: il ri-ancora avverra' in on_render_done. */
+            g_layout_epoch++;
+            g_caret_reanchor = 1;
+        }
         request_render(layout_content_width());
     }
     else
     {
         DLOG("[EDIT] Errore applicazione: %s\n", r->error);
         g_doc_state = DOC_STATE_IDLE;
+        if (r->caret) caret_close();
         InvalidateRect(g_hwnd, NULL, FALSE);
     }
     free(r);
@@ -240,6 +249,32 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_PAINT:
         viewer_paint(hwnd);
+        break;
+
+    /* ---- Caret inline: click singolo apre/chiude il caret, tastiera
+     * modifica il testo con preview immediata e commit dopo il debounce. ---- */
+    case WM_LBUTTONDOWN:
+        return viewer_on_lbuttondown(hwnd, lp);
+
+    case WM_KEYDOWN:
+        if (g_caret_active) {
+            caret_on_key((int)wp);
+            return 0;
+        }
+        break;
+
+    case WM_CHAR:
+        if (g_caret_active) {
+            caret_on_wchar((WCHAR)wp);
+            return 0;
+        }
+        break;
+
+    case WM_TIMER:
+        if (wp == LD_CARET_TIMER_ID) {
+            caret_on_timer();
+            return 0;
+        }
         break;
 
     /* ---- Pan con tasto centrale (o trascinamento col tasto destro non
@@ -277,6 +312,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
      * FIX: senza CS_DBLCLKS nella window class, WM_LBUTTONDBLCLK non veniva mai generato. */
     case WM_LBUTTONDBLCLK: {
         DLOG("[DBLCLK] WM_LBUTTONDBLCLK received, g_doc=%p g_doc_state=%d\n", g_doc, g_doc_state);
+        /* Il doppio click apre l'editor OOXML: chiude prima l'eventuale caret. */
+        caret_close();
         if (g_doc && g_doc_state == DOC_STATE_IDLE) {
             int screen_x = (short)LOWORD(lp);
             int screen_y = (short)HIWORD(lp);

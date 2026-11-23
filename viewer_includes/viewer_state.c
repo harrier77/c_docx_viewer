@@ -53,6 +53,11 @@ typedef struct DwFontHandle {
     int          underline;
     int          strike;
     int          size_px;
+    /* Copia leggera dell'identita' del font: il caret la usa per ricostruire
+     * un layout DirectWrite senza conservare il puntatore al font della DLL. */
+    char         family[64];
+    int          bold;
+    int          italic;
     float        ascent;
     float        descent;
     float        line_gap;
@@ -143,6 +148,7 @@ typedef struct Job
     int         gen;
     int         epoch;
     int         ooxml;
+    int         caret;      /* 1 = commit del caret inline (non dell'editor) */
     char       *text;
     char       *xml_text;
     unsigned    token;
@@ -187,6 +193,7 @@ typedef struct EditResult
     unsigned    gen;
     unsigned    token;
     int         ok;
+    int         caret;      /* 1 = proviene dal caret inline */
     char        error[256];
 } EditResult;
 
@@ -254,8 +261,37 @@ static int       g_run_view_pending = 0;
 static int       g_layout_epoch = 0;
 static int       g_editor_class_registered = 0;
 
+/* ------------------------------------------------------------------
+ * Inline caret editing (basato sulla layout cache).
+ * Il testo di lavoro e' una copia del testo plain del paragrafo: il commit
+ * usa ld_paragraph_set_text, che appiattisce la formattazione dei run.
+ * ------------------------------------------------------------------ */
+#define LD_CARET_DEBOUNCE_MS  300
+#define LD_CARET_TIMER_ID     31
+
+static int       g_caret_active = 0;
+static int       g_caret_para = -1;
+static int       g_caret_offset = 0;      /* offset byte in g_caret_text */
+static int       g_caret_gen = -1;        /* generation cache all'apertura */
+static int       g_caret_timer = 0;       /* 1 = commit pendente */
+static int       g_caret_reanchor = 0;    /* ri-ancora dopo il render */
+static char     *g_caret_text = NULL;     /* testoplain modificabile (UTF-8) */
+static char     *g_caret_original = NULL; /* testo originale, per confronto */
+static RECT      g_caret_rc = {0};        /* box caret in coordinate documento */
+
 /* Shared function declarations */
 void log_xml_block(const char *tag, int index, const char *xml);
+
+/* Inline caret (viewer_caret.c) */
+int  caret_begin_from_point(int doc_x, int doc_y);
+void caret_close(void);
+void caret_draw(HWND hwnd, HDC hdc);
+void caret_on_char(const char *utf8);
+void caret_on_wchar(WCHAR ch);
+void caret_on_key(int vk);
+void caret_on_timer(void);
+void caret_on_zoom_or_scroll(void);
+void caret_reanchor_after_render(void);
 
 
 /* REGRESSION WARNING: layout_content_width() = page_w - LAYOUT_PADDING_X is the

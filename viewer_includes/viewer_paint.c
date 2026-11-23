@@ -67,13 +67,20 @@ static void viewer_paint(HWND hwnd)
      * logica che copre il viewport e' piu' grande quando zoom < 1. */
     DLOG("[PAINT] calling document_draw g_doc=%p g_doc_h=%d g_render_busy=%d clip_scale=%.2f\n",
             g_doc, g_doc_h, g_render_busy, g_zoom > 0.0f ? 1.0f / g_zoom : 1.0f);
-    document_draw(g_doc, g_renderer, g_doc_h, g_render_busy,
+    /* Durante un apply (editor o caret) il worker sta mutando il DOM:
+     * chiamare ld_draw ora leggerebbe un albero a meta' (garbage/crash).
+     * Si mostra la pagina bianca finche' il render successivo non e' pronto. */
+    document_draw(g_doc, g_renderer, g_doc_h,
+                  g_render_busy || g_doc_state == DOC_STATE_APPLYING,
                   g_zoom > 0.0f ? 1.0f / g_zoom : 1.0f);
     DLOG("[PAINT] document_draw returned\n");
 
     DLOG("[PAINT] calling Present...\n");
     g_renderer->vtbl->Present(g_renderer, hdc, LAY->cw, LAY->ch);
     DLOG("[PAINT] Present returned\n");
+    /* Overlay del caret: disegnato sull'HDC dopo il BitBlt di Present,
+     * quindi non passa dalla cache D2D e non richiede un re-render. */
+    caret_draw(hwnd, hdc);
     /* Riporta il renderer a scala 1.0 (la trasformata viene reimpostata
      * a ogni WM_PAINT prima dei draw). */
     g_renderer->vtbl->ResetTransform(g_renderer);

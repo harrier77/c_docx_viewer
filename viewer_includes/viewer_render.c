@@ -42,6 +42,7 @@ static void request_render(int w)
                 LAYOUT_VISUAL_MARGIN_Y);
             ld_set_layout_cache_callbacks(g_doc, &g_cache_ops, g_layout_cache);
             ld_extract_layout(g_doc);
+            g_layout_cache->valid = 1;
             layout_cache_dump_stats(g_layout_cache);
         }
         return;
@@ -120,6 +121,7 @@ static void request_render_range(int first_page, int last_page)
                 LAYOUT_VISUAL_MARGIN_Y);
             ld_set_layout_cache_callbacks(g_doc, &g_cache_ops, g_layout_cache);
             ld_extract_layout(g_doc);
+            g_layout_cache->valid = 1;
             layout_cache_dump_stats(g_layout_cache);
         }
         return;
@@ -165,6 +167,9 @@ static void apply_loaded_doc(unsigned id, void *doc)
 
     LOG_RENDER("apply_loaded_doc called");
     log_msg("[RENDER] apply_loaded_doc: id=%u g_load_gen=%u doc=%p\n", id, g_load_gen, doc);
+
+    /* Un nuovo documento rende invalido il caret del precedente. */
+    caret_close();
 
     /* Risultato di una richiesta superata: va distrutto sul worker. */
     if (id != g_load_gen)
@@ -283,22 +288,15 @@ static void on_render_done(void *doc, int used_w)
     LOG_RENDER("layout complete flag set");
     DLOG("[RENDER_DONE] g_layout_complete=1, creating/checking layout cache\n");
 
-    /* Popola layout cache (Fase 3) - solo dopo il primo full render */
-    if (g_layout_complete && g_layout_cache == NULL) {
-        DLOG("[RENDER_DONE] creating new layout cache\n");
-        g_layout_cache = layout_cache_create();
-    }
+    /* La cache e' gia' stata popolata dal worker (worker_extract_layout in
+     * viewer_jobs.c): qui sul thread UI si fa solo il ri-ancora del caret.
+     * Estrarre qui correva con il job successivo del worker (crash). */
     if (g_layout_cache) {
-        DLOG("[RENDER_DONE] setting layout cache params and extracting\n");
-        layout_cache_set_layout_params(g_layout_cache,
-            layout_content_width(),
-            LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X,
-            LAYOUT_VISUAL_PADDING_X,
-            LAYOUT_VISUAL_MARGIN_Y);
-        ld_set_layout_cache_callbacks(g_doc, &g_cache_ops, g_layout_cache);
-        ld_extract_layout(g_doc);
         layout_cache_dump_stats(g_layout_cache);
-        DLOG("[RENDER_DONE] layout cache extraction done\n");
+        DLOG("[RENDER_DONE] layout cache ready (extracted by worker)\n");
+        /* Dopo un commit il caret e' stato nascosto (reanchor=1): qui la
+         * cache e' di nuovo valida e si può ricalcolare la posizione. */
+        caret_reanchor_after_render();
     } else {
         DLOG("[RENDER_DONE] ERROR: g_layout_cache is NULL!\n");
     }
@@ -461,6 +459,27 @@ void request_paragraph_apply(const char *text)
     /* REGRESSION: paired with handle_edit_applied() in maind2dv.c; see the
      * matching note in request_paragraph_apply_xml() above. */
     g_doc_state = DOC_STATE_APPLYING;
+    enqueue_job(j);
+}
+
+/* Commit del caret inline: come request_paragraph_apply ma con indice
+ * esplicito e marcato come caret, così handle_edit_applied ri-ancora invece
+ * di trattarlo come una modifica dell'editor OOXML. */
+void request_caret_apply(int para_index, const char *text)
+{
+    if (!g_doc || !text) return;
+    if (!g_worker_started) return;
+
+    Job *j = alloc_job(JOB_APPLY_EDIT);
+    if (!j) return;
+    j->doc = g_doc;
+    j->gen = g_load_gen;
+    j->para_index = para_index;
+    j->text = _strdup(text);
+    j->ooxml = 0;
+    j->caret = 1;
+    g_doc_state = DOC_STATE_APPLYING;
+    DLOG("[CARET] enqueue JOB_APPLY_EDIT para=%d gen=%u\n", para_index, j->gen);
     enqueue_job(j);
 }
 

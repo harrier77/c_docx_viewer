@@ -88,6 +88,7 @@ static LRESULT viewer_on_create(HWND hwnd)
 static void viewer_on_destroy(void)
 {
     // log_msg("[DESTROY] Cleaning up\n");
+    caret_close();
     /* Tutte le distruzioni avvengono sul worker, lo stesso thread che ha
      * creato i documenti (COM/GDI hanno affinità di thread). Non si attende:
      * un layout in corso non deve bloccare la chiusura. */
