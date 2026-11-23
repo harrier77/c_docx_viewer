@@ -1,4 +1,5 @@
 #include "html.h"
+#include "debug_log.h"
 #include "document.h"
 #include "document_container.h"
 #include "el_anchor.h"
@@ -1211,7 +1212,7 @@ namespace litehtml
     {
         // Clear font cache and delete all cached font handles
         // Called when zoom factor changes to force font recreation at new size
-        fprintf(stderr, "[LITEHTML] clear_font_cache: clearing %zu fonts\n", m_fonts.size());
+        DLOG("[LITEHTML] clear_font_cache: clearing %zu fonts\n", m_fonts.size());
         if (m_container)
         {
             for (auto& font : m_fonts)
@@ -1220,7 +1221,7 @@ namespace litehtml
             }
         }
         m_fonts.clear();
-        fprintf(stderr, "[LITEHTML] clear_font_cache: done\n");
+        DLOG("[LITEHTML] clear_font_cache: done\n");
     }
 
     void document::rebuild_render_tree()
@@ -1236,7 +1237,7 @@ namespace litehtml
         // 5. fix_tables_layout() - rebuilds anonymous table boxes
         // Without this, the old render tree would keep stale font_metrics and
         // text would not scale with zoom factor.
-        fprintf(stderr, "[LITEHTML] rebuild_render_tree: starting\n");
+        DLOG("[LITEHTML] rebuild_render_tree: starting\n");
         if (m_root)
         {
             m_root->refresh_styles();
@@ -1249,7 +1250,7 @@ namespace litehtml
             m_tabular_elements.clear();
             fix_tables_layout();
         }
-        fprintf(stderr, "[LITEHTML] rebuild_render_tree: done\n");
+        DLOG("[LITEHTML] rebuild_render_tree: done\n");
     }
 
 } // namespace litehtml

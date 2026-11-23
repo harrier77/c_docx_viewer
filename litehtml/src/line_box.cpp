@@ -8,6 +8,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
+#include "debug_log.h"
 
 namespace
 {
@@ -22,16 +23,18 @@ namespace
 #define LITEHTML_TABLE_DEBUG 0
 #endif
 
+#if D2D_DEBUG_LOGS
     // Debug logging for justified text alignment
     static void log_justify_params(float left, float right, float width, float spacing, int item_count, float offj)
     {
-        OutputDebugStringA((std::string("[JUSTIFY] layout_left=") + std::to_string(left) + 
-                            " layout_right=" + std::to_string(right) + 
-                            " width=" + std::to_string(width) + 
-                            " spacing=" + std::to_string(spacing) + 
-                            " items=" + std::to_string(item_count) + 
-                            " offj=" + std::to_string(offj) + "\n").c_str());
+        DLOG_W((std::string("[JUSTIFY] layout_left=") + std::to_string(left) + 
+               " layout_right=" + std::to_string(right) + 
+               " width=" + std::to_string(width) + 
+               " spacing=" + std::to_string(spacing) + 
+               " items=" + std::to_string(item_count) + 
+               " offj=" + std::to_string(offj) + "\n").c_str());
     }
+#endif
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////
@@ -347,7 +350,7 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
     bool layout_mismatch = (m_layout_right - m_layout_left) > (m_right - m_left) + 4;
     if(LITEHTML_TABLE_DEBUG && layout_mismatch)
     {
-        fprintf(stderr, "[CELLMISALIGN] finish: visual=(%d..%d) layout=(%d..%d) m_width=%d items=%d align=%d visual_offset=%d\n",
+        DLOG("[CELLMISALIGN] finish: visual=(%d..%d) layout=(%d..%d) m_width=%d items=%d align=%d visual_offset=%d\n",
                 (int)m_left, (int)m_right, (int)m_layout_left, (int)m_layout_right,
                 (int)m_width, (int)m_items.size(), (int)m_text_align, (int)visual_offset);
     }
@@ -395,12 +398,14 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
     int  rem        = (gaps > 0) ? (extra % gaps) : 0;
     int  acc        = 0;
 
+#if D2D_DEBUG_LOGS
     if(m_text_align == text_align_justify && spacing_x != 0_px)
     {
         log_justify_params((float)m_layout_left, (float)m_layout_right, (float)m_width,
                            (float)spacing_x, (int)m_items.size(),
                            gaps > 0 ? (float)spacing_x / (float)gaps : 0.f);
     }
+#endif
 
     std::optional<pixel_t> line_height;
 
@@ -622,7 +627,7 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
     }
     if(LITEHTML_TABLE_DEBUG && layout_mismatch)
     {
-        fprintf(stderr, "[CELLMISALIGN] finish_align: align=%d shift_x=%d spacing_x=%d first_item_x=%d last_item_x=%d layout_left=%d layout_right=%d\n",
+        DLOG("[CELLMISALIGN] finish_align: align=%d shift_x=%d spacing_x=%d first_item_x=%d last_item_x=%d layout_left=%d layout_right=%d\n",
                 (int)m_text_align, (int)shift_x, (int)spacing_x,
                 m_items.empty() ? 0 : (int)m_items.front()->pos().x,
                 m_items.empty() ? 0 : (int)m_items.back()->pos().x,
@@ -636,7 +641,7 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
     }
     if(LITEHTML_TABLE_DEBUG && layout_mismatch)
     {
-        fprintf(stderr, "[CELLMISALIGN] finish_end: first_item_x=%d last_item_x=%d visual_left=%d\n",
+        DLOG("[CELLMISALIGN] finish_end: first_item_x=%d last_item_x=%d visual_left=%d\n",
                 m_items.empty() ? 0 : (int)m_items.front()->pos().x,
                 m_items.empty() ? 0 : (int)m_items.back()->pos().x,
                 (int)m_left);

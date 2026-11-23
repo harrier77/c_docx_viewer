@@ -52,10 +52,11 @@ static int strings_equal_ignore_cr(const char *a, const char *b)
 
 static void commit_paragraph_editor(HWND hwnd)
 {
-    fprintf(stderr, "[XML][COMMIT] XML tab has_original=%d\n",
-            g_edit_xml_original ? 1 : 0);
+    DLOG("[XML][COMMIT] START g_edit_index=%d g_edit_xml_original=%p g_edit_hwnd=%p\n",
+            g_edit_index, g_edit_xml_original, g_edit_hwnd);
 
     char *xml = control_text_utf8(g_edit_ctl_xml);
+    DLOG("[XML][COMMIT] Got xml from control: %p len=%d\n", xml, xml ? (int)strlen(xml) : 0);
     if (!xml)
     {
         g_edit_apply = 0;
@@ -66,7 +67,7 @@ static void commit_paragraph_editor(HWND hwnd)
     log_xml_block("COMMIT-EDITED", g_edit_index, xml);
     if (!strings_equal_ignore_cr(xml, g_edit_xml_original))
     {
-        fprintf(stderr, "[XML][COMMIT] OOXML modificato: applico via ld_paragraph_set_ooxml\n");
+        DLOG("[XML][COMMIT] OOXML modificato: applico via ld_paragraph_set_ooxml\n");
         free(g_edit_result_utf8);
         g_edit_result_utf8 = xml;
         g_edit_is_xml = 1;
@@ -74,7 +75,7 @@ static void commit_paragraph_editor(HWND hwnd)
         DestroyWindow(hwnd);
         return;
     }
-    fprintf(stderr, "[XML][COMMIT] OOXML invariato: nessun cambiamento\n");
+    DLOG("[XML][COMMIT] OOXML invariato: nessun cambiamento\n");
     free(xml);
     g_edit_apply = 0;
     DestroyWindow(hwnd);
@@ -220,7 +221,7 @@ static void ensure_editor_class(void)
 /* Editor per XML: simile a show_paragraph_editor ma con hint diverso. */
 static void show_paragraph_editor_xml(int index, const char *xml_utf8)
 {
-    fprintf(stderr, "[EDIT_UI] show_paragraph_editor_xml index=%d xml_utf8=%p g_edit_hwnd=%p\n",
+    DLOG("[EDIT_UI] show_paragraph_editor_xml index=%d xml_utf8=%p g_edit_hwnd=%p\n",
             index, xml_utf8, g_edit_hwnd);
     static ACCEL accels[2];
     WCHAR       *wtext;
@@ -231,7 +232,7 @@ static void show_paragraph_editor_xml(int index, const char *xml_utf8)
     int          quit = 0;
 
     if (index < 0 || g_edit_hwnd) {
-        fprintf(stderr, "[EDIT_UI] IGNORED: index=%d g_edit_hwnd=%p\n", index, g_edit_hwnd);
+        DLOG("[EDIT_UI] IGNORED: index=%d g_edit_hwnd=%p\n", index, g_edit_hwnd);
         return;
     }
 
@@ -252,10 +253,10 @@ static void show_paragraph_editor_xml(int index, const char *xml_utf8)
                            WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
                            x, y, w, h, g_hwnd, NULL,
                            GetModuleHandle(NULL), NULL);
-    fprintf(stderr, "[EDIT_UI] CreateWindowEx hwnd=%p\n", hwnd);
+    DLOG("[EDIT_UI] CreateWindowEx hwnd=%p\n", hwnd);
     if (!hwnd)
     {
-        fprintf(stderr, "[EDIT_UI] CreateWindowEx FAILED\n");
+        DLOG("[EDIT_UI] CreateWindowEx FAILED\n");
         g_edit_index = -1;
         g_edit_is_xml = 0;
         g_doc_state = DOC_STATE_IDLE;
@@ -265,7 +266,7 @@ static void show_paragraph_editor_xml(int index, const char *xml_utf8)
     wtext = u8_to_w(xml_utf8 ? xml_utf8 : "");
     if (wtext)
     {
-        fprintf(stderr, "[EDIT_UI] SetWindowTextW on edit control\n");
+        DLOG("[EDIT_UI] SetWindowTextW on edit control\n");
         SetWindowTextW(g_edit_ctl_xml, wtext);
         free(wtext);
     }
@@ -491,26 +492,26 @@ void show_run_viewer(int para_index, const ld_run_hit *hit,
 /* Avvia l'editor XML per il paragrafo all'indice dato (usato dopo hit-test). */
 void begin_paragraph_edit_at_index(int index)
 {
-    fprintf(stderr, "[EDIT_UI] begin_paragraph_edit_at_index index=%d g_doc_state=%d g_doc=%p g_edit_hwnd=%p\n",
+    DLOG("[EDIT_UI] begin_paragraph_edit_at_index index=%d g_doc_state=%d g_doc=%p g_edit_hwnd=%p\n",
             index, g_doc_state, g_doc, g_edit_hwnd);
     if (index < 0 || g_doc_state != DOC_STATE_IDLE) {
-        fprintf(stderr, "[EDIT_UI] IGNORED: index=%d g_doc_state=%d (expected 0=IDLE)\n", index, g_doc_state);
+        DLOG("[EDIT_UI] IGNORED: index=%d g_doc_state=%d (expected 0=IDLE)\n", index, g_doc_state);
         return;
     }
 
     char *xml = NULL;
     int got = ld_paragraph_get_ooxml(g_doc, index, &xml);
-    fprintf(stderr, "[EDIT_UI] ld_paragraph_get_ooxml got=%d xml=%p\n", got, xml);
+    DLOG("[EDIT_UI] ld_paragraph_get_ooxml got=%d xml=%p\n", got, xml);
     if (!got || !xml || !xml[0])
     {
-        fprintf(stderr, "[XML] Paragrafo %d senza OOXML\n", index);
+        DLOG("[XML] Paragrafo %d senza OOXML\n", index);
         if (xml) ld_free_string(xml);
         return;
     }
     g_doc_state = DOC_STATE_EDITOR;
-    fprintf(stderr, "[EDIT_UI] calling show_paragraph_editor_xml\n");
+    DLOG("[EDIT_UI] calling show_paragraph_editor_xml\n");
     show_paragraph_editor_xml(index, xml);
-    fprintf(stderr, "[EDIT_UI] show_paragraph_editor_xml returned\n");
+    DLOG("[EDIT_UI] show_paragraph_editor_xml returned\n");
     if (xml) ld_free_string(xml);
 }
 
@@ -525,7 +526,7 @@ void begin_paragraph_edit_at(int doc_x, int doc_y)
     int got = ld_paragraph_hit_test(g_doc, doc_x, doc_y, &hit, &text);
     if (!got)
     {
-        fprintf(stderr, "[EDIT] Nessun paragrafo colpito\n");
+        DLOG("[EDIT] Nessun paragrafo colpito\n");
         if (text) ld_free_string(text);
         return;
     }

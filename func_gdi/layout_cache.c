@@ -2,6 +2,7 @@
  * layout_cache.c - Implementazione cache layout in memoria.
  */
 #include "layout_cache.h"
+#include "debug_log.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -602,11 +603,11 @@ int layout_cache_populate(LayoutCache *cache, void *doc_handle)
 static void dump_para_cb(const LayoutParagraph *p, void *ctx)
 {
     (void)ctx;
-    fprintf(stderr, "  Para id=%d (%d,%d) %dx%d runs=%d align=%d\n",
+    DLOG("  Para id=%d (%d,%d) %dx%d runs=%d align=%d\n",
             p->id, p->x, p->y, p->w, p->h, p->run_count, p->alignment);
     const TextRun *r = p->runs;
     while (r) {
-        fprintf(stderr, "    Run '%.*s' (%d,%d) %dx%d font=%p col=0x%06lX\n",
+        DLOG("    Run '%.*s' (%d,%d) %dx%d font=%p col=0x%06lX\n",
                 r->text ? (int)strnlen(r->text, 40) : 0, r->text ? r->text : "",
                 r->x, r->y, r->w, r->h, r->font_handle, (unsigned long)r->color);
         r = r->next;
@@ -616,10 +617,10 @@ static void dump_para_cb(const LayoutParagraph *p, void *ctx)
 void layout_cache_dump_stats(const LayoutCache *cache)
 {
     if (!cache) {
-        fprintf(stderr, "[LAYOUT_CACHE] NULL\n");
+        DLOG("[LAYOUT_CACHE] NULL\n");
         return;
     }
-    fprintf(stderr, "[LAYOUT_CACHE] valid=%d gen=%d paras=%d size=%dx%d pages=%d\n",
+    DLOG("[LAYOUT_CACHE] valid=%d gen=%d paras=%d size=%dx%d pages=%d\n",
             cache->valid, cache->generation, cache->paragraph_count,
             cache->total_width, cache->total_height, cache->page_count);
     if (cache->valid && cache->root) {

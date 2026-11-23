@@ -135,8 +135,12 @@ static void viewer_on_vscroll(HWND hwnd, WPARAM wp)
 
 static void viewer_on_mousewheel(HWND hwnd, WPARAM wp, LPARAM lp)
 {
+#if D2D_DEBUG_LOGS
     short cx_ = (short)LOWORD(lp);
     short cy_ = (short)HIWORD(lp);
+#else
+    (void)lp;
+#endif
     int delta = GET_WHEEL_DELTA_WPARAM(wp);
 
     if (wp & MK_CONTROL) {
@@ -154,7 +158,7 @@ static void viewer_on_mousewheel(HWND hwnd, WPARAM wp, LPARAM lp)
             new_zoom = (old_zoom - step > G_ZOOM_MIN)
                            ? old_zoom - step : G_ZOOM_MIN;
 
-        fprintf(stderr, "[ZOOM] delta=%d old=%.2f new=%.2f cursor=(%d,%d)\n",
+        DLOG("[ZOOM] delta=%d old=%.2f new=%.2f cursor=(%d,%d)\n",
                 delta, old_zoom, new_zoom, cx_, cy_);
         g_zoom = new_zoom;
         /* La scala del renderer e' ancorata all'origine: senza questa

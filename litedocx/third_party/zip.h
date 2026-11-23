@@ -22,8 +22,18 @@ int zip_open(zip_arc *z, const void *data, size_t size);
  */
 int zip_read(zip_arc *z, const char *name, char **out, size_t *out_len);
 
-#endif /* ZIP_H */
+/* Return the number of entries in the central directory, or -1 on error. */
+int zip_entry_count(zip_arc *z);
+
+/*
+ * Get the name of entry at index (0-based, central directory order).
+ * On success sets *name to a pointer into the archive data (not NUL-terminated)
+ * and *len to its length. Returns 1 on success, 0 on failure.
+ */
+int zip_entry_name(zip_arc *z, int index, const char **name, size_t *len);
 
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* ZIP_H */

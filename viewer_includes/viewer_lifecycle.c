@@ -19,9 +19,9 @@ static LRESULT viewer_on_create(HWND hwnd)
                 DWRITE_FACTORY_TYPE_SHARED,
                 &IID_IDWriteFactory,
                 (IUnknown **)&g_dwrite_factory))) {
-            fprintf(stderr, "[DWRITE] factory created ok\n");
+            DLOG("[DWRITE] factory created ok\n");
         } else {
-            fprintf(stderr, "[DWRITE] factory creation failed, testo via GDI interop\n");
+            DLOG("[DWRITE] factory creation failed, testo via GDI interop\n");
             g_dwrite_factory = NULL;
         }
     }
@@ -29,7 +29,7 @@ static LRESULT viewer_on_create(HWND hwnd)
     g_renderer = renderer_d2d_create(g_dwrite_factory,
             NULL, NULL);  /* resolver opzionale: NULL = usa GDI interop interno */
     if (!g_renderer) {
-        fprintf(stderr, "[RENDERER] Fallito D2D\n");
+        DLOG("[RENDERER] Fallito D2D\n");
         MessageBoxA(hwnd,
                     "Impossibile creare il renderer Direct2D.",
                     "Errore", MB_OK | MB_ICONERROR);

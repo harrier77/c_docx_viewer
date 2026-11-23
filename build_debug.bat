@@ -15,9 +15,8 @@ copy /y ".\litedocx\liblitedocx.a" . >nul
 rem NOTA: niente renderer_gdi.c: il viewer usa solo Direct2D.
 rem Build unity: maind2dv.c include tutti i moduli viewer_includes/*.c
 rem RIMOSSO -mwindows per vedere console log
-rem AGGIUNTO -DCONSOLE_LOGGING=1 per abilitare log viewer
-rem AGGIUNTO -DENABLE_FILE_LOGGING=1 per log su file
-%GCC% -Wall -O0 -g -ffunction-sections -fdata-sections -Wl,--gc-sections -I. -Ifunc_gdi -Iviewer_includes -Ilitedocx/include -DCONSOLE_LOGGING=1 -DENABLE_FILE_LOGGING=1 -o d2dview_debug.exe maind2dv.c func_gdi\layout.c func_gdi\layout_cache.c func_gdi\renderer_d2d.c func_gdi\text_utf8.c func_gdi\document.c icon.o -L. -llitedocx -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32 -ld2d1 -ldwrite -lcomctl32
+rem AGGIUNTO -DD2D_DEBUG_LOGS=1: unico flag per tutti i debug (viewer + DLL)
+%GCC% -Wall -O0 -g -ffunction-sections -fdata-sections -Wl,--gc-sections -I. -Ifunc_gdi -Iviewer_includes -Ilitedocx/include -DD2D_DEBUG_LOGS=1 -o d2dview_debug.exe maind2dv.c miniz_zip\miniz.c func_gdi\layout.c func_gdi\layout_cache.c func_gdi\renderer_d2d.c func_gdi\text_utf8.c func_gdi\document.c icon.o -L. -llitedocx -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32 -ld2d1 -ldwrite -lcomctl32
 if errorlevel 1 goto :fail
 
 echo.

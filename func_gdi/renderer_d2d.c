@@ -11,6 +11,7 @@
 #include <windows.h>
 #include "renderer.h"
 #include "text_utf8.h"
+#include "debug_log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -204,7 +205,7 @@ static void d2d_present(Renderer *r, HDC target, int w, int h)
         /* Se EndDraw fallisce il batch non viene riversato sul DC:
          * lo schermo resta nero. Il log e' essenziale per diagnosi. */
         if (FAILED(hr))
-            fprintf(stderr, "[D2D] EndDraw FAILED hr=0x%08lX\n", (unsigned long)hr);
+            DLOG("[D2D] EndDraw FAILED hr=0x%08lX\n", (unsigned long)hr);
     }
     if (d->memdc && target && w > 0 && h > 0) {
         BitBlt(target, 0, 0, w, h, d->memdc, 0, 0, SRCCOPY);
@@ -415,7 +416,7 @@ static void d2d_set_transform(Renderer *r, float m11, float m12, float m21, floa
     d->current_transform._31 = dx;
     d->current_transform._32 = dy;
     d->current_transform_valid = 1;
-    fprintf(stderr, "[D2D_TRANSFORM] set m11=%f m12=%f m21=%f m22=%f dx=%f dy=%f\n",
+    DLOG("[D2D_TRANSFORM] set m11=%f m12=%f m21=%f m22=%f dx=%f dy=%f\n",
             m11, m12, m21, m22, dx, dy);
 
     /* Apply transform immediately if we're in a draw frame */

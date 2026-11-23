@@ -122,7 +122,7 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
             /* Essential trace: one line per full layout, shows the width
              * contract between viewer and litedocx (see layout_content_width()). */
 #if CONSOLE_LOGGING
-            fprintf(stderr, "[RENDER] ld_render content_w=%d\n", j->content_w);
+            DLOG("[RENDER] ld_render content_w=%d\n", j->content_w);
 #endif
             if (j->doc && !g_shutdown)
                 ld_render(j->doc, j->content_w);
@@ -148,14 +148,14 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
 
        case JOB_HIT_TEST:
            {
-               fprintf(stderr, "[HIT_JOB] JOB_HIT_TEST start doc_x=%d doc_y=%d gen=%u epoch=%d\n",
+               DLOG("[HIT_JOB] JOB_HIT_TEST start doc_x=%d doc_y=%d gen=%u epoch=%d\n",
                        j->doc_x, j->doc_y, j->gen, j->epoch);
                if (!g_shutdown && j->doc)
                {
                    ld_paragraph_hit hit;
                    char *text = NULL;
                    int got = ld_paragraph_hit_test(j->doc, j->doc_x, j->doc_y, &hit, &text);
-                   fprintf(stderr, "[HIT_JOB] ld_paragraph_hit_test got=%d hit.index=%d text=%p\n",
+                   DLOG("[HIT_JOB] ld_paragraph_hit_test got=%d hit.index=%d text=%p\n",
                            got, got ? hit.index : -1, text);
                    HitResult *r = (HitResult *)calloc(1, sizeof(HitResult));
                    if (r)
@@ -166,17 +166,17 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                        r->hit = got;
                        r->index = got ? hit.index : -1;
                        r->text = text;
-                       fprintf(stderr, "[HIT_JOB] PostMessage WM_APP_HIT_RESULT\n");
+                       DLOG("[HIT_JOB] PostMessage WM_APP_HIT_RESULT\n");
                        PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, (LPARAM)r);
                    }
                    else
                    {
-                       fprintf(stderr, "[HIT_JOB] calloc failed for HitResult\n");
+                       DLOG("[HIT_JOB] calloc failed for HitResult\n");
                        ld_free_string(text);
                        PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, 0);
                    }
                } else {
-                   fprintf(stderr, "[HIT_JOB] IGNORED: g_shutdown=%ld j->doc=%p\n", g_shutdown, j->doc);
+                   DLOG("[HIT_JOB] IGNORED: g_shutdown=%ld j->doc=%p\n", g_shutdown, j->doc);
                }
                break;
            }
@@ -227,26 +227,42 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
 
            case JOB_APPLY_EDIT:
         {
+            DLOG("[JOB_APPLY_EDIT] START doc=%p gen=%u para_index=%d xml_text=%p ooxml=%d g_shutdown=%ld\n",
+                    j->doc, j->gen, j->para_index, j->xml_text, j->ooxml, g_shutdown);
             EditResult *r = (EditResult *)calloc(1, sizeof(EditResult));
             int ok = 0;
             if (!g_shutdown && j->doc)
             {
                 if (j->xml_text)
                 {
-                    fprintf(stderr, "[XML][WORKER-APPLY] idx=%d bytes=%d ooxml=%d\n",
+                    DLOG("[XML][WORKER-APPLY] idx=%d bytes=%d ooxml=%d\n",
                             j->para_index, (int)strlen(j->xml_text), j->ooxml);
                     log_xml_block("WORKER-APPLY", j->para_index, j->xml_text);
                     if (j->ooxml)
+                    {
+                        DLOG("[XML][WORKER-APPLY] calling ld_paragraph_set_ooxml\n");
                         ok = ld_paragraph_set_ooxml(j->doc, j->para_index, j->xml_text);
+                        DLOG("[XML][WORKER-APPLY] ld_paragraph_set_ooxml returned ok=%d\n", ok);
+                    }
                     else
+                    {
+                        DLOG("[XML][WORKER-APPLY] calling ld_paragraph_set_xml\n");
                         ok = ld_paragraph_set_xml(j->doc, j->para_index, j->xml_text);
-                    fprintf(stderr, "[XML][WORKER-APPLY] ok=%d err='%s'\n",
+                        DLOG("[XML][WORKER-APPLY] ld_paragraph_set_xml returned ok=%d\n", ok);
+                    }
+                    DLOG("[XML][WORKER-APPLY] ok=%d err='%s'\n",
                             ok, ok ? "" : ld_last_error());
                 }
                 else if (j->text)
                 {
+                    DLOG("[TEXT][WORKER-APPLY] calling ld_paragraph_set_text\n");
                     ok = ld_paragraph_set_text(j->doc, j->para_index, j->text);
+                    DLOG("[TEXT][WORKER-APPLY] ld_paragraph_set_text returned ok=%d\n", ok);
                 }
+            }
+            else
+            {
+                DLOG("[JOB_APPLY_EDIT] IGNORED: g_shutdown=%ld j->doc=%p\n", g_shutdown, j->doc);
             }
             if (r)
             {
@@ -259,15 +275,21 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                     const char *err = ld_last_error();
                     lstrcpynA(r->error, err ? err : "", sizeof(r->error));
                 }
+                DLOG("[JOB_APPLY_EDIT] Posting WM_APP_EDIT_APPLIED ok=%d\n", ok);
                 if (!g_shutdown)
                     PostMessageA(j->hwnd, WM_APP_EDIT_APPLIED, 0, (LPARAM)r);
                 else
                     free(r);
             }
+            else
+            {
+                DLOG("[JOB_APPLY_EDIT] calloc failed for EditResult\n");
+            }
             free(j->text);
             j->text = NULL;
             free(j->xml_text);
             j->xml_text = NULL;
+            DLOG("[JOB_APPLY_EDIT] END\n");
             break;
         }
 

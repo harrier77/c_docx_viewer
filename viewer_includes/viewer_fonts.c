@@ -66,7 +66,7 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
     if (size < 6) size = 6;
     px_size = (float)size;
 
-    fprintf(stderr, "[FONT_CREATE] fam='%s' size=%d bold=%d italic=%d underline=%d strike=%d\n",
+    DLOG("[FONT_CREATE] fam='%s' size=%d bold=%d italic=%d underline=%d strike=%d\n",
             family, size, bold, italic, underline, strike);
 
     /* Check cache first */
@@ -76,16 +76,16 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
         IDWriteTextFormat_AddRef(format);
         metrics = cached->metrics;
         x_height = cached->x_height;
-        fprintf(stderr, "[FONT_CREATE] cache hit for '%s' %dpx\n", family, size);
+        DLOG("[FONT_CREATE] cache hit for '%s' %dpx\n", family, size);
     } else {
         wfam = u8_to_w(family);
         if (!wfam) {
-            fprintf(stderr, "[FONT_CREATE] utf8_to_wide failed\n");
+            DLOG("[FONT_CREATE] utf8_to_wide failed\n");
             return NULL;
         }
 
         if (!g_dwrite_factory) {
-            fprintf(stderr, "[FONT_CREATE] no DWrite factory\n");
+            DLOG("[FONT_CREATE] no DWrite factory\n");
             free(wfam);
             return NULL;
         }
@@ -96,7 +96,7 @@ static void *cb_create_font(const char *fam, int size, int bold, int italic,
         wfam = NULL;
 
         if (FAILED(hr) || !format) {
-            fprintf(stderr, "[FONT_CREATE] CreateTextFormat failed hr=0x%08lX\n", (unsigned long)hr);
+            DLOG("[FONT_CREATE] CreateTextFormat failed hr=0x%08lX\n", (unsigned long)hr);
             return NULL;
         }
 

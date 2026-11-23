@@ -15,6 +15,7 @@
 // Author: jdtang@google.com (Jonathan Tang)
 
 #include "error.h"
+#include "debug_log.h"
 
 #include <assert.h>
 #include <stdarg.h>
@@ -261,7 +262,7 @@ void gumbo_print_caret_diagnostic(
   GumboStringBuffer text;
   gumbo_string_buffer_init(parser, &text);
   gumbo_caret_diagnostic_to_string(parser, error, source_text, &text);
-  printf("%.*s", (int) text.length, text.data);
+  DLOG("%.*s", (int) text.length, text.data);
   gumbo_string_buffer_destroy(parser, &text);
 }
 

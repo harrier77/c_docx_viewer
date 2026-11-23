@@ -15,6 +15,10 @@ $Litehtml = $Litehtml.TrimEnd('\')
 $Obj = $Obj.TrimEnd('\')
 $Here = $Here.TrimEnd('\')
 
+# Keep Release and Debug objects separate: switching configuration must never
+# reuse objects compiled with the other D2D_DEBUG_LOGS value.
+$Obj = Join-Path $Obj $Configuration
+
 $ErrorActionPreference = 'Stop'
 
 $Dirs = @('gumbo','litehtml','third_party','litedocx')
@@ -48,8 +52,10 @@ function Compile-File($src, $dst, $compiler, $flags) {
         $flagList += '-g'
         $flagList += '-O0'
         $flagList += '-DDEBUG'
+        $flagList += '-DD2D_DEBUG_LOGS=1'
         $flagList += '-DLITEDOCX_DEBUG=1'
     } else {
+        $flagList += '-DD2D_DEBUG_LOGS=0'
         $flagList += '-DLITEDOCX_DEBUG=0'
     }
     $flagList += $src
@@ -72,7 +78,10 @@ function Link-Dll($objDir, $def, $outDll, $outLib) {
     $linkFlags = @('-shared', '-o', $outDll)
     $linkFlags += $objs
     $linkFlags += $def
-    $linkFlags += '-static-libgcc', '-static-libstdc++', "-Wl,--out-implib=$outLib"
+    # Dynamic linking to libstdc++/libgcc (richiede DLL runtime accanto all'eseguibile)
+    $linkFlags += "-Wl,--out-implib=$outLib"
+    $linkFlags += '-Wl,--gc-sections'          # Elimina codice non referenziato
+    $linkFlags += '-Wl,--strip-all'            # Strip simboli
     $linkFlags += '-lgdi32', '-luser32', '-lole32', '-luuid', '-lwindowscodecs', '-lmsimg32'
     if ($Configuration -eq 'Debug') {
         $linkFlags += '-g'
@@ -84,9 +93,9 @@ function Link-Dll($objDir, $def, $outDll, $outLib) {
 }
 
 # Include flags per tutte le compilazioni
-$IFLAGS = "-I$Litehtml/include -I$Litehtml/include/litehtml -I$Litehtml/src -I$Litehtml/src/gumbo/src -I$Here/include -I$Here/src -I$Here/third_party"
+$IFLAGS = "-I$Root -I$Litehtml/include -I$Litehtml/include/litehtml -I$Litehtml/src -I$Litehtml/src/gumbo/src -I$Here/include -I$Here/src -I$Here/third_party"
 
-$optFlags = if ($Configuration -eq 'Debug') { '-O0' } else { '-O2' }
+$optFlags = if ($Configuration -eq 'Debug') { '-O0' } else { '-Os -fdata-sections -ffunction-sections' }
 
 # [1/5] gumbo (C)
 Write-Host "[1/5] Compilazione gumbo (C99) con gcc... [$Configuration]"

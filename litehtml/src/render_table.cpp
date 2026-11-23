@@ -1,4 +1,5 @@
 #include "render_table.h"
+#include "debug_log.h"
 #include "document.h"
 #include "iterators.h"
 
@@ -168,7 +169,7 @@ litehtml::rendered_width litehtml::render_item_table::_render(pixel_t x, pixel_t
     // plus cell spacing or borders (MAX) is less than that of the containing block, use max(MAX, CAPMIN).
 
 #if LITEHTML_TABLE_DEBUG
-    fprintf(stderr, "[TABLE_RENDER] self_size.width=%d self_size.render_width=%d self_size.width.type=%d\n",
+    DLOG("[TABLE_RENDER] self_size.width=%d self_size.render_width=%d self_size.width.type=%d\n",
                     (int)(pixel_t)self_size.width, (int)(pixel_t)self_size.render_width, (int)self_size.width.type);
 #endif
 
@@ -187,7 +188,7 @@ litehtml::rendered_width litehtml::render_item_table::_render(pixel_t x, pixel_t
                                                min_table_width, max_table_width);
     }
 #if LITEHTML_TABLE_DEBUG
-    fprintf(stderr, "[TABLE_RENDER] table_width=%d min_table_width=%d max_table_width=%d\n",
+    DLOG("[TABLE_RENDER] table_width=%d min_table_width=%d max_table_width=%d\n",
                     (int)table_width, (int)min_table_width, (int)max_table_width);
 #endif
 

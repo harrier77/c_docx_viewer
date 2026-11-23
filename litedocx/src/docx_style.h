@@ -24,6 +24,19 @@ namespace litedocx
     std::string list_style_for_format(const std::string& fmt);
     bool        list_is_bullet(const std::string& fmt);
 
+    /* Paragraph-write tracing: true for Heading/Title/Titolo style ids.
+     * Shared by the builder (DOM write) and the OOXML extractor. */
+    inline bool style_is_heading(const std::string& id)
+    {
+        std::string lower;
+        lower.reserve(id.size());
+        for(char c : id)
+            lower += (char)((c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c);
+        return lower.find("heading") != std::string::npos ||
+               lower.find("title")   != std::string::npos ||
+               lower.find("titolo")  != std::string::npos;
+    }
+
 } // namespace litedocx
 
 #endif // LITEDOCX_DOCX_STYLE_H

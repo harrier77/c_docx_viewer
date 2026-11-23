@@ -12,7 +12,7 @@ static void request_render(int w)
     if (!g_doc || g_load_active)
         return;
 
-    fprintf(stderr, "[RENDER_REQ] w=%d g_render_busy=%d zoom=%.2f\n", w, g_render_busy, g_zoom);
+    DLOG("[RENDER_REQ] w=%d g_render_busy=%d zoom=%.2f\n", w, g_render_busy, g_zoom);
 
     LOG_RENDER("request_render called");
     log_msg("[RENDER] request_render: w=%d g_render_busy=%d\n", w, g_render_busy);
@@ -242,7 +242,7 @@ static void on_render_done(void *doc, int used_w)
     if (g_shutdown)
         return;
 
-    fprintf(stderr, "[RENDER_DONE] used_w=%d g_render_busy=%d zoom=%.2f\n", used_w, g_render_busy, g_zoom);
+    DLOG("[RENDER_DONE] used_w=%d g_render_busy=%d zoom=%.2f\n", used_w, g_render_busy, g_zoom);
 
     LOG_RENDER("on_render_done called");
     log_msg("[RENDER] on_render_done: used_w=%d g_render_busy=%d g_render_pending_width=%d g_render_pending_first=%d g_render_pending_last=%d\n",
@@ -281,15 +281,15 @@ static void on_render_done(void *doc, int used_w)
     /* Layout completo dopo il primo full render */
     g_layout_complete = 1;
     LOG_RENDER("layout complete flag set");
-    fprintf(stderr, "[RENDER_DONE] g_layout_complete=1, creating/checking layout cache\n");
+    DLOG("[RENDER_DONE] g_layout_complete=1, creating/checking layout cache\n");
 
     /* Popola layout cache (Fase 3) - solo dopo il primo full render */
     if (g_layout_complete && g_layout_cache == NULL) {
-        fprintf(stderr, "[RENDER_DONE] creating new layout cache\n");
+        DLOG("[RENDER_DONE] creating new layout cache\n");
         g_layout_cache = layout_cache_create();
     }
     if (g_layout_cache) {
-        fprintf(stderr, "[RENDER_DONE] setting layout cache params and extracting\n");
+        DLOG("[RENDER_DONE] setting layout cache params and extracting\n");
         layout_cache_set_layout_params(g_layout_cache,
             layout_content_width(),
             LAY->page_w - 2 * LAYOUT_VISUAL_PADDING_X,
@@ -298,9 +298,9 @@ static void on_render_done(void *doc, int used_w)
         ld_set_layout_cache_callbacks(g_doc, &g_cache_ops, g_layout_cache);
         ld_extract_layout(g_doc);
         layout_cache_dump_stats(g_layout_cache);
-        fprintf(stderr, "[RENDER_DONE] layout cache extraction done\n");
+        DLOG("[RENDER_DONE] layout cache extraction done\n");
     } else {
-        fprintf(stderr, "[RENDER_DONE] ERROR: g_layout_cache is NULL!\n");
+        DLOG("[RENDER_DONE] ERROR: g_layout_cache is NULL!\n");
     }
 
     /* Pending width (resize) ha priorità su pending range */
@@ -390,7 +390,7 @@ static void load_docx_file(const char *path)
 void log_xml_block(const char *tag, int index, const char *xml)
 {
     if (!xml) return;
-    fprintf(stderr, "[XML][%s] idx=%d:\n%s\n", tag, index, xml);
+    DLOG("[XML][%s] idx=%d:\n%s\n", tag, index, xml);
 }
 
 /* Riprende render in sospeso dopo editor/hit-test */
@@ -415,17 +415,33 @@ void resume_pending_render(void)
 /* Accoda job per applicare modifica XML */
 void request_paragraph_apply_xml(const char *xml)
 {
-    if (!g_doc || !xml) return;
-    if (!g_worker_started) return;
+    DLOG("[RENDER][APPLY_XML] START g_doc=%p g_edit_index=%d xml=%p len=%d g_worker_started=%d\n",
+            g_doc, g_edit_index, xml, xml ? (int)strlen(xml) : 0, g_worker_started);
+    if (!g_doc || !xml) {
+        DLOG("[RENDER][APPLY_XML] IGNORED: g_doc=%p xml=%p\n", g_doc, xml);
+        return;
+    }
+    if (!g_worker_started) {
+        DLOG("[RENDER][APPLY_XML] IGNORED: worker not started\n");
+        return;
+    }
 
     Job *j = alloc_job(JOB_APPLY_EDIT);
-    if (!j) return;
+    if (!j) {
+        DLOG("[RENDER][APPLY_XML] alloc_job failed\n");
+        return;
+    }
     j->doc = g_doc;
     j->gen = g_load_gen;
     j->para_index = g_edit_index;
     j->xml_text = _strdup(xml);
     j->ooxml = 1;
+    /* REGRESSION: DOC_STATE_APPLYING is released by handle_edit_applied() in
+     * maind2dv.c on every outcome (success, error, stale). Any new early return
+     * after this point must still let WM_APP_EDIT_APPLIED reach the UI thread,
+     * otherwise double-click editing stays blocked forever. */
     g_doc_state = DOC_STATE_APPLYING;
+    DLOG("[RENDER][APPLY_XML] enqueue JOB_APPLY_EDIT gen=%u para_index=%d\n", j->gen, j->para_index);
     enqueue_job(j);
 }
 
@@ -442,6 +458,8 @@ void request_paragraph_apply(const char *text)
     j->para_index = g_edit_index;
     j->text = _strdup(text);
     j->ooxml = 0;
+    /* REGRESSION: paired with handle_edit_applied() in maind2dv.c; see the
+     * matching note in request_paragraph_apply_xml() above. */
     g_doc_state = DOC_STATE_APPLYING;
     enqueue_job(j);
 }
@@ -454,20 +472,20 @@ void request_paragraph_apply(const char *text)
  * REGRESSION FIX: senza CS_DBLCLKS in window class + questa funzione, doppio click non funzionava. */
 void request_hit_test(int doc_x, int doc_y)
 {
-    fprintf(stderr, "[HIT_REQ] request_hit_test doc=(%d,%d) g_doc=%p g_doc_state=%d g_worker_started=%d\n",
+    DLOG("[HIT_REQ] request_hit_test doc=(%d,%d) g_doc=%p g_doc_state=%d g_worker_started=%d\n",
             doc_x, doc_y, g_doc, g_doc_state, g_worker_started);
     if (!g_doc || g_doc_state != DOC_STATE_IDLE) {
-        fprintf(stderr, "[HIT_REQ] IGNORED: g_doc=%p g_doc_state=%d\n", g_doc, g_doc_state);
+        DLOG("[HIT_REQ] IGNORED: g_doc=%p g_doc_state=%d\n", g_doc, g_doc_state);
         return;
     }
     if (!g_worker_started) {
-        fprintf(stderr, "[HIT_REQ] IGNORED: worker not started\n");
+        DLOG("[HIT_REQ] IGNORED: worker not started\n");
         return;
     }
 
     Job *j = alloc_job(JOB_HIT_TEST);
     if (!j) {
-        fprintf(stderr, "[HIT_REQ] alloc_job failed\n");
+        DLOG("[HIT_REQ] alloc_job failed\n");
         return;
     }
     j->doc = g_doc;
@@ -476,6 +494,6 @@ void request_hit_test(int doc_x, int doc_y)
     j->doc_x = doc_x;
     j->doc_y = doc_y;
     g_doc_state = DOC_STATE_HITTEST;
-    fprintf(stderr, "[HIT_REQ] enqueue JOB_HIT_TEST gen=%u epoch=%d\n", j->gen, j->epoch);
+    DLOG("[HIT_REQ] enqueue JOB_HIT_TEST gen=%u epoch=%d\n", j->gen, j->epoch);
     enqueue_job(j);
 }

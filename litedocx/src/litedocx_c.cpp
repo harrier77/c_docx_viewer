@@ -30,30 +30,14 @@
 #include "docx_model.h"
 #include "docx_package.h"
 #include "litedocx_c.h"
+#include "debug_log.h"
 
+/* Legacy names kept as aliases of the single build switch. */
 #ifndef LITEDOCX_DEBUG
-#define LITEDOCX_DEBUG 0
+#define LITEDOCX_DEBUG D2D_DEBUG_LOGS
 #endif
-
-#if LITEDOCX_DEBUG
-#define LDBG(msg) do { fprintf(stderr, "%s", msg); fflush(stderr); } while(0)
-#else
-#define LDBG(msg) ((void)0)
-#endif
-
-// Console logging switch for the DLL. 0 = no stderr output in release use.
-// The viewer's CONSOLE_LOGGING flag does not reach here: litedocx.dll is a
-// separate binary, so it has its own master switch.
-#ifndef LITEDOCX_CONSOLE_LOG
-#define LITEDOCX_CONSOLE_LOG 0
-#endif
-
-// Logging per debug Fase D (gated by LITEDOCX_CONSOLE_LOG)
-#if LITEDOCX_CONSOLE_LOG
-#define LDLOG(fmt, ...) do { fprintf(stderr, "[LITEDOCX] " fmt "\n", ##__VA_ARGS__); fflush(stderr); } while(0)
-#else
-#define LDLOG(fmt, ...) ((void)0)
-#endif
+#define LDBG(msg)  DLOGSTR(msg)
+#define LDLOG(fmt, ...) DLOG("[LITEDOCX] " fmt "\n", ##__VA_ARGS__)
 
 namespace
 {
@@ -1295,6 +1279,24 @@ namespace
         }
     }
 
+/* Style id of a w:p fragment, e.g. "Heading1" from <w:pStyle w:val="Heading1"/>. */
+static std::string paragraph_style_id(const std::string& p_xml)
+{
+    size_t tag = p_xml.find("<w:pStyle");
+    if(tag == std::string::npos) return std::string();
+    size_t gt = p_xml.find('>', tag);
+    if(gt == std::string::npos) return std::string();
+    std::string attrs = p_xml.substr(tag, gt - tag);
+    size_t v = attrs.find("w:val");
+    if(v == std::string::npos) return std::string();
+    size_t q = attrs.find_first_of("\"'", v);
+    if(q == std::string::npos) return std::string();
+    char quote = attrs[q];
+    size_t end = attrs.find(quote, q + 1);
+    if(end == std::string::npos) return std::string();
+    return attrs.substr(q + 1, end - q - 1);
+}
+
 /* Estrae tutti i <w:p>...</w:p> da document_xml e li salva in model.paragraph_ooxml.
  * Necessario per ld_paragraph_get_ooxml() che serve all'editor in memoria.
  * Indice nel vettore corrisponde a data-ld-paragraph-index assegnato in DocxBuilder.
@@ -1302,7 +1304,6 @@ namespace
  * e l'editor non si apriva ("Paragrafo N senza OOXML"). */
 static void extract_paragraph_ooxml(litedocx::DocxModel& model)
 {
-    fprintf(stderr, "[LITEDOCX_EXTRACT] start, document_xml size=%zu\n", model.document_xml.size());
     model.paragraph_ooxml.clear();
     const std::string& xml = model.document_xml;
     size_t pos = 0;
@@ -1317,17 +1318,22 @@ static void extract_paragraph_ooxml(litedocx::DocxModel& model)
         end += 6; // include </w:p>
         std::string p_xml = xml.substr(start, end - start);
         model.paragraph_ooxml.push_back(p_xml);
+
+        /* WRITE trace: one line per OOXML fragment stored for the editor. */
+        std::string style = paragraph_style_id(p_xml);
+        DLOG("[WRITE][OOXML] idx=%d style='%s' heading=%d pPr=%d len=%zu\n",
+                count, style.c_str(), litedocx::style_is_heading(style) ? 1 : 0,
+                p_xml.find("<w:pPr") != std::string::npos ? 1 : 0, p_xml.size());
+
         pos = end;
         count++;
         if (count > 1000) break; // safety
     }
-    fprintf(stderr, "[LITEDOCX_EXTRACT] extracted %zu paragraph OOXML fragments\n", model.paragraph_ooxml.size());
 }
 
 void* open_impl(const void* data, size_t size, const std::string& file_name, const ld_callbacks* cb,
                     int viewport_width, int viewport_height)
 {
-    fprintf(stderr, "[LITEDOCX_OPEN] entry\n");
     if(!data || size == 0)
     {
         set_error("dati DOCX vuoti");
@@ -1335,7 +1341,6 @@ void* open_impl(const void* data, size_t size, const std::string& file_name, con
     }
 
     auto* h = new (std::nothrow) ld_doc();
-    fprintf(stderr, "[LITEDOCX_OPEN] h allocated\n");
         if(!h)
         {
             set_error("memoria insufficiente");
@@ -1343,11 +1348,9 @@ void* open_impl(const void* data, size_t size, const std::string& file_name, con
         }
 
         HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-        fprintf(stderr, "[LITEDOCX_OPEN] CoInitializeEx done\n");
         h->com_initialized = SUCCEEDED(hr);
 
         auto* container       = new (std::nothrow) ld_container();
-        fprintf(stderr, "[LITEDOCX_OPEN] container allocated\n");
         if(!container)
         {
             if(h->com_initialized)
@@ -1399,14 +1402,12 @@ void* open_impl(const void* data, size_t size, const std::string& file_name, con
                 return nullptr;
             }
 
-            fprintf(stderr, "[LITEDOCX_OPEN] before builder.build()\n");
             container->model = model.get();
             litedocx::DocxBuilder builder(*model, container);
             litehtml::document::ptr doc = builder.build();
-            fprintf(stderr, "[LITEDOCX_OPEN] after builder.build() doc=%p\n", doc.get());
             if(!doc)
             {
-                fprintf(stderr, "[LITEDOCX_OPEN] build failed\n");
+                DLOG("[LITEDOCX_OPEN] build failed\n");
                 set_error(builder.error().empty() ? "conversione DOCX fallita" : builder.error());
                 container->model = nullptr;
                 if(container->wic)
@@ -1426,21 +1427,17 @@ void* open_impl(const void* data, size_t size, const std::string& file_name, con
             h->page_w = builder.page_width();
             h->page_h = builder.page_height();
             h->m_page_height_px = builder.page_height();  // Cache for pagination
-            fprintf(stderr, "[LITEDOCX_OPEN] page_w=%d page_h=%d\n", h->page_w, h->page_h);
 
             /* Extract paragraph OOXML for in-memory editing.
              * Popola model.paragraph_ooxml da document_xml per ld_paragraph_get_ooxml.
              * REGRESSION FIX: deve essere chiamato PRIMA di std::move(model) in container->owned_model.
              * Indice nel vettore = data-ld-paragraph-index assegnato in DocxBuilder. */
-            fprintf(stderr, "[LITEDOCX_OPEN] calling extract_paragraph_ooxml\n");
             extract_paragraph_ooxml(*model);
-            fprintf(stderr, "[LITEDOCX_OPEN] extract_paragraph_ooxml done\n");
 
             // Transfer model ownership into the container so that media data
             // remains valid for the whole document lifetime.
             container->owned_model = std::move(model);
             container->doc = doc;
-            fprintf(stderr, "[LITEDOCX_OPEN] success\n");
             set_error("");
             return h;
         } catch(const std::exception& ex)
@@ -1491,11 +1488,14 @@ void* ld_open_memory(const void* data, size_t size, const ld_callbacks* cb, int 
 int ld_render(void* doc, int max_width)
 {
     LDLOG("ld_render called, max_width=%d", max_width);
+    DLOG_W("[LITEDOCX] ld_render ENTRY\n");
     auto* h = static_cast<ld_doc*>(doc);
     if(!h || !h->doc)
     {
+        DLOG_W("[LITEDOCX] ld_render NULL CHECK FAILED\n");
         return 0;
     }
+    DLOG_W("[LITEDOCX] ld_render AFTER NULL CHECK\n");
     try
     {
         // CRITICAL: Font cache invalidation due to zoom change.
@@ -1506,17 +1506,36 @@ int ld_render(void* doc, int max_width)
         // Without rebuild_render_tree(), the old render tree would reuse
         // stale font_metrics and text would not scale with zoom.
         // This runs on the worker thread to avoid race with UI thread.
+        // IMPORTANT: Only do this if the document has already been rendered
+        // (m_full_layout_done == true). If the document was just rebuilt
+        // (e.g., after paragraph edit), there's no font cache to clear yet.
         if (h->m_fonts_invalidated)
         {
-            fprintf(stderr, "[LITEDOCX] ld_render: font cache invalidated flag set, clearing caches\n");
-            h->doc->clear_font_cache();
-            h->doc->rebuild_render_tree();
+            DLOG_W("[LITEDOCX] ld_render: font cache invalidated START\n");
+            DLOG_W("[LITEDOCX] ld_render: checking m_full_layout_done\n");
+            if (h->m_full_layout_done && h->doc)
+            {
+                DLOG_W("[LITEDOCX] ld_render: calling clear_font_cache\n");
+                try {
+                    h->doc->clear_font_cache();
+                    DLOG_W("[LITEDOCX] ld_render: clear_font_cache done\n");
+                    h->doc->rebuild_render_tree();
+                    DLOG_W("[LITEDOCX] ld_render: rebuild_render_tree done\n");
+                } catch (...) {
+                    DLOG_W("[LITEDOCX] ld_render: EXCEPTION\n");
+                }
+            }
+            else
+            {
+                DLOG_W("[LITEDOCX] ld_render: SKIPPING clear_font_cache\n");
+            }
+            DLOG_W("[LITEDOCX] ld_render: after if/else\n");
             if (h->container)
             {
                 h->container->text_width_cache.clear();
             }
             h->m_fonts_invalidated = false;
-            fprintf(stderr, "[LITEDOCX] ld_render: font cache cleared and render tree rebuilt due to zoom change\n");
+            DLOG_W("[LITEDOCX] ld_render: font cache handling DONE\n");
         }
 
         // DO NOT overwrite viewport_w here! viewport_w should remain the visual page width
@@ -1553,7 +1572,7 @@ void ld_draw(void* doc, void* hdc, int x, int y, int clip_x, int clip_y, int cli
     int doc_w = h && h->doc ? (int)h->doc->width() : 0;
     int doc_h = h && h->doc ? (int)h->doc->height() : 0;
 #if LITEDOCX_CONSOLE_LOG
-    fprintf(stderr, "[LD_DRAW] doc=%p x=%d y=%d clip=(%d,%d,%d,%d) doc_w=%d doc_h=%d\n",
+    DLOG("[LD_DRAW] doc=%p x=%d y=%d clip=(%d,%d,%d,%d) doc_w=%d doc_h=%d\n",
             doc, x, y, clip_x, clip_y, clip_w, clip_h, doc_w, doc_h);
 #endif
     LDBG((std::string("[LITEDOCX_DRAW] at (") + std::to_string(x) + "," + std::to_string(y) + ") clip=(" + std::to_string(clip_x) + "," + std::to_string(clip_y) + "," + std::to_string(clip_w) + "," + std::to_string(clip_h) + ")\n").c_str());
@@ -2125,28 +2144,28 @@ int ld_paragraph_hit_test(void* doc, int x, int y,
 {
     auto* h = static_cast<ld_doc*>(doc);
     if (!h || !h->doc || !h->doc->root()) {
-        fprintf(stderr, "[LITEDOCX_HIT] early return: h=%p doc=%p root=%p\n",
+        DLOG("[LITEDOCX_HIT] early return: h=%p doc=%p root=%p\n",
                 h, h ? h->doc : nullptr, h && h->doc ? h->doc->root() : nullptr);
         return 0;
     }
     if (out_text) *out_text = nullptr;
     if (!out_hit)
         return 0;
-    fprintf(stderr, "[LITEDOCX_HIT] ld_paragraph_hit_test x=%d y=%d\n", x, y);
+    DLOG("[LITEDOCX_HIT] ld_paragraph_hit_test x=%d y=%d\n", x, y);
     try
     {
         // Get all paragraphs with data-ld-paragraph-index attribute
         auto paras = h->doc->root()->select_all("[data-ld-paragraph-index]");
-        fprintf(stderr, "[LITEDOCX_HIT] select_all returned %zu elements\n", paras.size());
+        DLOG("[LITEDOCX_HIT] select_all returned %zu elements\n", paras.size());
         for (auto& el : paras)
         {
             if (!el) continue;
             const char* idx_str = el->get_attr("data-ld-paragraph-index");
-            fprintf(stderr, "[LITEDOCX_HIT] element idx_str=%s\n", idx_str ? idx_str : "NULL");
+            DLOG("[LITEDOCX_HIT] element idx_str=%s\n", idx_str ? idx_str : "NULL");
             if (!idx_str) continue;
             int idx = std::atoi(idx_str);
             litehtml::position pos = el->get_placement();
-            fprintf(stderr, "[LITEDOCX_HIT] para idx=%d pos=(%.0f,%.0f %.0fx%.0f)\n",
+            DLOG("[LITEDOCX_HIT] para idx=%d pos=(%.0f,%.0f %.0fx%.0f)\n",
                     idx, pos.x, pos.y, pos.width, pos.height);
             if (x >= static_cast<int>(pos.x) && x < static_cast<int>(pos.x + pos.width) &&
                 y >= static_cast<int>(pos.y) && y < static_cast<int>(pos.y + pos.height))
@@ -2427,14 +2446,53 @@ int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
         if (index >= 0 && index < (int)para_ooxml.size())
         {
             para_ooxml[index] = ooxml;
-            // Rebuild the document from modified OOXML
-            // This is a simplified version - in reality we'd need to rebuild the DOM
             h->container->model->dirty = true;
+            
+            // Rebuild document from updated OOXML
+            // 1. Serialize updated document.xml from model
+            std::string new_doc_xml = litedocx::serialize_document_xml(*h->container->model);
+            if (new_doc_xml.empty())
+            {
+                DLOG("[ld_paragraph_set_ooxml] serialize_document_xml returned empty\n");
+                return 0;
+            }
+            
+            // 2. Update model's document_xml
+            h->container->model->document_xml = std::move(new_doc_xml);
+            
+            // 3. Rebuild litehtml document from updated XML
+            litedocx::DocxBuilder builder(*h->container->model, h->container);
+            litehtml::document::ptr new_doc = builder.build();
+            if (!new_doc)
+            {
+                DLOG("[ld_paragraph_set_ooxml] DocxBuilder::build() failed: %s\n", builder.error().c_str());
+                return 0;
+            }
+            
+            // 4. Replace old document with new one
+            h->doc = new_doc;
+            h->container->doc = new_doc;
+            
+            // 5. Re-extract paragraph OOXML to keep indices in sync
+            extract_paragraph_ooxml(*h->container->model);
+            
+            // 6. Clear page cache and mark for full re-layout
+            h->m_page_heights.clear();
+            h->m_page_y_offsets.clear();
+            h->m_last_rendered_page = -1;
+            h->m_full_layout_done = false;
+            
+            DLOG("[ld_paragraph_set_ooxml] Document rebuilt successfully for paragraph %d\n", index);
             return 1;
         }
     }
+    catch (const std::exception& ex)
+    {
+        DLOG("[ld_paragraph_set_ooxml] exception: %s\n", ex.what());
+    }
     catch (...)
     {
+        DLOG("[ld_paragraph_set_ooxml] unknown exception\n");
     }
     return 0;
 }

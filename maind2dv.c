@@ -13,6 +13,7 @@
  * viene mai rifatto al cambio di zoom.
  */
 #include "litedocx_c.h"
+#include "debug_log.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -31,6 +32,7 @@
 #include "renderer.h"
 #include "text_utf8.h"
 #include "document.h"
+#include "miniz_zip/miniz.h"
 
 /* Accesso allo stato di layout (vedi func_gdi/layout.h). */
 #define LAY layout_get()
@@ -54,6 +56,7 @@
 #include "viewer_includes/viewer_callbacks.c"
 #include "viewer_includes/viewer_jobs.c"
 #include "viewer_includes/viewer_render.c"
+#include "viewer_includes/viewer_save.c"
 #include "viewer_includes/viewer_lifecycle.c"
 #include "viewer_includes/viewer_paint.c"
 #include "viewer_includes/viewer_input.c"
@@ -63,17 +66,17 @@
 /* Handlers per messaggi asincroni (Fase 4) */
 static void handle_hit_result(HitResult *r)
 {
-    fprintf(stderr, "[HIT_HANDLER] handle_hit_result called r=%p g_doc=%p g_load_gen=%u g_layout_epoch=%d g_doc_state=%d\n",
+    DLOG("[HIT_HANDLER] handle_hit_result called r=%p g_doc=%p g_load_gen=%u g_layout_epoch=%d g_doc_state=%d\n",
             r, g_doc, g_load_gen, g_layout_epoch, g_doc_state);
     if (!r) {
-        fprintf(stderr, "[HIT_HANDLER] r is NULL\n");
+        DLOG("[HIT_HANDLER] r is NULL\n");
         return;
     }
-    fprintf(stderr, "[HIT_HANDLER] r->doc=%p r->gen=%u r->epoch=%d r->hit=%d r->index=%d r->text=%p\n",
+    DLOG("[HIT_HANDLER] r->doc=%p r->gen=%u r->epoch=%d r->hit=%d r->index=%d r->text=%p\n",
             r->doc, r->gen, r->epoch, r->hit, r->index, r->text);
     if (r->doc != g_doc || r->gen != g_load_gen || r->epoch != g_layout_epoch)
     {
-        fprintf(stderr, "[HIT_HANDLER] STALE: doc mismatch (r->doc=%p vs g_doc=%p) gen mismatch (%u vs %u) epoch mismatch (%d vs %d)\n",
+        DLOG("[HIT_HANDLER] STALE: doc mismatch (r->doc=%p vs g_doc=%p) gen mismatch (%u vs %u) epoch mismatch (%d vs %d)\n",
                 r->doc, g_doc, r->gen, g_load_gen, r->epoch, g_layout_epoch);
         if (r->text) ld_free_string(r->text);
         free(r);
@@ -86,14 +89,14 @@ static void handle_hit_result(HitResult *r)
     
     if (r->hit && r->index >= 0)
     {
-        fprintf(stderr, "[HIT] hit para=%d, calling begin_paragraph_edit_at_index\n", r->index);
+        DLOG("[HIT] hit para=%d, calling begin_paragraph_edit_at_index\n", r->index);
         if (r->text) ld_free_string(r->text);
         /* Per ora apriamo l'editor direttamente */
         begin_paragraph_edit_at_index(r->index);
     }
     else
     {
-        fprintf(stderr, "[HIT] NO HIT (hit=%d index=%d)\n", r->hit, r->index);
+        DLOG("[HIT] NO HIT (hit=%d index=%d)\n", r->hit, r->index);
         if (r->text) ld_free_string(r->text);
         g_doc_state = DOC_STATE_IDLE;
     }
@@ -164,7 +167,7 @@ static void handle_para_xml_ready(ParaXmlResult *r)
     }
     if (r->ok && r->xml)
     {
-        fprintf(stderr, "[XML] para_xml ready idx=%d\n", r->index);
+        DLOG("[XML] para_xml ready idx=%d\n", r->index);
         ld_free_string(r->xml);
     }
     free(r);
@@ -172,28 +175,53 @@ static void handle_para_xml_ready(ParaXmlResult *r)
 
 static void handle_edit_applied(EditResult *r)
 {
-    if (!r) return;
+    DLOG("[EDIT_HANDLER] handle_edit_applied called r=%p g_doc=%p g_load_gen=%u g_doc_state=%d\n",
+            r, g_doc, g_load_gen, g_doc_state);
+    if (!r) {
+        DLOG("[EDIT_HANDLER] r is NULL\n");
+        return;
+    }
+    DLOG("[EDIT_HANDLER] r->doc=%p r->gen=%u r->ok=%d r->error='%s'\n",
+            r->doc, r->gen, r->ok, r->error);
     if (r->doc != g_doc || r->gen != g_load_gen)
     {
+        DLOG("[EDIT_HANDLER] STALE: doc mismatch (r->doc=%p vs g_doc=%p) gen mismatch (%u vs %u)\n",
+                r->doc, g_doc, r->gen, g_load_gen);
+        /* REGRESSION FIX: reloading the document while an edit was in flight
+         * left g_doc_state stuck in APPLYING, silently blocking all input.
+         * Only clear APPLYING here: never clobber an active HITTEST/EDITOR state. */
+        if (g_doc_state == DOC_STATE_APPLYING)
+            g_doc_state = DOC_STATE_IDLE;
         free(r);
         return;
     }
     
     if (r->ok)
     {
-        fprintf(stderr, "[EDIT] Applicato con successo, richiedo re-render\n");
+        DLOG("[EDIT] Applicato con successo, richiedo re-render\n");
+        /* REGRESSION FIX: request_paragraph_apply_xml() sets DOC_STATE_APPLYING.
+         * It MUST be cleared here on success too (the error path already did it):
+         * wnd_proc accepts WM_LBUTTONDBLCLK only when g_doc_state == DOC_STATE_IDLE,
+         * so missing this silently kills double-click editing after the first apply.
+         * Keep the WM_APP_EDIT_APPLIED -> handle_edit_applied() round-trip intact. */
+        g_doc_state = DOC_STATE_IDLE;
         ld_invalidate_font_cache(g_doc);
         ld_clear_page_cache(g_doc);
         g_layout_complete = 0;
         g_last_rendered_page = -1;
         g_first_rendered_page = -1;
         if (g_layout_cache)
+        {
             layout_cache_invalidate(g_layout_cache);
+            /* Re-register layout cache callbacks on the new document */
+            DLOG("[EDIT] Re-registering layout cache callbacks\n");
+            ld_set_layout_cache_callbacks(g_doc, &g_cache_ops, g_layout_cache);
+        }
         request_render(layout_content_width());
     }
     else
     {
-        fprintf(stderr, "[EDIT] Errore applicazione: %s\n", r->error);
+        DLOG("[EDIT] Errore applicazione: %s\n", r->error);
         g_doc_state = DOC_STATE_IDLE;
         InvalidateRect(g_hwnd, NULL, FALSE);
     }
@@ -248,7 +276,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
      * usa coordinate relative alla pagina INCLUSO il visual padding.
      * FIX: senza CS_DBLCLKS nella window class, WM_LBUTTONDBLCLK non veniva mai generato. */
     case WM_LBUTTONDBLCLK: {
-        fprintf(stderr, "[DBLCLK] WM_LBUTTONDBLCLK received, g_doc=%p g_doc_state=%d\n", g_doc, g_doc_state);
+        DLOG("[DBLCLK] WM_LBUTTONDBLCLK received, g_doc=%p g_doc_state=%d\n", g_doc, g_doc_state);
         if (g_doc && g_doc_state == DOC_STATE_IDLE) {
             int screen_x = (short)LOWORD(lp);
             int screen_y = (short)HIWORD(lp);
@@ -264,30 +292,32 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int page_x = (int)(screen_x * inv_zoom) - rc_page.left;
             int page_y = (int)(screen_y * inv_zoom) - rc_page.top;
             
-            fprintf(stderr, "[DBLCLK] screen=(%d,%d) page=(%d,%d) zoom=%.2f page_rect=(%ld,%ld)\n",
+            DLOG("[DBLCLK] screen=(%d,%d) page=(%d,%d) zoom=%.2f page_rect=(%ld,%ld)\n",
                     screen_x, screen_y, page_x, page_y, g_zoom,
                     rc_page.left, rc_page.top);
             
-            /* Prova 1: coordinate pagina (include visual padding per litedocx) */
+#if D2D_DEBUG_LOGS
+            /* Diagnostic-only synchronous hit tests: they duplicate the
+             * async request below, so production builds skip them entirely. */
             ld_paragraph_hit hit_sync;
             char *text_sync = NULL;
             int got_sync = ld_paragraph_hit_test(g_doc, page_x, page_y, &hit_sync, &text_sync);
-            fprintf(stderr, "[DBLCLK][SYNC page] got=%d hit.index=%d text=%p\n",
+            DLOG("[DBLCLK][SYNC page] got=%d hit.index=%d text=%p\n",
                     got_sync, got_sync ? hit_sync.index : -1, text_sync);
             if (text_sync) ld_free_string(text_sync);
             
-            /* Prova 2: coordinate pagina - visual padding */
             int doc_x = page_x - LAYOUT_VISUAL_PADDING_X;
             int doc_y = page_y - LAYOUT_VISUAL_MARGIN_Y;
             int got_sync2 = ld_paragraph_hit_test(g_doc, doc_x, doc_y, &hit_sync, &text_sync);
-            fprintf(stderr, "[DBLCLK][SYNC page-vpad] got=%d hit.index=%d text=%p\n",
+            DLOG("[DBLCLK][SYNC page-vpad] got=%d hit.index=%d text=%p\n",
                     got_sync2, got_sync2 ? hit_sync.index : -1, text_sync);
             if (text_sync) ld_free_string(text_sync);
+#endif
             
             /* Usa coordinate pagina per l'async (litedocx si aspetta questo) */
             request_hit_test(page_x, page_y);
         } else {
-            fprintf(stderr, "[DBLCLK] IGNORED: g_doc=%p g_doc_state=%d (expected 0=IDLE)\n", g_doc, g_doc_state);
+            DLOG("[DBLCLK] IGNORED: g_doc=%p g_doc_state=%d (expected 0=IDLE)\n", g_doc, g_doc_state);
         }
         return 0;
     }
@@ -337,7 +367,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     MSG msg;
     HMENU menu, filemenu;
 
-    fprintf(stderr, "[RENDERER] kind=d2d\n");
+    DLOG("[RENDERER] kind=d2d\n");
 
     {
         INITCOMMONCONTROLSEX icc;
@@ -367,6 +397,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     filemenu = CreatePopupMenu();
     AppendMenuA(filemenu, MF_STRING, 100, "&Apri...\tCtrl+O");
     AppendMenuA(filemenu, MF_STRING, 101, "&Ricarica\tF5");
+    AppendMenuA(filemenu, MF_STRING, 104, "Salva\tCtrl+S");
     AppendMenuA(filemenu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(filemenu, MF_STRING, 102, "&Esci");
     AppendMenuA(menu, MF_POPUP, (UINT_PTR)filemenu, "&File");

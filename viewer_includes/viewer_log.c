@@ -46,9 +46,9 @@ static void dbg_log(const char *fmt, ...)
 #if CONSOLE_LOGGING && TABLE_DEBUG
     va_list args;
     va_start(args, fmt);
-    fprintf(stderr, "[DBG] ");
+    DLOG("[DBG] ");
     vfprintf(stderr, fmt, args);
-    fprintf(stderr, "\n");
+    DLOG("\n");
     va_end(args);
 #else
     (void)fmt;

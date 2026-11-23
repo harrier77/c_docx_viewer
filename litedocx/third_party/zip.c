@@ -143,3 +143,59 @@ int zip_read(zip_arc *z, const char *name, char **out, size_t *out_len)
     }
     return 0;
 }
+
+int zip_entry_count(zip_arc *z)
+{
+    size_t eocd;
+    const unsigned char *d;
+
+    if (!z || !z->data || !find_eocd(z, &eocd))
+        return -1;
+
+    d = z->data;
+    return (int)le16(d + eocd + 10);
+}
+
+int zip_entry_name(zip_arc *z, int index, const char **name, size_t *len)
+{
+    size_t eocd, cdoff, pos;
+    unsigned long entries, i;
+    const unsigned char *d;
+
+    if (!z || !z->data || !name || !len || index < 0 || !find_eocd(z, &eocd))
+        return 0;
+
+    d = z->data;
+    entries = le16(d + eocd + 10);
+    cdoff = (size_t)le32(d + eocd + 16);
+    if (cdoff >= z->size || entries == 0 || entries == 0xFFFF)
+        return 0;
+    if ((unsigned long)index >= entries)
+        return 0;
+
+    pos = cdoff;
+    for (i = 0; i < entries; i++) {
+        unsigned nlen, elen, clen;
+        const unsigned char *namep;
+
+        if (pos + 46 > z->size || le32(d + pos) != SIG_CENTRAL)
+            return 0;
+
+        nlen  = le16(d + pos + 28);
+        elen  = le16(d + pos + 30);
+        clen  = le16(d + pos + 32);
+        namep = d + pos + 46;
+
+        if (pos + 46 + nlen > z->size)
+            return 0;
+
+        if ((int)i == index) {
+            *name = (const char *)namep;
+            *len = (size_t)nlen;
+            return 1;
+        }
+
+        pos += 46 + nlen + elen + clen;
+    }
+    return 0;
+}

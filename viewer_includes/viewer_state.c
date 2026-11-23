@@ -5,19 +5,21 @@
  * viene incluso per primo, prima degli altri moduli che usano questo stato.
  */
 
-/* ------------------------------------------------------------------
- * Master flag: set to 0 to disable ALL console (stderr) logging from
- * the viewer. Set to 1 to re-enable it. When 1, the amount of output
- * is further controlled by TABLE_DEBUG below (0 = only the essential
- * render-lifecycle line, 1 = full table-layout trace set used to
- * diagnose the "first column text in second column" bug).
- * NOTE: this flag covers the viewer only; the DLL has its own switch
- * (LITEDOCX_CONSOLE_LOG in litedocx_c.cpp).
- * ------------------------------------------------------------------ */
-#define CONSOLE_LOGGING 0
+#include "debug_log.h"
 
-/* Logging su file (logs.txt accanto all'eseguibile). 0 = disabilitato. */
-#define ENABLE_FILE_LOGGING 0
+/* ------------------------------------------------------------------
+ * Viewer logging follows the single build switch in debug_log.h.
+ * Builds may still override these two flags on the command line.
+ * NOTE: litedocx.dll and litehtml use the same D2D_DEBUG_LOGS switch.
+ * ------------------------------------------------------------------ */
+#ifndef CONSOLE_LOGGING
+#define CONSOLE_LOGGING D2D_DEBUG_LOGS
+#endif
+
+/* Logging su file (logs.txt accanto all'eseguibile). */
+#ifndef ENABLE_FILE_LOGGING
+#define ENABLE_FILE_LOGGING D2D_DEBUG_LOGS
+#endif
 
 /* Padding: vedi LAYOUT_PADDING_X / LAYOUT_VISUAL_PADDING_X /
  * LAYOUT_VISUAL_MARGIN_Y in func_gdi/layout.h. */

@@ -16,7 +16,7 @@ static void cb_draw_text(void *hdc, const char *text, void *font, unsigned rgb, 
     static int s_text_count = 0;
     if (s_text_count++ < 200)
         dbg_log("[TABLE] cb_draw_text text='%.60s' at (%d,%d) size=%dx%d\n", text, x, y, w, h);
-    fprintf(stderr, "[FONT_DRAW] text='%.30s' font=%p at (%d,%d) zoom=%.2f\n", text ? text : "NULL", font, x, y, g_zoom);
+    DLOG("[FONT_DRAW] text='%.30s' font=%p at (%d,%d) zoom=%.2f\n", text ? text : "NULL", font, x, y, g_zoom);
     if (!g_renderer)
         return;
     g_renderer->vtbl->DrawText(g_renderer, text, font,
@@ -111,6 +111,9 @@ static void cache_on_paragraph_start(void *user,
                                      int indent_left, int indent_right, int indent_first)
 {
     (void)user;
+    DLOG("[CACHE_CB] para_start id=%d pos=(%d,%d) size=(%d,%d) align=%d\n",
+            id, x, y, w, h, alignment);
+    fflush(stderr);
     if (!g_layout_cache)
         return;
     layout_cache_add_paragraph(g_layout_cache, NULL, id, x, y, w, h,
@@ -124,6 +127,9 @@ static void cache_on_text_run(void *user,
                               void *font_handle, unsigned color, int underline, int strike)
 {
     (void)user;
+    DLOG("[CACHE_CB] text_run para_id=%d text='%.20s' pos=(%d,%d) size=(%d,%d)\n",
+            para_id, text ? text : "NULL", x, y, w, h);
+    fflush(stderr);
     if (!g_layout_cache)
         return;
     /* Trova il paragrafo per ID (semplificato: usa l'ultimo aggiunto) */
@@ -140,6 +146,8 @@ static void cache_on_text_run(void *user,
 static void cache_on_paragraph_end(void *user, int id)
 {
     (void)user; (void)id;
+    DLOG("[CACHE_CB] para_end id=%d\n", id);
+    fflush(stderr);
     /* Nulla da fare per ora */
 }
 

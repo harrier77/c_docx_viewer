@@ -29,8 +29,12 @@ if not exist "%HERE%\build_litedocx.ps1" (
   exit /b 1
 )
 
+rem Uso: build_litedocx.bat [Release|Debug]  (default: Release)
+set "CONFIG=%~1"
+if "%CONFIG%"=="" set "CONFIG=Release"
+
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dpn0.ps1" ^
   -Root "%ROOT%" -Litehtml "%LITEHTML%" -Obj "%OBJ%" ^
-  -Gcc "%GCC%" -Gxx "%GXX%" -Here "%HERE%"
+  -Gcc "%GCC%" -Gxx "%GXX%" -Here "%HERE%" -Configuration "%CONFIG%"
 
 exit /b %ERRORLEVEL%

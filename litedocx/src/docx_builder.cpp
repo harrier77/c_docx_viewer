@@ -1,4 +1,5 @@
 #include "docx_builder.h"
+#include "debug_log.h"
 
 #include "docx_css.h"
 #include "docx_style.h"
@@ -374,7 +375,9 @@ namespace litedocx
             /* data-ld-paragraph-index: identificativo univoco paragrafo per hit-test e editing.
              * Usato da ld_paragraph_hit_test -> select_all("[data-ld-paragraph-index]").
              * REGRESSION FIX: senza questo attributo, hit-test non trovava paragrafi. */
-            p->set_attr("data-ld-paragraph-index", std::to_string(m_para_index++).c_str());
+            p->set_attr("data-ld-paragraph-index", std::to_string(m_para_index).c_str());
+            DLOG("[WRITE][PARA] idx=%d kind=empty-body tag=p style='' heading=0 cls=''\n", m_para_index);
+            ++m_para_index;
             m_body->appendChild(p);
             append_nbsp(p);
         }
@@ -517,7 +520,10 @@ namespace litedocx
                 sp->set_attr("class", p_cls.c_str());
                 /* data-ld-paragraph-index per paragrafi in liste annidate.
                  * REGRESSION FIX: senza questo, paragrafi in liste non erano cliccabili. */
-                sp->set_attr("data-ld-paragraph-index", std::to_string(m_para_index++).c_str());
+                sp->set_attr("data-ld-paragraph-index", std::to_string(m_para_index).c_str());
+                DLOG("[WRITE][PARA] idx=%d kind=list-placeholder tag=p style='' heading=0 cls='%s'\n",
+                        m_para_index, p_cls.c_str());
+                ++m_para_index;
                 li->appendChild(sp);
                 append_nbsp(sp);
                 lists.back().item = li;
@@ -559,6 +565,19 @@ namespace litedocx
         attrs["data-ld-paragraph-index"] = std::to_string(this_para_idx);
         auto        para = make_element("p", std::string(), attrs);
         parent->appendChild(para);
+
+        /* WRITE trace: every paragraph becomes a DOM <p>; the style is carried
+         * by para_cls. raw= pStyle in the source w:p, style= after style-chain. */
+        std::string raw_style;
+        if(const XmlNode* ppr = p->child("pPr"))
+        {
+            if(const XmlNode* ps = ppr->child("pStyle"))
+                raw_style = ps->attr("w:val");
+        }
+        DLOG("[WRITE][PARA] idx=%d kind=body tag=p raw='%s' style='%s' heading=%d cls='%s'\n",
+                this_para_idx, raw_style.c_str(), props.style.c_str(),
+                style_is_heading(raw_style.empty() ? props.style : raw_style) ? 1 : 0,
+                para_cls.c_str());
 
         bool content = false;
         for(const auto& c : p->children)
