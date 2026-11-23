@@ -15,9 +15,9 @@
 #define PAGE_TOP_GAP       20
 #define PAGE_SHADOW_OFF     4
 
-/* Padding: valori legati tra loro, non cambiare uno senza gli altri. */
-#define LAYOUT_PADDING_X         202
-#define LAYOUT_VISUAL_PADDING_X   18
+/* Padding: valori legati tra loro, non cambiare uno senza gli altri. (validi per giustificazione 190, 18,6)*/
+#define LAYOUT_PADDING_X         190
+#define LAYOUT_VISUAL_PADDING_X   1
 #define LAYOUT_VISUAL_MARGIN_Y     6
 
 /* Limiti zoom (ex docxview_new.c) */
