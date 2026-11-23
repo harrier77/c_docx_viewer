@@ -87,6 +87,13 @@ static char      g_cur[32] = "arrow";
 /* Pan con tasto centrale: ancora del drag (px schermo). */
 static int       g_pan_active;
 static int       g_pan_x, g_pan_y;
+/* Toolbar */
+static HWND      g_toolbar;
+#define TOOLBAR_HEIGHT 36
+#define IDM_TB_OPEN   4001
+#define IDM_TB_SAVE   4002
+#define IDM_TB_RELOAD 4003
+#define IDM_TB_EXIT   4004
 static FILE     *g_log_file = NULL;
 #if ENABLE_FILE_LOGGING
 static char      g_log_path[MAX_PATH];

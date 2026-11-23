@@ -13,6 +13,11 @@ static void viewer_on_size(HWND hwnd, WPARAM wp, LPARAM lp)
 {
     (void)wp;
     // log_msg("[SIZE] WM_SIZE cw=%d ch=%d\n", LOWORD(lp), HIWORD(lp));
+    /* Resize toolbar */
+    if (g_toolbar) {
+        SendMessage(g_toolbar, TB_AUTOSIZE, 0, 0);
+        MoveWindow(g_toolbar, 0, 0, LOWORD(lp), TOOLBAR_HEIGHT, TRUE);
+    }
     layout_resize(LOWORD(lp), HIWORD(lp));
     sync_view_scale();
     /* NON chiamare BeginDraw qui: in WM_SIZE non si disegna nulla.

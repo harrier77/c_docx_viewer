@@ -372,7 +372,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     {
         INITCOMMONCONTROLSEX icc;
         icc.dwSize = sizeof(icc);
-        icc.dwICC = ICC_TAB_CLASSES;
+        icc.dwICC = ICC_TAB_CLASSES | ICC_BAR_CLASSES;
         InitCommonControlsEx(&icc);
     }
 
