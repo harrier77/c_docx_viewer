@@ -176,7 +176,7 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                        PostMessageA(j->hwnd, WM_APP_HIT_RESULT, 0, 0);
                    }
                } else {
-                   fprintf(stderr, "[HIT_JOB] IGNORED: g_shutdown=%d j->doc=%p\n", g_shutdown, j->doc);
+                   fprintf(stderr, "[HIT_JOB] IGNORED: g_shutdown=%ld j->doc=%p\n", g_shutdown, j->doc);
                }
                break;
            }

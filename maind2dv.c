@@ -264,7 +264,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int page_x = (int)(screen_x * inv_zoom) - rc_page.left;
             int page_y = (int)(screen_y * inv_zoom) - rc_page.top;
             
-            fprintf(stderr, "[DBLCLK] screen=(%d,%d) page=(%d,%d) zoom=%.2f page_rect=(%d,%d)\n",
+            fprintf(stderr, "[DBLCLK] screen=(%d,%d) page=(%d,%d) zoom=%.2f page_rect=(%ld,%ld)\n",
                     screen_x, screen_y, page_x, page_y, g_zoom,
                     rc_page.left, rc_page.top);
             
