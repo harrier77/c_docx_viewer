@@ -177,6 +177,24 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                              (WPARAM)j->content_w, (LPARAM)j->doc);
             break;
 
+        case JOB_RELAYOUT_PARAGRAPH:
+            /* FASE 1: identico a JOB_RENDER.  Il job dedicato esiste solo per
+             * trasportare para_index al worker: le fasi successive sostituiranno
+             * ld_render() con il rilayout del solo paragrafo. */
+            LOG_JOB(JOB_RELAYOUT_PARAGRAPH, "start ld_render (paragraph relayout - Fase 1)");
+            if (j->doc && !g_shutdown)
+            {
+                DLOG("[REL_JOB] para=%d content_w=%d full ld_render (Fase 1)\n",
+                        j->para_index, j->content_w);
+                ld_render(j->doc, j->content_w);
+            }
+            worker_extract_layout(j->doc, j->content_w);
+            LOG_JOB(JOB_RELAYOUT_PARAGRAPH, "ld_render done, posting WM_APP_RENDER_DONE");
+            if (!g_shutdown)
+                PostMessageA(j->hwnd, WM_APP_RENDER_DONE,
+                             (WPARAM)j->content_w, (LPARAM)j->doc);
+            break;
+
        case JOB_HIT_TEST:
            {
                DLOG("[HIT_JOB] JOB_HIT_TEST start doc_x=%d doc_y=%d gen=%u epoch=%d\n",
@@ -300,6 +318,7 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                 r->doc = j->doc;
                 r->gen = j->gen;
                 r->token = j->token;
+                r->para_index = j->para_index;
                 r->ok = ok;
                 r->caret = j->caret;
                 if (!ok)

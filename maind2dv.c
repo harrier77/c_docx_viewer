@@ -207,11 +207,16 @@ static void handle_edit_applied(EditResult *r)
          * so missing this silently kills double-click editing after the first apply.
          * Keep the WM_APP_EDIT_APPLIED -> handle_edit_applied() round-trip intact. */
         g_doc_state = DOC_STATE_IDLE;
-        ld_invalidate_font_cache(g_doc);
+        /* FASE 1: ld_invalidate_font_cache() era superfluo. Serve solo quando
+         * cambia lo zoom (dimensione dei font); un edit non cambia ne' zoom ne'
+         * larghezza di layout e le API di edit litedocx ricostruiscono gia'
+         * la render tree. Chiamarlo faceva eseguire a ld_render() un secondo
+         * clear_font_cache + rebuild_render_tree() completo. */
         ld_clear_page_cache(g_doc);
-        g_layout_complete = 0;
-        g_last_rendered_page = -1;
-        g_first_rendered_page = -1;
+        /* FASE 1: non azzerare qui lo stato di paginazione: on_render_done()
+         * ricalcola page_count e g_last_rendered_page dai valori reali dopo il
+         * render. g_layout_complete resta 1, cosi' hit-test e scroll non
+         * ripartono dall'inizio durante il rilayout. */
         if (g_layout_cache)
         {
             layout_cache_invalidate(g_layout_cache);
@@ -225,7 +230,9 @@ static void handle_edit_applied(EditResult *r)
             g_layout_epoch++;
             g_caret_reanchor = 1;
         }
-        request_render(layout_content_width());
+        /* FASE 1: job dedicato al paragrafo modificato; per ora esegue ancora
+         * un ld_render() completo, ma para_index arriva fino al worker. */
+        request_paragraph_relayout(r->para_index);
     }
     else
     {

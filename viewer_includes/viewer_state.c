@@ -121,6 +121,11 @@ typedef enum JobKind
     JOB_LOAD = 1,
     JOB_RENDER,
     JOB_RENDER_RANGE,
+    /* FASE 1: canale dedicato per il rilayout dopo un edit di paragrafo.
+     * Per ora esegue ancora un ld_render() completo: serve a portare
+     * para_index fino al worker, base per il rilayout locale delle fasi
+     * successive. */
+    JOB_RELAYOUT_PARAGRAPH,
     JOB_HIT_TEST,
     JOB_RUN_HIT_TEST,
     JOB_GET_PARA_XML,
@@ -192,6 +197,7 @@ typedef struct EditResult
     void       *doc;
     unsigned    gen;
     unsigned    token;
+    int         para_index; /* paragrafo modificato, usato dal rilayout incrementale */
     int         ok;
     int         caret;      /* 1 = proviene dal caret inline */
     char        error[256];

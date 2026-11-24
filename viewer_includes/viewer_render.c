@@ -5,17 +5,23 @@
  * condivide tipi, macro e stato globale definiti nel file principale.
  */
 
-static void request_render(int w)
+/* Richiesta di render generica.  job_kind distingue il render completo
+ * (JOB_RENDER) da quello successivo a un edit (JOB_RELAYOUT_PARAGRAPH):
+ * in FASE 1 entrambi eseguono ld_render(), ma il secondo porta para_index
+ * fino al worker come base per il rilayout locale delle fasi successive. */
+static void request_render_ex(int w, JobKind job_kind, int para_index)
 {
     Job *j;
 
     if (!g_doc || g_load_active)
         return;
 
-    DLOG("[RENDER_REQ] w=%d g_render_busy=%d zoom=%.2f\n", w, g_render_busy, g_zoom);
+    DLOG("[RENDER_REQ] kind=%d para=%d w=%d g_render_busy=%d zoom=%.2f\n",
+            job_kind, para_index, w, g_render_busy, g_zoom);
 
     LOG_RENDER("request_render called");
-    log_msg("[RENDER] request_render: w=%d g_render_busy=%d\n", w, g_render_busy);
+    log_msg("[RENDER] request_render: w=%d g_render_busy=%d para=%d\n",
+            w, g_render_busy, para_index);
 
     /* Invalida layout cache se la larghezza di layout cambia (resize) */
     if (g_layout_cache && g_layout_cache->layout_width != w) {
@@ -55,18 +61,31 @@ static void request_render(int w)
         return;
     }
 
-    j = alloc_job(JOB_RENDER);
+    j = alloc_job(job_kind);
     if (!j)
         return;
     j->doc = g_doc;
     j->content_w = w;
+    j->para_index = para_index;
     g_render_busy = 1;
     g_render_doc = g_doc;
     g_render_used_w = w;
     g_render_pending_width = -1;
-    dbg_log("[TABLE] request_render content_w=%d\n", w);
+    dbg_log("[TABLE] request_render content_w=%d para=%d\n", w, para_index);
     enqueue_job(j);
-    LOG_RENDER("JOB_RENDER enqueued");
+    LOG_RENDER("render job enqueued");
+}
+
+static void request_render(int w)
+{
+    request_render_ex(w, JOB_RENDER, -1);
+}
+
+/* FASE 1: dopo un edit si passa dal job dedicato.  Il comportamento e'
+ * ancora identico a request_render(); cambia solo il tipo di job. */
+static void request_paragraph_relayout(int para_index)
+{
+    request_render_ex(layout_content_width(), JOB_RELAYOUT_PARAGRAPH, para_index);
 }
 
 /* FASE 5/6: Renderizza un range di pagine (es. pagina 0, o 1-2 per lookahead).
