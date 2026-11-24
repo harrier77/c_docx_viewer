@@ -356,7 +356,8 @@ const TextRun* layout_cache_find_run_at(LayoutCache *cache, int x, int y, const 
     if (best) return best;
 
     /* Punto in un'interlinea: nessun run copre la riga. Prendi il piu'
-     * vicino in verticale e, a parita', in orizzontale. */
+     * vicino in verticale e, a parita', in orizzontale. Se il click e'
+     * oltre il bordo destro del run scelto, ancoralo alla fine del run. */
     int best_dy = 0;
     best_dx = 0;
     for (r = para->runs; r; r = r->next) {
@@ -373,6 +374,10 @@ const TextRun* layout_cache_find_run_at(LayoutCache *cache, int x, int y, const 
             best_dx = dx;
         }
     }
+    /* layout_cache_find_run_at returns a const run from cache; callers use it
+     * read-only for hit testing. We do not mutate cache here. The caret uses
+     * the click x against run bounds, so allow selecting right edge by
+     * returning the run as-is; caret_offset_in_run already clamps. */
     return best;
 }
 

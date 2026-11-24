@@ -123,6 +123,10 @@ static int caret_offset_in_run(const TextRun *r, int doc_x)
     int wlen, utf8_off = 0;
     HRESULT hr;
 
+    if (!r) return 0;
+    if (doc_x <= r->x) return 0;
+    if (r->text && doc_x >= r->x + r->w) return (int)strlen(r->text);
+
     caret_ensure_format(r);
     if (!g_caret_format) return 0;
     ws = u8_to_w(r->text ? r->text : "");
@@ -143,7 +147,11 @@ static int caret_offset_in_run(const TextRun *r, int doc_x)
                                    (FLOAT)(r->h > 0 ? r->h / 2 : 8),
                                    &trailing, &inside, &hm);
     /* Il layout DirectWrite referenzia ws: va liberato solo dopo Release. */
-    utf8_off = caret_utf16_to_utf8(ws, wlen, (int)hm.textPosition);
+    {
+        int utf16_pos = (int)hm.textPosition;
+        if (trailing) utf16_pos += (int)hm.length;
+        utf8_off = caret_utf16_to_utf8(ws, wlen, utf16_pos);
+    }
     IDWriteTextLayout_Release(layout);
     free(ws);
     if (utf8_off < 0) utf8_off = 0;
@@ -296,11 +304,19 @@ int caret_begin_from_point(int doc_x, int doc_y)
     DLOG("[CARET] map run='%.20s' char_start=%d char_end=%d run_off=%d run_x=%d doc_x=%d\n",
          run->text ? run->text : "", run->char_start, run->char_end,
          run_off, run->x, doc_x);
+    /* Se il click e' sul bordo destro o oltre il run, piazza il caret a fine run. */
+    {
+        int run_len = run->text ? (int)strlen(run->text) : 0;
+        if (doc_x >= run->x + run->w - 1)
+            run_off = run_len;
+    }
+    offset = run->char_start >= 0 ? run->char_start + run_off : run_off;
     /* Il caret deve restare dentro il run cliccato: se la mappa dei
      * caratteri e' sbagliata, non aprirlo su un run diverso. */
-    if (run->char_start >= 0 && run->char_end >= run->char_start &&
-        offset > run->char_end)
-        offset = run->char_end;
+    if (run->char_start >= 0 && run->char_end >= run->char_start) {
+        if (offset < run->char_start) offset = run->char_start;
+        if (offset > run->char_end) offset = run->char_end;
+    }
     if (offset < 0) offset = 0;
     if (offset > (int)strlen(g_caret_text))
         offset = (int)strlen(g_caret_text);
