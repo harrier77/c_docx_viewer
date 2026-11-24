@@ -140,6 +140,23 @@ static void cache_on_text_run(void *user,
     if (para) {
         if (layout_cache_add_run(para, text, x, y, w, h,
                                  font_handle, (COLORREF)color, underline, strike)) {
+            /* La baseline puo' cadere pochi pixel sopra/sotto il box
+             * restituito da litehtml: allarga il paragrafo perche' l'hit-test
+             * usi lo stesso rettangolo dei run che contiene. */
+            if (y < para->y) {
+                para->h += para->y - y;
+                para->y = y;
+            }
+            if (y + h > para->y + para->h)
+                para->h = y + h - para->y;
+            if (w > 0) {
+                if (x < para->x) {
+                    para->w += para->x - x;
+                    para->x = x;
+                }
+                if (x + w > para->x + para->w)
+                    para->w = x + w - para->x;
+            }
             /* Copia l'identita' del font nel run: il puntatore puo' essere
              * liberato dalla DLL, i campi restano validi per il caret. */
             TextRun *r = para->runs_tail;

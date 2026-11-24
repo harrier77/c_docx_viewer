@@ -285,7 +285,7 @@ void log_xml_block(const char *tag, int index, const char *xml);
 /* Inline caret (viewer_caret.c) */
 int  caret_begin_from_point(int doc_x, int doc_y);
 void caret_close(void);
-void caret_draw(HWND hwnd, HDC hdc);
+void caret_draw(Renderer *r);
 void caret_on_char(const char *utf8);
 void caret_on_wchar(WCHAR ch);
 void caret_on_key(int vk);

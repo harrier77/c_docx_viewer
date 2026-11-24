@@ -68,6 +68,8 @@ static void worker_extract_layout(void *doc, int content_w)
         LAYOUT_VISUAL_MARGIN_Y);
     ld_set_layout_cache_callbacks(doc, &g_cache_ops, g_layout_cache);
     ld_extract_layout(doc);
+    /* Senza questo aggiornamento la cache resta valida ma con size=0x0. */
+    layout_cache_update_bounds(g_layout_cache);
     g_layout_cache->valid = 1;
     DLOG("[RENDER] worker_extract_layout done (w=%d)\n", content_w);
 }

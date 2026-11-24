@@ -216,7 +216,7 @@ int layout_cache_add_run(LayoutParagraph *para,
 }
 
 /* Aggiorna bounding box totale cache. */
-static void cache_update_bounds(LayoutCache *cache)
+void layout_cache_update_bounds(LayoutCache *cache)
 {
     if (!cache || !cache->root) return;
     int max_x = 0, max_y = 0;
@@ -335,7 +335,45 @@ const TextRun* layout_cache_find_run_at(LayoutCache *cache, int x, int y, const 
         }
         r = r->next;
     }
-    return NULL;
+
+    /* Gli spazi tra le parole non vengono emessi come run da litehtml:
+     * se il punto e' nel gap, ancorati al run piu' vicino della stessa
+     * riga. A parita' di distanza scegli quello a sinistra, cosi' il
+     * caret finisce in fondo alla parola precedente. */
+    const TextRun *best = NULL;
+    int best_dx = 0;
+    for (r = para->runs; r; r = r->next) {
+        if (r->w <= 0 || r->h <= 0) continue;
+        if (y < r->y || y >= r->y + r->h) continue;
+        int dx = (x < r->x) ? (r->x - x) : (x - (r->x + r->w));
+        if (dx < 0) dx = 0;
+        if (!best || dx < best_dx ||
+            (dx == best_dx && r->x < best->x)) {
+            best = r;
+            best_dx = dx;
+        }
+    }
+    if (best) return best;
+
+    /* Punto in un'interlinea: nessun run copre la riga. Prendi il piu'
+     * vicino in verticale e, a parita', in orizzontale. */
+    int best_dy = 0;
+    best_dx = 0;
+    for (r = para->runs; r; r = r->next) {
+        if (r->w <= 0 || r->h <= 0) continue;
+        int dy = (y < r->y) ? (r->y - y) : (y - (r->y + r->h));
+        int dx = (x < r->x) ? (r->x - x) : (x - (r->x + r->w));
+        if (dy < 0) dy = 0;
+        if (dx < 0) dx = 0;
+        if (!best || dy < best_dy ||
+            (dy == best_dy && dx < best_dx) ||
+            (dy == best_dy && dx == best_dx && r->x < best->x)) {
+            best = r;
+            best_dy = dy;
+            best_dx = dx;
+        }
+    }
+    return best;
 }
 
 void layout_cache_enum_paragraphs(LayoutCache *cache, LayoutCacheEnumCallback cb, void *ctx)
@@ -592,7 +630,7 @@ int layout_cache_populate(LayoutCache *cache, void *doc_handle)
      * registrato i callback in litedocx. */
 
     /* Aggiorna bounds */
-    cache_update_bounds(cache);
+    layout_cache_update_bounds(cache);
 
     cache->valid = 1;
     return 1;

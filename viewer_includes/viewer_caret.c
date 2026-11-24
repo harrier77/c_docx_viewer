@@ -229,9 +229,20 @@ static void caret_update_pos_from_text(void)
 {
     int base = g_caret_run.char_start >= 0 ? g_caret_run.char_start : 0;
     int local = g_caret_offset - base;
+    int len = g_caret_text ? (int)strlen(g_caret_text) : 0;
+    const char *run_text;
+
+    if (base < 0) base = 0;
+    if (base > len) base = len;
     if (local < 0) local = 0;
+
+    /* caret_prefix_width misura il prefisso [0,local) della stringa passata.
+     * Passare il paragrafo intero misurava i primi 'local' byte del
+     * paragrafo invece di quelli del run: il caret finiva centinaia di
+     * pixel a destra per i run dopo il primo. */
+    run_text = g_caret_text ? g_caret_text + base : "";
     g_caret_rc.left = g_caret_run.x +
-        caret_prefix_width(&g_caret_run, local, g_caret_text ? g_caret_text : "");
+        caret_prefix_width(&g_caret_run, local, run_text);
     g_caret_rc.right = g_caret_rc.left + 1;
 }
 
@@ -282,6 +293,14 @@ int caret_begin_from_point(int doc_x, int doc_y)
     g_caret_gen = g_layout_cache->generation;
     run_off = caret_offset_in_run(run, doc_x);
     offset = run->char_start >= 0 ? run->char_start + run_off : 0;
+    DLOG("[CARET] map run='%.20s' char_start=%d char_end=%d run_off=%d run_x=%d doc_x=%d\n",
+         run->text ? run->text : "", run->char_start, run->char_end,
+         run_off, run->x, doc_x);
+    /* Il caret deve restare dentro il run cliccato: se la mappa dei
+     * caratteri e' sbagliata, non aprirlo su un run diverso. */
+    if (run->char_start >= 0 && run->char_end >= run->char_start &&
+        offset > run->char_end)
+        offset = run->char_end;
     if (offset < 0) offset = 0;
     if (offset > (int)strlen(g_caret_text))
         offset = (int)strlen(g_caret_text);
@@ -554,33 +573,28 @@ void caret_reanchor_after_render(void)
 /* Overlay                                                            */
 /* ------------------------------------------------------------------ */
 
-void caret_draw(HWND hwnd, HDC hdc)
+void caret_draw(Renderer *r)
 {
-    RECT rc_content, rc_run, rc_caret;
+    RECT rc_content;
     char slice[512];
-    WCHAR *wide, *wfamily;
-    HFONT hfont, old_font;
-    COLORREF old_text, old_bk;
-    int x, y, h, size;
+    int x, y, h;
     int run_start, run_end;
+    int preview_w, clear_w;
+    DwFontHandle font;
 
-    (void)hwnd;
-    if (!g_caret_active || g_caret_reanchor || g_render_busy) return;
-    if (!hdc || !g_caret_text) return;
+    if (!r || !g_caret_active || g_caret_reanchor || g_render_busy) return;
+    if (!g_caret_text) return;
     DLOG("[CARET] draw active=%d offset=%d rc=(%ld,%ld)\n",
             g_caret_active, g_caret_offset, g_caret_rc.left, g_caret_rc.top);
 
     layout_content_rect(g_doc_h, &rc_content);
-    x = (int)((rc_content.left + g_caret_rc.left) * g_zoom);
-    y = (int)((rc_content.top + g_caret_rc.top) * g_zoom);
-    h = (int)((g_caret_rc.bottom - g_caret_rc.top) * g_zoom);
-    if (h < 8) h = (int)(20 * g_zoom);
 
-    rc_caret.left = x;
-    rc_caret.top = y;
-    rc_caret.right = x + 2;
-    rc_caret.bottom = y + h;
-    FillRect(hdc, &rc_caret, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    /* Coordinate logiche: e' il renderer ad applicare lo zoom, esattamente
+     * come fa document_draw per la pagina. */
+    x = rc_content.left + g_caret_run.x;
+    y = rc_content.top + g_caret_run.y;
+    h = g_caret_rc.bottom - g_caret_rc.top;
+    if (h < 8) h = 20;
 
     /* Anteprima del run modificato: si ridisegna solo la porzione di testo
      * del run, non l'intero paragrafo. */
@@ -589,46 +603,26 @@ void caret_draw(HWND hwnd, HDC hdc)
     caret_utf8_slice(g_caret_text, run_start, run_end, slice, sizeof(slice));
     if (!slice[0]) return;
 
-    wide = u8_to_w(slice);
-    if (!wide) return;
-    wfamily = u8_to_w(g_caret_run.family[0] ? g_caret_run.family : "Aptos");
-    if (!wfamily) { free(wide); return; }
+    caret_ensure_format(&g_caret_run);
+    if (!g_caret_format) return;
 
-    size = g_caret_run.font_size > 0 ? g_caret_run.font_size : 12;
-    hfont = CreateFontW(-size, 0, 0, 0,
-                       g_caret_run.bold ? FW_BOLD : FW_NORMAL,
-                       g_caret_run.italic ? TRUE : FALSE,
-                       g_caret_run.underline ? TRUE : FALSE,
-                       g_caret_run.strike ? TRUE : FALSE,
-                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                       DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                       wfamily);
-    free(wfamily);
-    old_font = (HFONT)SelectObject(hdc, hfont);
-    old_text = SetTextColor(hdc, g_caret_run.color);
-    old_bk = SetBkMode(hdc, TRANSPARENT);
+    preview_w = caret_prefix_width(&g_caret_run, run_end - run_start, slice);
+    clear_w = g_caret_run.w > preview_w ? g_caret_run.w : preview_w;
 
-    rc_run.left = (int)((rc_content.left + g_caret_run.x) * g_zoom);
-    rc_run.top = (int)((rc_content.top + g_caret_run.y) * g_zoom);
-    {
-        /* Cancella solo l'area occupata dal run (o dalla preview, se piu'
-         * lunga) prima di ridisegnare il testo modificato. */
-        int preview_w = caret_prefix_width(&g_caret_run, run_end - run_start, slice);
-        int clear_w = g_caret_run.w > preview_w ? g_caret_run.w : preview_w;
-        rc_run.right = rc_run.left + (int)(clear_w * g_zoom) + 4;
-    }
-    rc_run.bottom = rc_run.top + h;
-    FillRect(hdc, &rc_run, (HBRUSH)GetStockObject(WHITE_BRUSH));
-    DrawTextW(hdc, wide, (int)lstrlenW(wide), &rc_run,
-              DT_SINGLELINE | DT_NOPREFIX | DT_NOCLIP);
+    /* Cancella l'area del run e la ridisegna con lo STESSO renderer
+     * DirectWrite della pagina: niente piu' CreateFontW/DrawTextW, che
+     * posizionavano la baseline con metriche GDI diverse. */
+    r->vtbl->FillRect(r, x, y, clear_w + 4, h, RGB(255, 255, 255));
 
-    SetBkMode(hdc, old_bk);
-    SetTextColor(hdc, old_text);
-    SelectObject(hdc, old_font);
-    if (hfont) DeleteObject(hfont);
-    free(wide);
+    ZeroMemory(&font, sizeof(font));
+    font.format = g_caret_format;
+    r->vtbl->DrawText(r, slice, &font, g_caret_run.color,
+                      x, y, clear_w, h);
 
-    /* Il caret va ridisegnato dopo la preview: il FillRect bianco del run
-     * potrebbe averlo coperto. */
-    FillRect(hdc, &rc_caret, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    /* Barra del caret sopra la preview: il FillRect bianco del run
+     * potrebbe averla coperta. */
+    r->vtbl->FillRect(r,
+                      rc_content.left + g_caret_rc.left,
+                      rc_content.top + g_caret_rc.top,
+                      2, h, RGB(0, 0, 0));
 }

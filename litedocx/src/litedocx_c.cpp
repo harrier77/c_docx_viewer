@@ -750,16 +750,19 @@ namespace
                         para_pos = pp;
                         break;
                     }
-                    // Fallback: closest paragraph below the click point
-                    int dx = x - px;
-                    int dy = y - py;
-                    if (dy > 0) {
-                        int dist = dx * dx + dy * dy;
-                        if (dist < best_dist) {
-                            best_dist = dist;
-                            para_id = ep.first;
-                            para_pos = pp;
-                        }
+                    /* Il testo viene disegnato all'altezza della baseline,
+                     * che puo' cadere pochi pixel FUORI dal box del
+                     * paragrafo (es. prima riga a y=95 con box a y=96).
+                     * Cerca il paragrafo piu' vicino in entrambi i versi:
+                     * il vecchio fallback considerava solo dy > 0 e
+                     * perdeva tutti i run della prima riga. */
+                    int dx = x < px ? px - x : (x > px + pw ? x - (px + pw) : 0);
+                    int dy = y < py ? py - y : (y > py + ph ? y - (py + ph) : 0);
+                    int dist = dx * dx + dy * dy;
+                    if (dist < best_dist) {
+                        best_dist = dist;
+                        para_id = ep.first;
+                        para_pos = pp;
                     }
                 }
                 if (para_id >= 0) {

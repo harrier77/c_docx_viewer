@@ -75,12 +75,15 @@ static void viewer_paint(HWND hwnd)
                   g_zoom > 0.0f ? 1.0f / g_zoom : 1.0f);
     DLOG("[PAINT] document_draw returned\n");
 
+    /* Overlay del caret: disegnato con lo stesso renderer D2D della pagina,
+     * prima di Present, cosi' l'anteprima del run modificato usa la stessa
+     * baseline DirectWrite del documento (il vecchio overlay GDI la
+     * spostava di pochi pixel verso l'alto). */
+    caret_draw(g_renderer);
+
     DLOG("[PAINT] calling Present...\n");
     g_renderer->vtbl->Present(g_renderer, hdc, LAY->cw, LAY->ch);
     DLOG("[PAINT] Present returned\n");
-    /* Overlay del caret: disegnato sull'HDC dopo il BitBlt di Present,
-     * quindi non passa dalla cache D2D e non richiede un re-render. */
-    caret_draw(hwnd, hdc);
     /* Riporta il renderer a scala 1.0 (la trasformata viene reimpostata
      * a ogni WM_PAINT prima dei draw). */
     g_renderer->vtbl->ResetTransform(g_renderer);

@@ -137,7 +137,9 @@ int layout_cache_populate(LayoutCache *cache, void *doc_handle);
  * Restituisce NULL se nessun paragrafo sotto quel punto. */
 const LayoutParagraph* layout_cache_find_paragraph_at(LayoutCache *cache, int x, int y);
 
-/* Trova il run di testo che contiene il punto (x,y).
+/* Trova il run di testo che contiene il punto (x,y). Se il punto cade
+ * nello spazio tra due parole (o tra due righe), restituisce il run piu'
+ * vicino: il caret verra' ancorato al bordo di quel run.
  * Se para_out non NULL, imposta al paragrafo contenitore. */
 const TextRun* layout_cache_find_run_at(LayoutCache *cache, int x, int y, const LayoutParagraph **para_out);
 
@@ -174,6 +176,10 @@ void layout_cache_set_layout_params(LayoutCache *cache,
                                     int justification_width,
                                     int visual_padding_x,
                                     int visual_padding_y);
+
+/* Ricalcola total_width/total_height dai paragrafi presenti.
+ * Va chiamato dopo l'estrazione dei run (worker_extract_layout). */
+void layout_cache_update_bounds(LayoutCache *cache);
 
 /* Debug: stampa statistiche cache su stderr. */
 void layout_cache_dump_stats(const LayoutCache *cache);
