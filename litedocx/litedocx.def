@@ -32,6 +32,7 @@ EXPORTS
     ld_run_hit_test
     ld_paragraph_get_text
     ld_paragraph_set_text
+    ld_paragraph_replace_text
     ld_paragraph_get_xml
     ld_paragraph_set_xml
     ld_paragraph_get_ooxml

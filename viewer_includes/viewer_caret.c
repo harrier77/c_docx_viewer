@@ -6,8 +6,8 @@
  *
  * Il testo modificato viene tenuto in un buffer locale (g_caret_text) e
  * disegnato come overlay dopo Present().  Al termine del debounce viene
- * applicato con ld_paragraph_set_text: la formattazione dei run del
- * paragrafo viene appiattita, ma l'elemento paragrafo resta stabile.
+ * applicato con ld_paragraph_replace_text: prova a preservare la formattazione
+ * dei run patchando l'OOXML; in caso di struttura complessa può degradare.
  */
 
 /* Copia del run sotto il caret: la cache puo' essere invalidata prima del

@@ -264,7 +264,7 @@ static int       g_editor_class_registered = 0;
 /* ------------------------------------------------------------------
  * Inline caret editing (basato sulla layout cache).
  * Il testo di lavoro e' una copia del testo plain del paragrafo: il commit
- * usa ld_paragraph_set_text, che appiattisce la formattazione dei run.
+ * usa ld_paragraph_replace_text, che prova a preservare i run via OOXML.
  * ------------------------------------------------------------------ */
 #define LD_CARET_DEBOUNCE_MS  300
 #define LD_CARET_TIMER_ID     31

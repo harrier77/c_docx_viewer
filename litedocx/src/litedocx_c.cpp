@@ -32,6 +32,7 @@
 #include "docx_model.h"
 #include "docx_package.h"
 #include "litedocx_c.h"
+#include "xml_dom.h"
 #include "debug_log.h"
 
 /* Legacy names kept as aliases of the single build switch. */
@@ -2361,6 +2362,347 @@ char* ld_paragraph_get_text(void* doc, int index)
     return nullptr;
 }
 
+static std::string xml_escape_text(const std::string& in)
+{
+    std::string out;
+    out.reserve(in.size() + 8);
+    for(size_t i = 0; i < in.size(); ++i)
+    {
+        unsigned char c = static_cast<unsigned char>(in[i]);
+        switch(c)
+        {
+        case '&': out += "&amp;"; break;
+        case '<': out += "&lt;"; break;
+        case '>': out += "&gt;"; break;
+        case '"': out += "&quot;"; break;
+        case '\'': out += "&apos;"; break;
+        default:
+            if(c < 0x20 && c != '\n' && c != '\r' && c != '\t')
+            {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "&#x%02X;", c);
+                out += buf;
+            }
+            else
+            {
+                out.push_back(static_cast<char>(c));
+            }
+            break;
+        }
+    }
+    return out;
+}
+
+static bool utf8_next(const std::string& s, size_t& i, std::string& ch)
+{
+    if(i >= s.size()) return false;
+    unsigned char c = static_cast<unsigned char>(s[i]);
+    size_t len = 1;
+    if(c < 0x80) len = 1;
+    else if((c & 0xE0) == 0xC0) len = 2;
+    else if((c & 0xF0) == 0xE0) len = 3;
+    else if((c & 0xF8) == 0xF0) len = 4;
+    if(i + len > s.size()) len = 1;
+    ch.assign(s, i, len);
+    i += len;
+    return true;
+}
+
+static std::vector<std::string> utf8_chars(const std::string& s)
+{
+    std::vector<std::string> out;
+    out.reserve(s.size());
+    size_t i = 0;
+    std::string ch;
+    while(utf8_next(s, i, ch)) out.push_back(ch);
+    return out;
+}
+
+static std::string utf8_join(const std::vector<std::string>& chars, size_t from, size_t to)
+{
+    std::string out;
+    if(from > to) from = to;
+    if(to > chars.size()) to = chars.size();
+    for(size_t i = from; i < to; ++i) out += chars[i];
+    return out;
+}
+
+static void xml_serialize_node(const litedocx::XmlNode* n, std::string& out)
+{
+    if(!n) return;
+    out += "<";
+    out.append(n->name.data(), n->name.size());
+    for(const auto& a : n->attrs)
+    {
+        out += " ";
+        out.append(a.first.data(), a.first.size());
+        out += "=\"";
+        out += xml_escape_text(a.second);
+        out += "\"";
+    }
+    if(n->children.empty() && n->text.empty())
+    {
+        out += "/>";
+        return;
+    }
+    out += ">";
+    if(!n->text.empty())
+        out += xml_escape_text(n->text);
+    for(const auto& c : n->children)
+        xml_serialize_node(c.get(), out);
+    out += "</";
+    out.append(n->name.data(), n->name.size());
+    out += ">";
+}
+
+static std::string xml_serialize_node_str(const litedocx::XmlNode* n)
+{
+    std::string out;
+    xml_serialize_node(n, out);
+    return out;
+}
+
+struct OoxmlTextUnit
+{
+    litedocx::XmlNode* node = nullptr; // w:t or w:br
+    std::string text;                  // one UTF-8 char or "\n"
+    bool br = false;
+};
+
+static void collect_ooxml_text_units(litedocx::XmlNode* node, std::vector<OoxmlTextUnit>& units)
+{
+    if(!node) return;
+    if(node->is("t"))
+    {
+        std::vector<std::string> chars = utf8_chars(node->text);
+        for(size_t i = 0; i < chars.size(); ++i)
+        {
+            OoxmlTextUnit u;
+            u.node = node;
+            u.text = chars[i];
+            u.br = false;
+            units.push_back(u);
+        }
+        return;
+    }
+    if(node->is("br") || node->is("cr"))
+    {
+        OoxmlTextUnit u;
+        u.node = node;
+        u.text = "\n";
+        u.br = true;
+        units.push_back(u);
+        return;
+    }
+    if(node->is("tab"))
+    {
+        OoxmlTextUnit u;
+        u.node = node;
+        u.text = "\t";
+        u.br = true; // non-editable as text node
+        units.push_back(u);
+        return;
+    }
+    for(auto& c : node->children)
+        collect_ooxml_text_units(c.get(), units);
+}
+
+static std::string units_to_plain(const std::vector<OoxmlTextUnit>& units)
+{
+    std::string out;
+    for(size_t i = 0; i < units.size(); ++i) out += units[i].text;
+    return out;
+}
+
+static bool replace_paragraph_ooxml_text(std::string& p_xml, const std::string& old_text, const std::string& new_text)
+{
+    if(old_text == new_text) return true;
+    auto root = litedocx::xml_parse(p_xml.c_str(), p_xml.size());
+    if(!root || !root->is("p")) return false;
+
+    std::vector<OoxmlTextUnit> units;
+    collect_ooxml_text_units(root.get(), units);
+    std::string plain = units_to_plain(units);
+    if(plain != old_text)
+    {
+        // Plain text from litehtml can differ from OOXML (fields/revisions/entities).
+        // Be conservative: fall back to the flattening setter rather than patch wrong offsets.
+        return false;
+    }
+
+    std::vector<std::string> old_chars = utf8_chars(old_text);
+    std::vector<std::string> new_chars = utf8_chars(new_text);
+
+    size_t prefix = 0;
+    while(prefix < old_chars.size() && prefix < new_chars.size() && old_chars[prefix] == new_chars[prefix]) prefix++;
+    size_t old_suffix = old_chars.size();
+    size_t new_suffix = new_chars.size();
+    while(old_suffix > prefix && new_suffix > prefix && old_chars[old_suffix - 1] == new_chars[new_suffix - 1])
+    {
+        --old_suffix;
+        --new_suffix;
+    }
+
+    size_t start = prefix;
+    size_t end = old_suffix;
+    if(start > end || end > units.size())
+        return false;
+
+    std::string replacement = utf8_join(new_chars, prefix, new_suffix);
+    bool has_nl = replacement.find('\n') != std::string::npos;
+
+    std::map<litedocx::XmlNode*, std::string> t_updates;
+    std::vector<litedocx::XmlNode*> touched;
+    for(size_t i = 0; i < units.size(); ++i)
+    {
+        if(units[i].br || !units[i].node || !units[i].node->is("t")) continue;
+        if(t_updates.find(units[i].node) == t_updates.end())
+        {
+            t_updates[units[i].node] = std::string();
+            touched.push_back(units[i].node);
+        }
+    }
+
+    bool inserted = false;
+    for(size_t i = 0; i < units.size(); ++i)
+    {
+        OoxmlTextUnit& u = units[i];
+        bool in_range = (i >= start && i < end);
+        if(i == start && !inserted)
+        {
+            if(!has_nl)
+            {
+                litedocx::XmlNode* target = nullptr;
+                for(size_t k = start; k < units.size(); ++k) { if(!units[k].br && units[k].node && units[k].node->is("t")) { target = units[k].node; break; } }
+                if(!target) for(size_t k = start; k > 0; --k) { if(!units[k-1].br && units[k-1].node && units[k-1].node->is("t")) { target = units[k-1].node; break; } }
+                if(!target)
+                {
+                    litedocx::XmlNode* run = nullptr;
+                    for(auto& c : root->children) { if(c && c->is("r")) { run = c.get(); break; } }
+                    if(!run) return false;
+                    auto tn = std::unique_ptr<litedocx::XmlNode>(new litedocx::XmlNode());
+                    tn->name = std::string_view("w:t");
+                    tn->text = replacement;
+                    tn->attrs[std::string_view("xml:space")] = "preserve";
+                    run->children.push_back(std::move(tn));
+                    p_xml = xml_serialize_node_str(root.get());
+                    return true;
+                }
+                t_updates[target] += replacement;
+            }
+            inserted = true;
+        }
+        if(in_range)
+            continue;
+        if(!u.br && u.node && u.node->is("t"))
+            t_updates[u.node] += u.text;
+    }
+    if(!inserted && !has_nl)
+    {
+        litedocx::XmlNode* target = nullptr;
+        for(size_t k = units.size(); k > 0; --k) { if(!units[k-1].br && units[k-1].node && units[k-1].node->is("t")) { target = units[k-1].node; break; } }
+        if(target) t_updates[target] += replacement;
+        inserted = true;
+    }
+
+    if(has_nl)
+    {
+        // Newlines/tabs: rebuild text-bearing children while preserving first run rPr.
+        litedocx::XmlNode* firstRun = nullptr;
+        for(auto& c : root->children) { if(c && c->is("r")) { firstRun = c.get(); break; } }
+        if(!firstRun) return false;
+        for(auto& rc : root->children)
+        {
+            if(!rc || !rc->is("r")) continue;
+            std::vector<std::unique_ptr<litedocx::XmlNode>> kept;
+            for(auto& ch : rc->children)
+            {
+                if(ch && (ch->is("t") || ch->is("br") || ch->is("cr") || ch->is("tab"))) continue;
+                kept.push_back(std::move(ch));
+            }
+            rc->children.swap(kept);
+        }
+        std::string cur;
+        for(size_t i = 0; i < new_chars.size(); ++i)
+        {
+            if(new_chars[i] == "\n")
+            {
+                if(!cur.empty())
+                {
+                    auto tn = std::unique_ptr<litedocx::XmlNode>(new litedocx::XmlNode());
+                    tn->name = std::string_view("w:t");
+                    tn->attrs[std::string_view("xml:space")] = "preserve";
+                    tn->text = cur;
+                    firstRun->children.push_back(std::move(tn));
+                    cur.clear();
+                }
+                auto br = std::unique_ptr<litedocx::XmlNode>(new litedocx::XmlNode());
+                br->name = std::string_view("w:br");
+                firstRun->children.push_back(std::move(br));
+            }
+            else if(new_chars[i] == "\t")
+            {
+                if(!cur.empty())
+                {
+                    auto tn = std::unique_ptr<litedocx::XmlNode>(new litedocx::XmlNode());
+                    tn->name = std::string_view("w:t");
+                    tn->attrs[std::string_view("xml:space")] = "preserve";
+                    tn->text = cur;
+                    firstRun->children.push_back(std::move(tn));
+                    cur.clear();
+                }
+                auto tb = std::unique_ptr<litedocx::XmlNode>(new litedocx::XmlNode());
+                tb->name = std::string_view("w:tab");
+                firstRun->children.push_back(std::move(tb));
+            }
+            else cur += new_chars[i];
+        }
+        if(!cur.empty() || new_chars.empty())
+        {
+            auto tn = std::unique_ptr<litedocx::XmlNode>(new litedocx::XmlNode());
+            tn->name = std::string_view("w:t");
+            tn->attrs[std::string_view("xml:space")] = "preserve";
+            tn->text = cur;
+            firstRun->children.push_back(std::move(tn));
+        }
+        p_xml = xml_serialize_node_str(root.get());
+        return true;
+    }
+
+    for(auto* tn : touched)
+    {
+        auto it = t_updates.find(tn);
+        if(it == t_updates.end()) continue;
+        tn->text = it->second;
+        if(!tn->text.empty())
+            tn->attrs[std::string_view("xml:space")] = "preserve";
+        else
+            tn->attrs.erase(std::string_view("xml:space"));
+    }
+
+    p_xml = xml_serialize_node_str(root.get());
+    return true;
+}
+
+static bool rebuild_doc_from_model(ld_doc* h)
+{
+    if(!h || !h->container || !h->container->model) return false;
+    std::string new_doc_xml = litedocx::serialize_document_xml(*h->container->model);
+    if(new_doc_xml.empty()) return false;
+    h->container->model->document_xml = std::move(new_doc_xml);
+    litedocx::DocxBuilder builder(*h->container->model, h->container);
+    litehtml::document::ptr new_doc = builder.build();
+    if(!new_doc) return false;
+    h->doc = new_doc;
+    h->container->doc = new_doc;
+    extract_paragraph_ooxml(*h->container->model);
+    h->m_page_heights.clear();
+    h->m_page_y_offsets.clear();
+    h->m_last_rendered_page = -1;
+    h->m_full_layout_done = false;
+    return true;
+}
+
 int ld_paragraph_set_text(void* doc, int index, const char* text)
 {
     auto* h = static_cast<ld_doc*>(doc);
@@ -2384,6 +2726,53 @@ int ld_paragraph_set_text(void* doc, int index, const char* text)
         }
     }
     catch (...)
+    {
+    }
+    return 0;
+}
+
+int ld_paragraph_replace_text(void* doc, int index, const char* text)
+{
+    auto* h = static_cast<ld_doc*>(doc);
+    if (!h || !h->container || !h->container->model || !text)
+        return 0;
+    try
+    {
+        auto& para_ooxml = h->container->model->paragraph_ooxml;
+        if(index < 0 || index >= (int)para_ooxml.size())
+            return 0;
+
+        std::string p_xml = para_ooxml[index];
+        std::string old_plain;
+        {
+            auto root = litedocx::xml_parse(p_xml.c_str(), p_xml.size());
+            if(root && root->is("p"))
+            {
+                std::vector<OoxmlTextUnit> units;
+                collect_ooxml_text_units(root.get(), units);
+                old_plain = units_to_plain(units);
+            }
+        }
+        if(!replace_paragraph_ooxml_text(p_xml, old_plain, text))
+        {
+            DLOG("[ld_paragraph_replace_text] OOXML patch failed, falling back to set_text\n");
+            return ld_paragraph_set_text(doc, index, text);
+        }
+
+        para_ooxml[index] = p_xml;
+        h->container->model->dirty = true;
+        if(!rebuild_doc_from_model(h))
+        {
+            DLOG("[ld_paragraph_replace_text] rebuild failed, falling back to set_text\n");
+            return ld_paragraph_set_text(doc, index, text);
+        }
+        return 1;
+    }
+    catch(const std::exception& ex)
+    {
+        DLOG("[ld_paragraph_replace_text] exception: %s\n", ex.what());
+    }
+    catch(...)
     {
     }
     return 0;

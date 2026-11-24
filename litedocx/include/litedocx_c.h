@@ -359,6 +359,14 @@ char* ld_paragraph_get_text(void* doc, int index);
  * Returns 1 on success, 0 on invalid index or failure. */
 int ld_paragraph_set_text(void* doc, int index, const char* text);
 
+/* Replace paragraph plain text while preserving run formatting when possible.
+ * Computes a diff between current and new plain text, then patches the
+ * paragraph OOXML (<w:r>/<w:t>) so existing w:rPr formatting is kept.
+ * Falls back to ld_paragraph_set_text semantics only on structural failure.
+ * The change is in memory only and is NOT written to the DOCX file.
+ * Returns 1 on success, 0 on invalid index or failure. */
+int ld_paragraph_replace_text(void* doc, int index, const char* text);
+
 /* Return the paragraph's inner HTML (litehtml DOM) as UTF-8 string.
  * The caller must free it with ld_free_string().  Returns NULL if the index
  * is invalid or the paragraph cache is not valid yet. */

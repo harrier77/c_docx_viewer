@@ -286,9 +286,9 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                 }
                 else if (j->text)
                 {
-                    DLOG("[TEXT][WORKER-APPLY] calling ld_paragraph_set_text\n");
-                    ok = ld_paragraph_set_text(j->doc, j->para_index, j->text);
-                    DLOG("[TEXT][WORKER-APPLY] ld_paragraph_set_text returned ok=%d\n", ok);
+                    DLOG("[TEXT][WORKER-APPLY] calling ld_paragraph_replace_text\n");
+                    ok = ld_paragraph_replace_text(j->doc, j->para_index, j->text);
+                    DLOG("[TEXT][WORKER-APPLY] ld_paragraph_replace_text returned ok=%d\n", ok);
                 }
             }
             else
