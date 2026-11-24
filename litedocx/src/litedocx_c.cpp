@@ -2514,6 +2514,22 @@ static std::string units_to_plain(const std::vector<OoxmlTextUnit>& units)
     return out;
 }
 
+/* The caret edits plain text coming from the litehtml DOM, where
+ * DocxBuilder::append_text() turns repeated/edge spaces into U+00A0 (NBSP)
+ * to preserve them during layout.  The OOXML units still hold plain spaces.
+ * Treat the two as equal ONLY while computing the diff: the replacement
+ * itself is still taken from new_chars, so genuine NBSP characters in the
+ * document are not rewritten.  Without this, every NBSP/space mismatch
+ * widens [start,end) and rebuilds untouched runs with the first run's rPr,
+ * losing bold/italic on other words of the same paragraph. */
+static bool ooxml_chars_equal_for_diff(const std::string& a, const std::string& b)
+{
+    if(a == b) return true;
+    static const std::string nbsp("\xC2\xA0", 2);
+    static const std::string space(" ", 1);
+    return (a == nbsp && b == space) || (a == space && b == nbsp);
+}
+
 static bool replace_paragraph_ooxml_text(std::string& p_xml, const std::string& old_text, const std::string& new_text)
 {
     if(old_text == new_text) return true;
@@ -2534,10 +2550,12 @@ static bool replace_paragraph_ooxml_text(std::string& p_xml, const std::string& 
     std::vector<std::string> new_chars = utf8_chars(new_text);
 
     size_t prefix = 0;
-    while(prefix < old_chars.size() && prefix < new_chars.size() && old_chars[prefix] == new_chars[prefix]) prefix++;
+    while(prefix < old_chars.size() && prefix < new_chars.size() &&
+          ooxml_chars_equal_for_diff(old_chars[prefix], new_chars[prefix])) prefix++;
     size_t old_suffix = old_chars.size();
     size_t new_suffix = new_chars.size();
-    while(old_suffix > prefix && new_suffix > prefix && old_chars[old_suffix - 1] == new_chars[new_suffix - 1])
+    while(old_suffix > prefix && new_suffix > prefix &&
+          ooxml_chars_equal_for_diff(old_chars[old_suffix - 1], new_chars[new_suffix - 1]))
     {
         --old_suffix;
         --new_suffix;
