@@ -450,7 +450,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     layout_init(900, 700);
 
     hwnd = CreateWindowExW(0, L"D2DViewClass", L"d2dview",
-                           WS_OVERLAPPEDWINDOW | WS_VSCROLL,
+                           WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN,
                            CW_USEDEFAULT, CW_USEDEFAULT, LAY->cw, LAY->ch,
                            NULL, menu, inst, NULL);
     if (!hwnd) return 1;
