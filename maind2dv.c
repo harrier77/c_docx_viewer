@@ -223,7 +223,10 @@ static void handle_edit_applied(EditResult *r)
     {
         DLOG("[EDIT] Errore applicazione: %s\n", r->error);
         g_doc_state = DOC_STATE_IDLE;
-        InvalidateRect(g_hwnd, NULL, FALSE);
+        {
+            RECT rc = { 0, TOOLBAR_HEIGHT, LAY->cw, LAY->ch };
+            InvalidateRect(g_hwnd, &rc, FALSE);
+        }
     }
     free(r);
 }

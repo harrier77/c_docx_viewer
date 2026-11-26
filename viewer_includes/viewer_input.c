@@ -9,6 +9,12 @@
 extern void begin_paragraph_edit_at_index(int index);
 extern void show_run_viewer(int para_index, const ld_run_hit *hit, const char *run_text);
 
+static void invalidate_doc_area(HWND hwnd)
+{
+    RECT rc = { 0, TOOLBAR_HEIGHT, LAY->cw, LAY->ch };
+    InvalidateRect(hwnd, &rc, FALSE);
+}
+
 static void viewer_on_size(HWND hwnd, WPARAM wp, LPARAM lp)
 {
     (void)wp;
@@ -38,7 +44,7 @@ static void viewer_on_size(HWND hwnd, WPARAM wp, LPARAM lp)
             request_render(content_w);
     }
     layout_update_scrollbars(hwnd, g_doc_h);
-    InvalidateRect(hwnd, NULL, FALSE);
+    invalidate_doc_area(hwnd);
 }
 
 static LRESULT viewer_on_setcursor(HWND hwnd, WPARAM wp, LPARAM lp)
@@ -74,7 +80,7 @@ static LRESULT viewer_on_mousemove(HWND hwnd, WPARAM wp, LPARAM lp)
         g_pan_x = x;
         g_pan_y = y;
         SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
-        InvalidateRect(hwnd, NULL, FALSE);
+        invalidate_doc_area(hwnd);
         return 0;
     }
     return DefWindowProcW(hwnd, WM_MOUSEMOVE, wp, lp);
@@ -120,7 +126,7 @@ static void viewer_on_vscroll(HWND hwnd, WPARAM wp)
     if (LAY->scroll > max_s) LAY->scroll = max_s;
     if (LAY->scroll != old_s) {
         SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
-        InvalidateRect(hwnd, NULL, FALSE);
+        invalidate_doc_area(hwnd);
         LOG_SCROLL("WM_VSCROLL scroll changed");
         log_msg("[SCROLL] WM_VSCROLL: scroll=%d g_layout_complete=%d g_last_rendered_page=%d\n",
                 LAY->scroll, g_layout_complete, g_last_rendered_page);
@@ -173,7 +179,7 @@ static void viewer_on_mousewheel(HWND hwnd, WPARAM wp, LPARAM lp)
         sync_view_scale();
         layout_zoom_view((double)old_zoom, (double)new_zoom, g_doc_h);
         SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
-        InvalidateRect(hwnd, NULL, FALSE);
+        invalidate_doc_area(hwnd);
         return;
     }
 
@@ -183,7 +189,7 @@ static void viewer_on_mousewheel(HWND hwnd, WPARAM wp, LPARAM lp)
         sync_view_scale();
         layout_pan(delta / 3, 0, g_doc_h);
         SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
-        InvalidateRect(hwnd, NULL, FALSE);
+        invalidate_doc_area(hwnd);
         return;
     }
 
@@ -195,7 +201,7 @@ static void viewer_on_mousewheel(HWND hwnd, WPARAM wp, LPARAM lp)
     if (LAY->scroll < 0) LAY->scroll = 0;
     if (LAY->scroll > max_s) LAY->scroll = max_s;
     SetScrollPos(hwnd, SB_VERT, LAY->scroll, TRUE);
-    InvalidateRect(hwnd, NULL, FALSE);
+    invalidate_doc_area(hwnd);
     LOG_SCROLL("WM_MOUSEWHEEL scroll changed");
     log_msg("[SCROLL] WM_MOUSEWHEEL: scroll=%d g_layout_complete=%d g_last_rendered_page=%d\n",
             LAY->scroll, g_layout_complete, g_last_rendered_page);
