@@ -69,6 +69,12 @@ static const float    G_ZOOM_MAX = 3.0f;
 
 static int    g_doc_h;               /* altezza layout, cache lato UI */
 
+/* Snapshot dell'ultimo frame valido (per UX durante i render busy). */
+static HDC     g_last_frame_dc = NULL;
+static HBITMAP g_last_frame_bmp = NULL;
+static int     g_last_frame_w = 0;
+static int     g_last_frame_h = 0;
+
 /* Allinea il layout al fattore di scala effettivo di scroll/scroll_x.
  * Il layout resta a zoom 1.0, scroll/scroll_x sono pixel di layout e il
  * renderer li moltiplica per g_zoom -> view_scale = g_zoom.

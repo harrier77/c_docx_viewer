@@ -5,6 +5,27 @@
  * condivide tipi, macro e stato globale definiti nel file principale.
  */
 
+static void capture_last_frame(int w, int h)
+{
+    HDC screen = GetDC(g_hwnd);
+    if (!g_last_frame_dc)
+        g_last_frame_dc = CreateCompatibleDC(screen);
+    if (g_last_frame_bmp && (g_last_frame_w != w || g_last_frame_h != h))
+    {
+        DeleteObject(g_last_frame_bmp);
+        g_last_frame_bmp = NULL;
+    }
+    if (!g_last_frame_bmp)
+    {
+        g_last_frame_bmp = CreateCompatibleBitmap(screen, w, h);
+        SelectObject(g_last_frame_dc, g_last_frame_bmp);
+        g_last_frame_w = w;
+        g_last_frame_h = h;
+    }
+    BitBlt(g_last_frame_dc, 0, 0, w, h, screen, 0, 0, SRCCOPY);
+    ReleaseDC(g_hwnd, screen);
+}
+
 static void viewer_paint(HWND hwnd)
 {
     PAINTSTRUCT ps;
@@ -29,6 +50,19 @@ static void viewer_paint(HWND hwnd)
         return;
     }
     DLOG("[PAINT] BeginDraw OK\n");
+
+    /* UX: durante un render, mostra l'ultimo frame valido invece della pagina bianca. */
+    if (g_render_busy && g_last_frame_bmp &&
+        g_last_frame_w == LAY->cw && g_last_frame_h == LAY->ch)
+    {
+        HDC target = (HDC)g_renderer->vtbl->GetNativeTarget(g_renderer);
+        if (target)
+            BitBlt(target, 0, 0, LAY->cw, LAY->ch, g_last_frame_dc, 0, 0, SRCCOPY);
+        g_renderer->vtbl->Present(g_renderer, hdc, LAY->cw, LAY->ch);
+        g_renderer->vtbl->ResetTransform(g_renderer);
+        EndPaint(hwnd, &ps);
+        return;
+    }
 
     /* D2D: zoom == sola trasformazione di scala applicata dal renderer.
      * Stesso meccanismo dell'esempio di riferimento funzionante
@@ -77,5 +111,6 @@ static void viewer_paint(HWND hwnd)
     /* Riporta il renderer a scala 1.0 (la trasformata viene reimpostata
      * a ogni WM_PAINT prima dei draw). */
     g_renderer->vtbl->ResetTransform(g_renderer);
+    capture_last_frame(LAY->cw, LAY->ch);
     EndPaint(hwnd, &ps);
 }
