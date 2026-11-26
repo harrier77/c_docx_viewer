@@ -1,5 +1,6 @@
 #include "html.h"
 #include "debug_log.h"
+#include <chrono>
 #include "document.h"
 #include "document_container.h"
 #include "el_anchor.h"
@@ -109,6 +110,7 @@ namespace litehtml
 
         m_root = root;
 
+        auto t0 = std::chrono::high_resolution_clock::now();
         if(master_styles != "")
         {
             m_master_css.parse_css_stylesheet(master_styles, "", shared_from_this());
@@ -119,6 +121,8 @@ namespace litehtml
             m_user_css.parse_css_stylesheet(user_styles, "", shared_from_this());
             m_user_css.sort_selectors();
         }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        TLOG("finalize master/user css took %.2f ms\n", std::chrono::duration<double,std::milli>(t1-t0).count());
 
         // Let's process created elements tree
         if(m_root)
@@ -151,28 +155,43 @@ namespace litehtml
             // Apply media features.
             update_media_lists(m_media);
 
+            auto ta0 = std::chrono::high_resolution_clock::now();
             // Apply parsed styles.
             m_root->apply_stylesheet(m_styles);
 
             // Apply user styles if any
             m_root->apply_stylesheet(m_user_css);
+            auto ta1 = std::chrono::high_resolution_clock::now();
+            TLOG("finalize apply_stylesheets took %.2f ms\n", std::chrono::duration<double,std::milli>(ta1-ta0).count());
 
             // Initialize element::m_css
+            auto tc0 = std::chrono::high_resolution_clock::now();
             m_root->compute_styles();
+            auto tc1 = std::chrono::high_resolution_clock::now();
+            TLOG("finalize compute_styles took %.2f ms\n", std::chrono::duration<double,std::milli>(tc1-tc0).count());
 
             // Create rendering tree
+            auto tr0 = std::chrono::high_resolution_clock::now();
             m_root_render = m_root->create_render_item(nullptr);
+            auto tr1 = std::chrono::high_resolution_clock::now();
+            TLOG("finalize create_render_item took %.2f ms\n", std::chrono::duration<double,std::milli>(tr1-tr0).count());
 
             // Now the m_tabular_elements is filled with tabular elements.
             // We have to check the tabular elements for missing table elements
             // and create the anonymous boxes in visual table layout
+            auto tf0 = std::chrono::high_resolution_clock::now();
             fix_tables_layout();
+            auto tf1 = std::chrono::high_resolution_clock::now();
+            TLOG("finalize fix_tables took %.2f ms\n", std::chrono::duration<double,std::milli>(tf1-tf0).count());
 
             // Finally initialize elements
             // init() returns pointer to the render_init element because it can change its type
             if(m_root_render)
             {
+                auto ti0 = std::chrono::high_resolution_clock::now();
                 m_root_render = m_root_render->init();
+                auto ti1 = std::chrono::high_resolution_clock::now();
+                TLOG("finalize init took %.2f ms\n", std::chrono::duration<double,std::milli>(ti1-ti0).count());
             }
         }
     }

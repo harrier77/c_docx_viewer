@@ -2440,6 +2440,9 @@ int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
     auto* h = static_cast<ld_doc*>(doc);
     if (!h || !h->container || !h->container->model || !ooxml)
         return 0;
+    LARGE_INTEGER t0, t1, freq;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
     try
     {
         auto& para_ooxml = h->container->model->paragraph_ooxml;
@@ -2461,8 +2464,13 @@ int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
             h->container->model->document_xml = std::move(new_doc_xml);
             
             // 3. Rebuild litehtml document from updated XML
+            LARGE_INTEGER tb0, tb1;
+            QueryPerformanceCounter(&tb0);
             litedocx::DocxBuilder builder(*h->container->model, h->container);
             litehtml::document::ptr new_doc = builder.build();
+            QueryPerformanceCounter(&tb1);
+            double build_ms = (double)(tb1.QuadPart - tb0.QuadPart) * 1000.0 / (double)freq.QuadPart;
+            TLOG("ld_paragraph_set_ooxml build() took %.2f ms\\n", build_ms);
             if (!new_doc)
             {
                 DLOG("[ld_paragraph_set_ooxml] DocxBuilder::build() failed: %s\n", builder.error().c_str());
@@ -2482,6 +2490,9 @@ int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
             h->m_last_rendered_page = -1;
             h->m_full_layout_done = false;
             
+            QueryPerformanceCounter(&t1);
+            double total_ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
+            TLOG("ld_paragraph_set_ooxml total took %.2f ms\\n", total_ms);
             DLOG("[ld_paragraph_set_ooxml] Document rebuilt successfully for paragraph %d\n", index);
             return 1;
         }

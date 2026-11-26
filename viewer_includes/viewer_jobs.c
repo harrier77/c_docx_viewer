@@ -124,8 +124,12 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
 #if CONSOLE_LOGGING
             DLOG("[RENDER] ld_render content_w=%d\n", j->content_w);
 #endif
-            if (j->doc && !g_shutdown)
+            if (j->doc && !g_shutdown) {
+                LARGE_INTEGER _t0,_t1,_f; QueryPerformanceFrequency(&_f); QueryPerformanceCounter(&_t0);
                 ld_render(j->doc, j->content_w);
+                QueryPerformanceCounter(&_t1);
+                TLOG("JOB_RENDER ld_render took %.2f ms\n", (double)(_t1.QuadPart-_t0.QuadPart)*1000.0/(double)_f.QuadPart);
+            }
             LOG_JOB(JOB_RENDER, "ld_render done, posting WM_APP_RENDER_DONE");
             if (!g_shutdown)
                 PostMessageA(j->hwnd, WM_APP_RENDER_DONE,
@@ -241,7 +245,7 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                     if (j->ooxml)
                     {
                         DLOG("[XML][WORKER-APPLY] calling ld_paragraph_set_ooxml\n");
-                        ok = ld_paragraph_set_ooxml(j->doc, j->para_index, j->xml_text);
+                        ok = ld_paragraph_set_ooxml(j->doc, j->para_index, j->xml_text); TLOG("JOB_APPLY ld_paragraph_set_ooxml done\n");
                         DLOG("[XML][WORKER-APPLY] ld_paragraph_set_ooxml returned ok=%d\n", ok);
                     }
                     else

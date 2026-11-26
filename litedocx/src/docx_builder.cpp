@@ -1,5 +1,6 @@
 #include "docx_builder.h"
 #include "debug_log.h"
+#include <windows.h>
 
 #include "docx_css.h"
 #include "docx_style.h"
@@ -273,7 +274,14 @@ namespace litedocx
 
         m_style_cache.clear();
 
+        LARGE_INTEGER _t0, _t1, _f, _ta, _tb;
+        QueryPerformanceFrequency(&_f);
+        QueryPerformanceCounter(&_t0);
+
+        QueryPerformanceCounter(&_ta);
         auto dom = xml_parse(m_model.document_xml.c_str(), m_model.document_xml.size());
+        QueryPerformanceCounter(&_tb);
+        TLOG("DocxBuilder xml_parse took %.2f ms\n", (double)(_tb.QuadPart-_ta.QuadPart)*1000.0/(double)_f.QuadPart);
         if(!dom)
         {
             m_error = "word/document.xml non e' un XML valido";
@@ -286,7 +294,11 @@ namespace litedocx
             m_error = "word/document.xml non contiene w:body";
             return nullptr;
         }
+
+        QueryPerformanceCounter(&_ta);
         parse_section();
+        QueryPerformanceCounter(&_tb);
+        TLOG("DocxBuilder parse_section took %.2f ms\n", (double)(_tb.QuadPart-_ta.QuadPart)*1000.0/(double)_f.QuadPart);
 
         std::string body_css;
         add_px(body_css, "padding-top", twip_to_px(m_model.section.margin_t_tw));
@@ -298,11 +310,24 @@ namespace litedocx
         body_css += "background:#ffffff;";
         m_body->set_attr("style", body_css.c_str());
 
+        QueryPerformanceCounter(&_ta);
         build_body();
+        QueryPerformanceCounter(&_tb);
+        TLOG("DocxBuilder build_body took %.2f ms\n", (double)(_tb.QuadPart-_ta.QuadPart)*1000.0/(double)_f.QuadPart);
 
+        QueryPerformanceCounter(&_ta);
         std::string base_css = docx_base_css(m_model);
         base_css += m_style_cache.generate_css();
+        QueryPerformanceCounter(&_tb);
+        TLOG("DocxBuilder css/gen took %.2f ms\n", (double)(_tb.QuadPart-_ta.QuadPart)*1000.0/(double)_f.QuadPart);
+
+        QueryPerformanceCounter(&_ta);
         m_doc->finalize_from_external_root(m_root, litehtml::master_css, base_css);
+        QueryPerformanceCounter(&_tb);
+        TLOG("DocxBuilder finalize took %.2f ms\n", (double)(_tb.QuadPart-_ta.QuadPart)*1000.0/(double)_f.QuadPart);
+
+        QueryPerformanceCounter(&_t1);
+        TLOG("DocxBuilder build() TOTAL took %.2f ms\n", (double)(_t1.QuadPart-_t0.QuadPart)*1000.0/(double)_f.QuadPart);
         return m_doc;
     }
 

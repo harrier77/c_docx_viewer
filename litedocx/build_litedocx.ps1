@@ -5,7 +5,7 @@ param(
     [string]$Gcc,
     [string]$Gxx,
     [string]$Here,
-    [ValidateSet('Release','Debug')]
+    [ValidateSet('Release','Debug','Timing')]
     [string]$Configuration = 'Release'
 )
 
@@ -54,9 +54,16 @@ function Compile-File($src, $dst, $compiler, $flags) {
         $flagList += '-DDEBUG'
         $flagList += '-DD2D_DEBUG_LOGS=1'
         $flagList += '-DLITEDOCX_DEBUG=1'
+        $flagList += '-DTIMING_LOGS=1'
+    } elseif ($Configuration -eq 'Timing') {
+        $flagList += '-O2'
+        $flagList += '-DD2D_DEBUG_LOGS=0'
+        $flagList += '-DLITEDOCX_DEBUG=0'
+        $flagList += '-DTIMING_LOGS=1'
     } else {
         $flagList += '-DD2D_DEBUG_LOGS=0'
         $flagList += '-DLITEDOCX_DEBUG=0'
+        $flagList += '-DTIMING_LOGS=0'
     }
     $flagList += $src
     $flagList += '-o'

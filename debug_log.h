@@ -11,6 +11,10 @@
 #define D2D_DEBUG_LOGS 0
 #endif
 
+#ifndef TIMING_LOGS
+#define TIMING_LOGS 0
+#endif
+
 #include <stdio.h>
 
 #if D2D_DEBUG_LOGS
@@ -25,6 +29,12 @@
 #define DLOG(fmt, ...) ((void)0)
 #define DLOGSTR(msg)   ((void)0)
 #define DLOG_W(msg)    ((void)0)
+#endif
+
+#if TIMING_LOGS
+#define TLOG(fmt, ...) do { fprintf(stderr, "[TIMING] " fmt, ##__VA_ARGS__); fflush(stderr); } while (0)
+#else
+#define TLOG(fmt, ...) ((void)0)
 #endif
 
 #endif /* D2D_DEBUG_LOG_H */
