@@ -14,12 +14,8 @@ echo [2/3] Copia DLL/import lib...
 copy /y ".\litedocx\litedocx.dll" . >nul
 copy /y ".\litedocx\liblitedocx.a" . >nul
 
-echo [3/3] Compilazione risorsa icona...
-%WINDRES% -i icon.rc -o icon.o
-if errorlevel 1 goto :fail
-
-rem Build unity, con console (no -mwindows) e timing
-%GCC% -Wall -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -I. -Ifunc_gdi -Iviewer_includes -Ilitedocx/include -DD2D_DEBUG_LOGS=0 -DTIMING_LOGS=1 -o d2dview_timing.exe maind2dv.c miniz_zip\miniz.c func_gdi\layout.c func_gdi\layout_cache.c func_gdi\renderer_d2d.c func_gdi\text_utf8.c func_gdi\document.c icon.o -L. -llitedocx -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32 -ld2d1 -ldwrite -lcomctl32
+rem Build unity, con console (no -mwindows) e timing (senza icona)
+%GCC% -Wall -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -I. -Ifunc_gdi -Iviewer_includes -Ilitedocx/include -DD2D_DEBUG_LOGS=0 -DTIMING_LOGS=1 -o d2dview_timing.exe maind2dv.c miniz_zip\miniz.c func_gdi\layout.c func_gdi\layout_cache.c func_gdi\renderer_d2d.c func_gdi\text_utf8.c func_gdi\document.c -L. -llitedocx -lgdi32 -luser32 -lkernel32 -lcomdlg32 -lole32 -lwindowscodecs -lmsimg32 -ld2d1 -ldwrite -lcomctl32
 if errorlevel 1 goto :fail
 
 echo.
