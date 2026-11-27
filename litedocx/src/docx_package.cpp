@@ -140,61 +140,65 @@ bool load_docx_package(const void* data, size_t size, const std::string& file_na
 
 std::string serialize_document_xml(const DocxModel& model)
 {
-    std::string xml;
-    xml.reserve(model.document_xml.size() + 1024);
-    
-    // If we have modified paragraph OOXML, we need to rebuild the document body
+    const std::string& src = model.document_xml;
+    static const char kXmlDecl[] = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
+    const bool need_decl = src.compare(0, 5, "<?xml") != 0;
+    const size_t decl_len = need_decl ? (sizeof(kXmlDecl) - 1) : 0;
+
     if (!model.paragraph_ooxml.empty() && model.dirty)
     {
-        // Parse the original document_xml and replace w:p elements
-        // For simplicity, we'll do a basic string replacement
-        // A full implementation would use an XML parser
-        xml = model.document_xml;
-        
-        // Find the w:body content and replace paragraphs
-        size_t body_start = xml.find("<w:body>");
-        size_t body_end = xml.find("</w:body>");
+        const size_t body_start = src.find("<w:body>");
+        const size_t body_end   = (body_start != std::string::npos) ? src.find("</w:body>", body_start + 8) : std::string::npos;
         if (body_start != std::string::npos && body_end != std::string::npos)
         {
-            std::string before = xml.substr(0, body_start + 8); // include <w:body>
-            std::string after = xml.substr(body_end);
-            
-            // Extract section properties (w:sectPr) from original body to preserve
-            // page size, margins, etc. The sectPr is typically at the end of the body.
-            std::string original_body = xml.substr(body_start + 8, body_end - (body_start + 8));
-            std::string sect_pr;
-            size_t sect_start = original_body.rfind("<w:sectPr");
-            if (sect_start != std::string::npos)
+            const size_t prefix_len = body_start + 8; // include <w:body>
+            const size_t suffix_len = src.size() - body_end;
+
+            // Locate trailing <w:sectPr ...>...</w:sectPr> inside original body
+            size_t sect_off = std::string::npos;
+            size_t sect_len = 0;
+            const size_t sect_start = src.rfind("<w:sectPr", body_end);
+            if (sect_start != std::string::npos && sect_start >= prefix_len)
             {
-                size_t sect_end = original_body.find("</w:sectPr>", sect_start);
-                if (sect_end != std::string::npos)
+                const size_t sect_end = src.find("</w:sectPr>", sect_start);
+                if (sect_end != std::string::npos && sect_end < body_end)
                 {
-                    sect_pr = original_body.substr(sect_start, sect_end - sect_start + 12); // include </w:sectPr>
+                    sect_off = sect_start;
+                    sect_len = (sect_end + 11) - sect_start; // </w:sectPr> is 11 chars
                 }
             }
-            
-            std::string body_content;
+
+            size_t para_total = 0;
             for (const auto& p : model.paragraph_ooxml)
             {
-                body_content += p;
+                para_total += p.size();
             }
-            // Append section properties to preserve page layout
-            body_content += sect_pr;
-            
-            xml = before + body_content + after;
+
+            std::string xml;
+            xml.reserve(decl_len + prefix_len + para_total + sect_len + suffix_len);
+            if (need_decl) xml.append(kXmlDecl, decl_len);
+            xml.append(src, 0, prefix_len);
+            for (const auto& p : model.paragraph_ooxml)
+            {
+                xml.append(p);
+            }
+            if (sect_len > 0)
+            {
+                xml.append(src, sect_off, sect_len);
+            }
+            xml.append(src, body_end, suffix_len);
+            return xml;
         }
     }
-    else
+
+    if (!need_decl)
     {
-        xml = model.document_xml;
+        return src;
     }
-    
-    // Ensure XML declaration
-    if (xml.find("<?xml") != 0)
-    {
-        xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" + xml;
-    }
-    
+    std::string xml;
+    xml.reserve(decl_len + src.size());
+    xml.append(kXmlDecl, decl_len);
+    xml.append(src);
     return xml;
 }
 

@@ -1381,6 +1381,10 @@ static void extract_paragraph_ooxml(litedocx::DocxModel& model)
 {
     model.paragraph_ooxml.clear();
     const std::string& xml = model.document_xml;
+    if (model.paragraph_ooxml.capacity() < 1024)
+    {
+        model.paragraph_ooxml.reserve(1024);
+    }
     size_t pos = 0;
     int count = 0;
     while (true) {
@@ -1391,14 +1395,16 @@ static void extract_paragraph_ooxml(litedocx::DocxModel& model)
         size_t end = xml.find("</w:p>", start);
         if (end == std::string::npos) break;
         end += 6; // include </w:p>
-        std::string p_xml = xml.substr(start, end - start);
-        model.paragraph_ooxml.push_back(p_xml);
+        model.paragraph_ooxml.emplace_back(xml, start, end - start);
 
+#if D2D_DEBUG_LOGS
         /* WRITE trace: one line per OOXML fragment stored for the editor. */
+        const std::string& p_xml = model.paragraph_ooxml.back();
         std::string style = paragraph_style_id(p_xml);
         DLOG("[WRITE][OOXML] idx=%d style='%s' heading=%d pPr=%d len=%zu\n",
                 count, style.c_str(), litedocx::style_is_heading(style) ? 1 : 0,
                 p_xml.find("<w:pPr") != std::string::npos ? 1 : 0, p_xml.size());
+#endif
 
         pos = end;
         count++;
@@ -2531,7 +2537,12 @@ int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
             
             // Rebuild document from updated OOXML
             // 1. Serialize updated document.xml from model
+            LARGE_INTEGER ts0, ts1;
+            QueryPerformanceCounter(&ts0);
             std::string new_doc_xml = litedocx::serialize_document_xml(*h->container->model);
+            QueryPerformanceCounter(&ts1);
+            TLOG("ld_paragraph_set_ooxml serialize took %.2f ms\n",
+                 (double)(ts1.QuadPart - ts0.QuadPart) * 1000.0 / (double)freq.QuadPart);
             if (new_doc_xml.empty())
             {
                 DLOG("[ld_paragraph_set_ooxml] serialize_document_xml returned empty\n");
@@ -2562,8 +2573,17 @@ int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
             h->doc = new_doc;
             h->container->doc = new_doc;
             
-            // 5. Re-extract paragraph OOXML to keep indices in sync
-            extract_paragraph_ooxml(*h->container->model);
+            // 5. Re-extract paragraph OOXML only if ooxml may contain multiple paragraphs
+            if (std::strstr(ooxml, "</w:p>") != nullptr &&
+                std::strstr(std::strstr(ooxml, "</w:p>") + 6, "</w:p>") != nullptr)
+            {
+                LARGE_INTEGER te0, te1;
+                QueryPerformanceCounter(&te0);
+                extract_paragraph_ooxml(*h->container->model);
+                QueryPerformanceCounter(&te1);
+                TLOG("ld_paragraph_set_ooxml extract took %.2f ms\n",
+                     (double)(te1.QuadPart - te0.QuadPart) * 1000.0 / (double)freq.QuadPart);
+            }
             
             // 6. Clear page cache and mark for full re-layout
             h->m_page_heights.clear();
