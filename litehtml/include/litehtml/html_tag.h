@@ -169,6 +169,8 @@ namespace litehtml
         return default_value;
     }
 
+    void dump_html_tag_timing();
+
 } // namespace litehtml
 
 #endif // LITEHTML_HTML_TAG_H

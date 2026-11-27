@@ -328,6 +328,8 @@ namespace litedocx
 
         QueryPerformanceCounter(&_t1);
         TLOG("DocxBuilder build() TOTAL took %.2f ms\n", (double)(_t1.QuadPart-_t0.QuadPart)*1000.0/(double)_f.QuadPart);
+        litehtml::dump_css_timing();
+        litehtml::dump_html_tag_timing();
         return m_doc;
     }
 

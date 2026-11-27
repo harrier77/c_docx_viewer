@@ -735,6 +735,8 @@ namespace litehtml
     {
         return m_text_emphasis_position;
     }
+
+    void dump_css_timing();
 } // namespace litehtml
 
 #endif // LITEHTML_CSS_PROPERTIES_H

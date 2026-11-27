@@ -1,5 +1,9 @@
 #include <algorithm>
 #include <cstdint>
+#include <chrono>
+#include <map>
+#include <string>
+#include "debug_log.h"
 
 #include "html.h"
 #include "document.h"
@@ -16,6 +20,8 @@
 
 namespace litehtml
 {
+    static double _t_attr = 0, _t_doc = 0, _t_styleadd = 0, _t_subst = 0, _t_css = 0, _t_rec = 0;
+    static std::map<std::string, int> _tag_counts;
 
     litehtml::html_tag::html_tag(const std::shared_ptr<document>& doc) :
         element(doc)
@@ -369,27 +375,51 @@ namespace litehtml
         return false;
     }
 
+    extern int g_compute_styles_calls;
+
     void litehtml::html_tag::compute_styles(bool recursive)
     {
+        g_compute_styles_calls++;
+        _tag_counts[get_tagName() ? get_tagName() : "?"]++;
+        auto _t0 = std::chrono::high_resolution_clock::now();
+
         const char*   style = get_attr("style");
+        auto _t1 = std::chrono::high_resolution_clock::now();
+
         document::ptr doc   = get_document();
+        auto _t2 = std::chrono::high_resolution_clock::now();
 
         if(style)
         {
             m_style.add(style, "", doc->container());
         }
+        auto _t3 = std::chrono::high_resolution_clock::now();
 
         m_style.subst_vars(this);
+        auto _t4 = std::chrono::high_resolution_clock::now();
 
         m_css.compute(this, doc);
+        auto _t5 = std::chrono::high_resolution_clock::now();
+
+        _t_attr += std::chrono::duration<double,std::milli>(_t1-_t0).count();
+        _t_doc += std::chrono::duration<double,std::milli>(_t2-_t1).count();
+        _t_styleadd += std::chrono::duration<double,std::milli>(_t3-_t2).count();
+        _t_subst += std::chrono::duration<double,std::milli>(_t4-_t3).count();
+        _t_css += std::chrono::duration<double,std::milli>(_t5-_t4).count();
 
         if(recursive)
         {
+            auto _tr0 = std::chrono::high_resolution_clock::now();
             for(const auto& el : m_children)
             {
                 el->compute_styles();
             }
+            auto _tr1 = std::chrono::high_resolution_clock::now();
+            _t_rec += std::chrono::duration<double,std::milli>(_tr1-_tr0).count();
         }
+
+        // Log once at the end of the top-level call? We'll log aggregate at finalize via TLOG? 
+        // Instead, store in file-scope globals and dump in document finalize.
     }
 
     bool litehtml::html_tag::is_white_space() const
@@ -1661,6 +1691,20 @@ namespace litehtml
         }
 
         m_style.add_property(prop_name, {tok});
+    }
+
+    void dump_html_tag_timing()
+    {
+        TLOG("HTML_TAG timing: attr=%.2f ms doc=%.2f ms styleadd=%.2f ms subst=%.2f ms css=%.2f ms rec=%.2f ms\n",
+             _t_attr, _t_doc, _t_styleadd, _t_subst, _t_css, _t_rec);
+        std::string counts;
+        for (const auto& kv : _tag_counts)
+        {
+            counts += kv.first + "=" + std::to_string(kv.second) + " ";
+        }
+        TLOG("HTML_TAG tags: %s\n", counts.c_str());
+        _t_attr = _t_doc = _t_styleadd = _t_subst = _t_css = _t_rec = 0;
+        _tag_counts.clear();
     }
 
 } // namespace litehtml

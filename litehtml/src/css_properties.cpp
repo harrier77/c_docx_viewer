@@ -1,6 +1,8 @@
 #include "html.h"
 #include "css_properties.h"
+#include "debug_log.h"
 #include <cmath>
+#include <chrono>
 #include "document.h"
 #include "html_tag.h"
 #include "document_container.h"
@@ -8,10 +10,17 @@
 #include <cstddef>
 
 #define offset(member) offsetof(litehtml::css_properties, member)
+
+static double g_css_time_total = 0;
+static double g_css_time_font = 0;
+static double g_css_time_bg = 0;
+static double g_css_time_flex = 0;
+static int g_css_calls = 0;
 // #define offset(func)	[](const css_properties& css) { return css.func; }
 
 void litehtml::css_properties::compute(const html_tag* el, const document::ptr& doc)
 {
+    auto _t0 = std::chrono::high_resolution_clock::now();
     m_color = el->get_property<web_color>(_color_, true, web_color::black, offset(m_color));
 
     m_el_position = static_cast<element_position>(
@@ -103,7 +112,12 @@ void litehtml::css_properties::compute(const html_tag* el, const document::ptr& 
     }
     // 5. Otherwise, the remaining 'display' property values apply as specified.
 
-    compute_font(el, doc);
+    {
+        auto _tf = std::chrono::high_resolution_clock::now();
+        compute_font(el, doc);
+        auto _tf2 = std::chrono::high_resolution_clock::now();
+        g_css_time_font += std::chrono::duration<double,std::milli>(_tf2-_tf).count();
+    }
     pixel_t font_size = get_font_size();
 
     const css_length _auto = css_length::predef_value(0);
@@ -285,8 +299,21 @@ void litehtml::css_properties::compute(const html_tag* el, const document::ptr& 
 
     m_order = el->get_property<int>(_order_, false, 0, offset(m_order));
 
-    compute_background(el, doc);
-    compute_flex(el, doc);
+    {
+        auto _tb = std::chrono::high_resolution_clock::now();
+        compute_background(el, doc);
+        auto _tb2 = std::chrono::high_resolution_clock::now();
+        g_css_time_bg += std::chrono::duration<double,std::milli>(_tb2-_tb).count();
+    }
+    {
+        auto _tf = std::chrono::high_resolution_clock::now();
+        compute_flex(el, doc);
+        auto _tf2 = std::chrono::high_resolution_clock::now();
+        g_css_time_flex += std::chrono::duration<double,std::milli>(_tf2-_tf).count();
+    }
+    auto _t1 = std::chrono::high_resolution_clock::now();
+    g_css_time_total += std::chrono::duration<double,std::milli>(_t1-_t0).count();
+    g_css_calls++;
 }
 
 // used for all color properties except `color` (color:currentcolor is converted to color:inherit during parsing)
@@ -681,4 +708,15 @@ std::vector<std::tuple<std::string, std::string>> litehtml::css_properties::dump
     ret.emplace_back("border_spacing_y", m_css_border_spacing_y.to_string());
 
     return ret;
+}
+void litehtml::dump_css_timing()
+{
+    TLOG("CSS timing: calls=%d total=%.2f ms font=%.2f ms bg=%.2f ms flex=%.2f ms other=%.2f ms\n",
+         g_css_calls, g_css_time_total, g_css_time_font, g_css_time_bg, g_css_time_flex,
+         g_css_time_total - g_css_time_font - g_css_time_bg - g_css_time_flex);
+    g_css_time_total = 0;
+    g_css_time_font = 0;
+    g_css_time_bg = 0;
+    g_css_time_flex = 0;
+    g_css_calls = 0;
 }

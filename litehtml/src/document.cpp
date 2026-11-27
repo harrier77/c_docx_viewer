@@ -32,6 +32,7 @@
 
 namespace litehtml
 {
+    int g_compute_styles_calls = 0;
 
     document::document(document_container* container)
     {
@@ -165,10 +166,14 @@ namespace litehtml
             TLOG("finalize apply_stylesheets took %.2f ms\n", std::chrono::duration<double,std::milli>(ta1-ta0).count());
 
             // Initialize element::m_css
+            g_compute_styles_calls = 0;
             auto tc0 = std::chrono::high_resolution_clock::now();
             m_root->compute_styles();
             auto tc1 = std::chrono::high_resolution_clock::now();
-            TLOG("finalize compute_styles took %.2f ms\n", std::chrono::duration<double,std::milli>(tc1-tc0).count());
+            double _cs_ms = std::chrono::duration<double,std::milli>(tc1-tc0).count();
+            TLOG("finalize compute_styles took %.2f ms (%d elements, %.3f ms/element)\n",
+                 _cs_ms, g_compute_styles_calls,
+                 g_compute_styles_calls > 0 ? _cs_ms / (double)g_compute_styles_calls : 0.0);
 
             // Create rendering tree
             auto tr0 = std::chrono::high_resolution_clock::now();
