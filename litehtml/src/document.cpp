@@ -132,12 +132,19 @@ namespace litehtml
 
             m_root->set_pseudo_class(_root_, true);
 
+            auto tm0 = std::chrono::high_resolution_clock::now();
             // apply master CSS
             m_root->apply_stylesheet(m_master_css);
+            auto tm1 = std::chrono::high_resolution_clock::now();
+            TLOG("finalize apply_master_css took %.2f ms\n", std::chrono::duration<double,std::milli>(tm1-tm0).count());
 
+            auto tp0 = std::chrono::high_resolution_clock::now();
             // parse elements attributes
             m_root->parse_attributes();
+            auto tp1 = std::chrono::high_resolution_clock::now();
+            TLOG("finalize parse_attributes took %.2f ms\n", std::chrono::duration<double,std::milli>(tp1-tp0).count());
 
+            auto tls0 = std::chrono::high_resolution_clock::now();
             // parse style sheets linked in document
             for(const auto& css : m_css)
             {
@@ -152,9 +159,14 @@ namespace litehtml
             }
             // Sort css selectors using CSS rules.
             m_styles.sort_selectors();
+            auto tls1 = std::chrono::high_resolution_clock::now();
+            TLOG("finalize parse_linked_css took %.2f ms\n", std::chrono::duration<double,std::milli>(tls1-tls0).count());
 
+            auto tum0 = std::chrono::high_resolution_clock::now();
             // Apply media features.
             update_media_lists(m_media);
+            auto tum1 = std::chrono::high_resolution_clock::now();
+            TLOG("finalize update_media_lists took %.2f ms\n", std::chrono::duration<double,std::milli>(tum1-tum0).count());
 
             auto ta0 = std::chrono::high_resolution_clock::now();
             // Apply parsed styles.

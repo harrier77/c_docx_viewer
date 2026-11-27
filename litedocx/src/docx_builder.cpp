@@ -690,10 +690,47 @@ namespace litedocx
         RunProps props = resolve_run(m_model, para_props, direct);
 
         const std::string& run_cls = get_run_class(props);
-        litehtml::string_map attrs;
-        if(!run_cls.empty()) attrs["class"] = run_cls;
-        auto span = make_element("span", std::string(), attrs);
-        parent->appendChild(span);
+
+        // Span merging: fonde run adiacenti con stessa classe in un unico span.
+        // Solo run "testo semplice" (solo w:t, niente br/tab/page-break/disegni)
+        // per non alterare struttura/paginazione. La giustificazione e' a livello
+        // di paragrafo (<p>), quindi la fusione non la tocca.
+        bool plain_text_run = true;
+        for(const auto& c : r->children)
+        {
+            if(c->is("rPr") || c->is("t"))
+            {
+                continue;
+            }
+            plain_text_run = false;
+            break;
+        }
+
+        litehtml::element::ptr span;
+        bool reuse_span = false;
+        if(plain_text_run && !parent->children().empty())
+        {
+            const auto& last = parent->children().back();
+            if(last && last->get_tagName() && std::strcmp(last->get_tagName(), "span") == 0)
+            {
+                const char* cls = last->get_attr("class");
+                std::string last_cls = cls ? cls : "";
+                if(last_cls == run_cls)
+                {
+                    reuse_span = true;
+                }
+            }
+        }
+        if(reuse_span)
+        {
+            span = parent->children().back();
+        } else
+        {
+            litehtml::string_map attrs;
+            if(!run_cls.empty()) attrs["class"] = run_cls;
+            span = make_element("span", std::string(), attrs);
+            parent->appendChild(span);
+        }
 
         for(const auto& c : r->children)
         {
