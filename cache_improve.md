@@ -48,13 +48,14 @@ Le misure seguenti provengono da `build_timing.bat` → `d2dview_timing.exe`: `l
 
 1. **La vecchia priorità 1 (serializzazione XML) è risolta**: `serialize_document_xml` ora costa **0,80 ms** (contro i ~71 ms stimati in questa pagina prima di `5f7db3a`), e la ri-estrazione degli OOXML viene saltata quando il paragrafo modificato contiene un solo `</w:p>`.
 2. **L'edit è ancora ~2x più lento dell'apertura** (386,42 ms totali, 275–295 ms di `build()`) *nonostante* la cache di testo sia calda al 99,95%. Il costo si è spostato da `compute_styles` (che anzi migliora: −12,56 ms) a `build_body` (+28,81), `create_render_item` (+19,48) e `init` (+10,18).
-3. **Il `CSS font` raddoppia in edit** (4,52 → 8,39 ms) pur con la `TextWidthCache` quasi perfetta: il tempo non è più nella misura delle stringhe, ma altrove nella risoluzione delle proprietà font.
-4. **Ci sono buchi di strumentazione** (differenze tra totali e somma dei sotto-timer):
+3. **Il `CSS font` raddoppia in edit** (4,52 → 8,39 ms) pur con la `TextWidthCache` quasi perfetta: il tempo non è più nella misura delle stringhe, ma nella risoluzione delle proprietà font.
+4. **Il `3000 elements` del log è fuorviante**: `g_compute_styles_calls` viene incrementato solo in `html_tag::compute_styles` (`litehtml/src/html_tag.cpp:381-382`). I nodi `el_text`/`el_space` — ~63.392 (53.048 hit + 10.344 miss) — non vengono conteggiati ma sono visitati dalla ricorsione. I 55,83 ms di `compute_styles` in apertura sono quindi ~8,74 ms di `css_properties::compute` (che è tutto ciò che misura il `CSS timing`) e ~47 ms di percorso testo/`text_width`.
+5. **Ci sono buchi di strumentazione** (differenze tra totali e somma dei sotto-timer):
    - `finalize`: 11,87 ms in apertura, **33,55 ms in edit** non coperti dai sotto-timer;
    - `build()`: 6,89 ms / 14,62 ms non coperti;
    - `ld_paragraph_set_ooxml total` − (serialize + build esterno) = **~90,75 ms** da attribuire;
    - timer `build()` esterno 294,87 ms vs interno 275,09 ms: **~19,78 ms** di differenza.
-5. `ld_render` resta stabile a **~52 ms** in entrambi i percorsi: non è il collo di bottiglia del rebuild, ma diventa rilevante se l'obiettivo è scendere sotto i ~100 ms totali per edit.
+6. `ld_render` resta stabile a **~52 ms** in entrambi i percorsi: non è il collo di bottiglia del rebuild, ma diventa rilevante se l'obiettivo è scendere sotto i ~100 ms totali per edit.
 
 > I numeri della vecchia tabella in questa pagina (es. `build()` 235,22 ms in apertura, 249,90 ms per l'edit) erano di una misurazione precedente e non sono confrontabili direttamente con quelli qui sopra, perché il build diagnostico usa ora `Timing` = `-O2` su entrambe le DLL e il viewer.
 
@@ -70,6 +71,27 @@ Le misure seguenti provengono da `build_timing.bat` → `d2dview_timing.exe`: `l
 6. **`TextWidthCache` 65k + chiave font stabile** (`8945518`, `litedocx/src/litedocx_c.cpp`): tabella hash 4-way set-associative da 65.536 slot, zero allocazioni su hit, chiave derivata da `(family, size, bold, italic)` così la cache sopravvive ai rebuild. Hit rate in edit: 99,95%.
 7. **Fast-path `IDWriteFontFace` in `cb_text_width`** (`5fcc9a0`, `viewer_fonts.c`, `viewer_state.c`, `viewer_lifecycle.c`, `viewer_jobs.c`): per stringhe ASCII/Latin-1 somma le larghezze per-glifo scalate e cachate in `FontCacheEntry::char_advances[256]`, evitando `u8_to_w` e `IDWriteTextLayout` sul 94,4% dei miss in apertura. Fallback automatico per caratteri > 255 o glifi mancanti.
 8. **Serializzazione/ri-estrazione edit** (`5f7db3a`, `litedocx_c.cpp`, `docx_package.cpp`): `reserve`+`emplace_back` in `extract_paragraph_ooxml`, salvataggio della ri-estrazione per OOXML a paragrafo singolo, timer espliciti su serialize/extract. Serializzazione: 0,80 ms.
+
+---
+
+## Serbatoio rimasto: percorso testo (`compute_styles`)
+
+I ~63k nodi testo/spazio nascono in `litedocx/src/docx_builder.cpp:1273-1324` (`append_text` crea un `el_text` per parola e un `el_space` per ogni spazio singolo). Ogni nodo passa da `el_text::compute_styles` (`litehtml/src/el_text.cpp:28-104`) che arriva a `text_width` (riga 100-101), il quale consulta la `TextWidthCache` (`litedocx/src/litedocx_c.cpp:320-414,732-784`) e il callback `cb_text_width` (`viewer_includes/viewer_fonts.c:221-305`).
+
+In apertura `open_impl` crea un **nuovo container** e quindi una cache vuota: i 10.344 miss sono il first-touch delle coppie `(parola, font)` uniche. In edit il container e la cache vengono riutilizzati (`reset_stats()` ma non `clear()`), per questo i miss crollano a 33. I miss in apertura non possono arrivare a zero senza preriscaldare la cache; si possono però rendere più economici.
+
+| Possibile intervento | Dove | Guadagno stimato | Rischio |
+|---|---|---:|---|
+| Non chiamare `text_width` per i puri spazi: larghezza U+0020/U+00A0 calcolata una volta per font | `el_text.cpp:100-101`, `el_space.cpp:10-14`, `docx_builder.cpp:1311`, `viewer_state.c:53-64` | 4–10 ms | Medio-basso |
+| Inserimento in cache più economico: hash calcolato una volta, niente `e.text = text` su miss (chiave inline/SSO o offset) | `litedocx_c.cpp:331-372,397-409` | 3–7 ms | Medio |
+| Evitare il cammino degli antenati per parola passando il CSS/font già calcolato ai figli testo | `html_tag.cpp:397-403`, `el_text.cpp:30-38,52-66,88-92` | 2–6 ms | Medio |
+| Default CSS non allocanti (`static const` per i vettori) e hash font numerico invece di `std::string` | `css_properties.cpp:264-296,431,552-581`, `font_description.h:27-43`, `document.cpp:527-568` | 2–4 ms | Basso/medio |
+| Togliere il `font_key_map.find` per chiamata (chiave stabile dentro l'handle) | `litedocx_c.cpp:675-679,732-736`, `viewer_state.c:53-64` | 1–3 ms | Basso/medio |
+| Mettere sotto `#if TIMING_LOGS` i `chrono` interni e `_tag_counts` | `css_properties.cpp:14-18,23,115-119,302-316`, `html_tag.cpp:23,382,1677-1686` | < 1 ms | Basso |
+| Preriscaldare la cache in apertura / condividerla a livello viewer | `litedocx_c.cpp:1434,1487`, `viewer_lifecycle.c` | 0 ms prima apertura, 10–25 ms su riaperture | Medio |
+| Ridurre i nodi parola (blocchi di testo in `append_text`) | `docx_builder.cpp:1273-1324`, `line_box.cpp:200-225` | fino a 20–30 ms | **Alto** (`line_box` tratta ogni elemento come atomico) |
+
+Nota: azzerare completamente il `CSS timing` darebbe al massimo 8,74 ms (16% dei 55,83 ms), quindi le azioni sul percorso testo contano più quelle sulle proprietà CSS.
 
 ---
 
