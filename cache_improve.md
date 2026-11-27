@@ -13,23 +13,24 @@ Il profiling dettagliato aveva mostrato che **~303 ms** di `build()` andavano in
 
 La `TextWidthCache` originale era una LRU da **1.024 voci** (in *thrashing* continuo su 63k parole), allocava `std::string` + `std::list` a ogni lookup ed era indicizzata sul puntatore `DwFontHandle*` (invalidato a ogni rebuild).
 
-### Intervento applicato (`litedocx_c.cpp`)
-- Sostituita con una tabella hash **4-way set-associative da 65.536 slot**, senza allocazioni su cache hit.
-- Chiave font stabile calcolata da `(family, size, bold, italic)`, così la cache sopravvive ai rebuild dopo un edit.
+### Interventi applicati
+1. **`TextWidthCache` 65k + chiave font stabile** (`litedocx/src/litedocx_c.cpp`):
+   - Sostituita la LRU da 1.024 voci con una tabella hash **4-way set-associative da 65.536 slot**, senza allocazioni su cache hit.
+   - Chiave font stabile calcolata da `(family, size, bold, italic)`, così la cache sopravvive ai rebuild dopo un edit.
+2. **Fast-path `IDWriteFontFace` in `cb_text_width`** (`viewer_includes/viewer_fonts.c`, `viewer_state.c`, `viewer_lifecycle.c`):
+   - Per stringhe ASCII/Latin-1 (`0x20..0xFF`), somma le larghezze per-glifo scalate e cachate in `FontCacheEntry::char_advances[256]` (via `GetGlyphIndices` + `GetDesignGlyphMetrics`), evitando `u8_to_w` e `IDWriteTextLayout` sul **94,4%** dei *miss* (9.767 su 10.344). Fallback automatico su `IDWriteTextLayout` per caratteri > 255 o glifi mancanti.
 
 ### Risultati misurati (200 pagine)
 
-| Metrica | Prima | Apertura (dopo) | **Edit (dopo)** |
+| Metrica | Baseline | Apertura (+ cache + `FontFace`) | **Edit (+ cache + `FontFace`)** |
 |---|---:|---:|---:|
 | `TextWidthCache` | 1.024 LRU | 53.048 hit / 10.344 miss (**83,7%**) | **63.361 hit / 33 miss (99,95%)** |
-| `el_text::compute_styles` | 269,52 ms | 198,03 ms | **13,13 ms (-95%)** |
-| — di cui `text_width` | 259,10 ms | 193,06 ms | **9,61 ms (-96%)** |
-| `finalize compute_styles` | 302,91 ms | 237,81 ms | **32,15 ms (-89%)** |
-| `DocxBuilder finalize` | 384,96 ms | 320,28 ms | **114,05 ms (-70%)** |
-| `DocxBuilder build() TOTAL` | 442,88 ms | 379,25 ms | **177,04 ms (-60%)** |
-| `ld_paragraph_set_ooxml total` | ~500 ms | — | **259,30 ms** |
+| `finalize compute_styles` | 302,91 ms | **72,53 ms (-76%)** | **26,50 ms (-91%)** |
+| `DocxBuilder finalize` | 384,96 ms | **170,48 ms (-56%)** | **104,31 ms (-73%)** |
+| `DocxBuilder build() TOTAL` | 442,88 ms | **235,22 ms (-47%)** | **169,05 ms (-62%)** |
+| `ld_paragraph_set_ooxml total` | ~500 ms | — | **249,90 ms (-50%)** |
 
-*(Il rendering a schermo `ld_render` impiega **~46–52 ms** e non è il collo di bottiglia.)*
+*(Il rendering a schermo `ld_render` impiega **~45–65 ms** e non è il collo di bottiglia.)*
 
 ---
 
@@ -40,26 +41,22 @@ La `TextWidthCache` originale era una LRU da **1.024 voci** (in *thrashing* cont
 - **Span merging** (`3b1d549`): fusione di run adiacenti identici in `DocxBuilder::process_run` (-0.9% span su questo corpus, sicuro ma impatto trascurabile).
 - **Pulizia timer interni** (`17e206b` + rimozione timer `el_text`): rimossi i `std::chrono::now()` per-nodo da `html_tag::compute_styles` ed `el_text::compute_styles`.
 - **Logging Release esplicito** (`be350e5`): aggiunto `-DENABLE_FILE_LOGGING=0` in `build_d2dview.bat`.
-- **`TextWidthCache` 65k + chiave font stabile** (`litedocx_c.cpp`): abbattuto `compute_styles` in edit da 303 ms a 32 ms.
+- **`TextWidthCache` 65k + chiave font stabile** (`litedocx_c.cpp`): hit rate 99,95% in edit.
+- **Fast-path `IDWriteFontFace` in `cb_text_width`** (`viewer_fonts.c`, `viewer_state.c`, `viewer_lifecycle.c`): gestito il 94,4% dei *miss* senza `IDWriteTextLayout`, portando `compute_styles` in apertura da 303 ms a 72,5 ms.
 
 ---
 
 ## Prossime priorità (in ordine di impatto)
 
-1. **Apertura: velocizzare `cb_text_width` sui *miss*** *(target: ~193 ms in apertura)*
-   - I 10.344 *miss* dell'apertura chiamano `IDWriteFactory_CreateTextLayout` + `Release` per ogni singola parola (~18,6 µs/parola).
-   - Usare una cache delle larghezze dei glifi/caratteri tramite `IDWriteFontFace` per testo semplice, evitando l'oggetto COM `IDWriteTextLayout` per parola.
-   - File: `viewer_includes/viewer_fonts.c`.
-
-2. **Edit: profilare `serialize_document_xml` + `extract_paragraph_ooxml`** *(target: ~73 ms)*
-   - Oggi `ld_paragraph_set_ooxml` impiega **259,30 ms** totali contro **185,80 ms** di `build()`: quei ~73 ms sono serializzazione XML e ri-estrazione degli indici dei paragrafi.
+1. **Edit: profilare `serialize_document_xml` + `extract_paragraph_ooxml`** *(target: ~71 ms)*
+   - Oggi `ld_paragraph_set_ooxml` impiega **249,90 ms** totali contro **178,64 ms** di `build()`: quei ~71 ms sono serializzazione XML e ri-estrazione degli indici dei paragrafi.
    - File: `litedocx/src/litedocx_c.cpp`, `litedocx/src/docx_model.cpp`.
 
-3. **Voci secondarie del rebuild**
-   - `DocxBuilder build_body`: **~47 ms**
-   - `finalize create_render_item` + `init`: **~40 ms** (`27,6 + 12,5 ms`)
+2. **Voci secondarie del rebuild**
+   - `DocxBuilder build_body`: **~49 ms**
+   - `finalize create_render_item` + `init`: **~46 ms** (`29,5 + 16,4 ms`)
 
-4. **Rebuild incrementale per singolo paragrafo** *(strategico, alto rischio)*
+3. **Rebuild incrementale per singolo paragrafo** *(strategico, alto rischio)*
    - Da valutare **solo** se, dopo i punti 1–3, la latenza fosse ancora percepibile.
    - Il tentativo precedente (branch `lazy-cache`, eliminato) fallì per cache vuota su hit-test/caret e incoerenze DOM/render tree. Se ripreso, mantenere **sempre** il fallback al full-rebuild.
 

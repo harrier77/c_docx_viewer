@@ -38,6 +38,10 @@ typedef struct FontCacheEntry {
     int          underline;
     int          strike;
     IDWriteTextFormat *format;
+    IDWriteFontFace   *font_face;
+    float        advance_scale;
+    float        char_advances[256];
+    unsigned char char_cached[256];
     DWRITE_FONT_METRICS metrics;
     float        x_height;
     struct FontCacheEntry *next;
@@ -48,6 +52,7 @@ static FontCacheEntry *g_font_cache = NULL;
 /* Font handle returned to layout/DLL - wraps IDWriteTextFormat + metrics */
 typedef struct DwFontHandle {
     IDWriteTextFormat *format;
+    FontCacheEntry    *cache_entry;
     DWRITE_FONT_METRICS metrics;
     float        x_height;
     int          underline;

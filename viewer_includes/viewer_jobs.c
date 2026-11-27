@@ -129,6 +129,10 @@ static DWORD WINAPI WorkerProc(LPVOID arg)
                 ld_render(j->doc, j->content_w);
                 QueryPerformanceCounter(&_t1);
                 TLOG("JOB_RENDER ld_render took %.2f ms\n", (double)(_t1.QuadPart-_t0.QuadPart)*1000.0/(double)_f.QuadPart);
+#if TIMING_LOGS
+                TLOG("cb_text_width: fast=%d fallback=%d no_face=%d\n", g_tw_fast_ok, g_tw_fallback, g_tw_no_face);
+                g_tw_fast_ok = g_tw_fallback = g_tw_no_face = 0;
+#endif
             }
             LOG_JOB(JOB_RENDER, "ld_render done, posting WM_APP_RENDER_DONE");
             if (!g_shutdown)

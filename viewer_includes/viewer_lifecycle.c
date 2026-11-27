@@ -109,6 +109,7 @@ static void viewer_on_destroy(void)
         FontCacheEntry *e = g_font_cache;
         while (e) {
             FontCacheEntry *next = e->next;
+            if (e->font_face) IDWriteFontFace_Release(e->font_face);
             if (e->format) IDWriteTextFormat_Release(e->format);
             free(e->family);
             free(e);
