@@ -261,18 +261,25 @@ p=1001, span=1687, ul=30 (total ~3000).
 
 ## Ordered optimization plan (by expected gain)
 
-1. **Memoize inherited properties in `get_property`** — expected gain: HIGH.
-   The traversal spends ~270-290 ms on ~3000 elements with non-CSS work ~0 ms;
-   `get_property<T>` walks the parent chain for every property. A per-subtree
-   cache of inherited (true-inherited) properties could cut a large fraction.
-   Prereq: add a timer around `get_property` (as done for `apply_stylesheet`)
-   to quantify before implementing. Files: `litehtml/src/html_tag.cpp`,
-   `css_properties.cpp`.
+1. **(Measured, not a lever)** Memoization of `get_property` was implemented as
+   a timer first: 249,522 calls / 3.90 ms total (~0.000016 ms/call) on the
+   200-page document. `get_property` is NOT the bottleneck; memoizing it would
+   save at most ~4 ms. Reverted. See "Not worth pursuing".
 
-2. **Reduce virtual dispatch in `compute_styles`** — expected gain: MEDIUM.
-   Mark leaf classes (`el_text`, `el_style`, `el_image`) `final`; avoid virtual
-   calls in the hot child loop. Low risk. Files: `litehtml/include/litehtml/*.h`,
-   `html_tag.cpp`.
+2. **Reduce virtual dispatch / per-element overhead in `compute_styles`** —
+   expected gain: MEDIUM-HIGH (target of the ~300 ms gap).
+   Fine-grained measurement (200 pp, 3000 elements):
+   - own work (attr 2.5 + doc 0 + styleadd 1.0 + subst 2.8 + css 16.8) = 23.1 ms (7.7%)
+   - loop_oh (children iteration/dispatch excluding child calls) = 1.0 ms
+   - func_oh (prologue/timing gap) = 0.0 ms
+   - unmeasured = ~274 ms (92%) — inside child calls but not in any timed
+     statement: function-call/virtual-dispatch overhead, shared_ptr atomic ops,
+     cache misses, and possibly the chrono calls themselves.
+   - children visited = 66,391 (avg 22 children/node).
+   Candidate: flatten the recursion, avoid shared_ptr churn (raw parent pointer),
+   mark leaf element classes `final`, inline the child loop, reduce chrono
+   instrumentation. Files: `litehtml/src/html_tag.cpp`,
+   `litehtml/include/litehtml/element.h`, `html_tag.h`.
 
 3. **Optimize `create_render_item` (30.81 ms) and `init` (16.03 ms)** —
    expected gain: MEDIUM-LOW. Secondary but sum to ~47 ms. Profile first
@@ -301,3 +308,5 @@ p=1001, span=1687, ul=30 (total ~3000).
 - Span merging beyond plain-text runs (only -0.9% elements; diminishing returns).
 - Rendering/draw batching for justified text (< 4-5% of total; high risk).
 - CSS property resolution tuning (only 24 ms / 5%; not the bottleneck).
+- Memoization of inherited properties in `get_property` (measured 249,522 calls
+  / 3.90 ms total, ~0.000016 ms/call; not the bottleneck).
