@@ -32,7 +32,7 @@
 #endif
 
 #if TIMING_LOGS
-#define TLOG(fmt, ...) do { fprintf(stderr, "[TIMING] " fmt, ##__VA_ARGS__); fflush(stderr); } while (0)
+#define TLOG(fmt, ...) do { fprintf(stderr, "[TIMING] " fmt, ##__VA_ARGS__); } while (0)
 #else
 #define TLOG(fmt, ...) ((void)0)
 #endif
