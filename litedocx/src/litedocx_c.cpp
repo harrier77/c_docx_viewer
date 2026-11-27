@@ -2570,8 +2570,13 @@ int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
             }
             
             // 4. Replace old document with new one
+            LARGE_INTEGER td0, td1;
+            QueryPerformanceCounter(&td0);
             h->doc = new_doc;
             h->container->doc = new_doc;
+            QueryPerformanceCounter(&td1);
+            TLOG("ld_paragraph_set_ooxml old_doc_release took %.2f ms\n",
+                 (double)(td1.QuadPart - td0.QuadPart) * 1000.0 / (double)freq.QuadPart);
             
             // 5. Re-extract paragraph OOXML only if ooxml may contain multiple paragraphs
             if (std::strstr(ooxml, "</w:p>") != nullptr &&
