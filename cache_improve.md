@@ -9,7 +9,7 @@ Per mitigare l'impatto visivo, il viewer mantiene a schermo l'ultimo frame valid
 
 ## Stato attuale (branch `page_prova`, HEAD `5f7db3a`)
 
-Le misure seguenti provengono da `build_timing.bat` → `d2dview_timing.exe`: `litedocx` compilato in configurazione `Timing` (`-O2`, `TIMING_LOGS=1`, log di debug disattivati — `litedocx/build_litedocx.ps1:58-62`) e viewer `-O2`. Il corpus è sempre il documento da 200 pagine: **3.000 elementi** (`p=1001`, `span=1687`, `a=171`, `li=101`, `ul=30`, `br=8`, `body=1`, `html=1`).
+Le misure seguenti provengono da `build_timing.bat` → `d2dview_timing.exe`: `litedocx` compilato in configurazione `Timing` (`-O2`, `TIMING_LOGS=1`, log di debug disattivati — `litedocx/build_litedocx.ps1:58-62`) e viewer `-O2`. Il corpus è sempre il documento da 200 pagine: **3.000 tag** (`p=1001`, `span=1687`, `a=171`, `li=101`, `ul=30`, `br=8`, `body=1`, `html=1`) più ~63.000 nodi testo/spazio, che i timer non conteggiano (vedi sotto).
 
 ### Confronto apertura vs edit (edit semplice su un paragrafo)
 
@@ -50,12 +50,11 @@ Le misure seguenti provengono da `build_timing.bat` → `d2dview_timing.exe`: `l
 2. **L'edit è ancora ~2x più lento dell'apertura** (386,42 ms totali, 275–295 ms di `build()`) *nonostante* la cache di testo sia calda al 99,95%. Il costo si è spostato da `compute_styles` (che anzi migliora: −12,56 ms) a `build_body` (+28,81), `create_render_item` (+19,48) e `init` (+10,18).
 3. **Il `CSS font` raddoppia in edit** (4,52 → 8,39 ms) pur con la `TextWidthCache` quasi perfetta: il tempo non è più nella misura delle stringhe, ma nella risoluzione delle proprietà font.
 4. **Il `3000 elements` del log è fuorviante**: `g_compute_styles_calls` viene incrementato solo in `html_tag::compute_styles` (`litehtml/src/html_tag.cpp:381-382`). I nodi `el_text`/`el_space` — ~63.392 (53.048 hit + 10.344 miss) — non vengono conteggiati ma sono visitati dalla ricorsione. I 55,83 ms di `compute_styles` in apertura sono quindi ~8,74 ms di `css_properties::compute` (che è tutto ciò che misura il `CSS timing`) e ~47 ms di percorso testo/`text_width`.
-5. **Ci sono buchi di strumentazione** (differenze tra totali e somma dei sotto-timer):
-   - `finalize`: 11,87 ms in apertura, **33,55 ms in edit** non coperti dai sotto-timer;
-   - `build()`: 6,89 ms / 14,62 ms non coperti;
-   - `ld_paragraph_set_ooxml total` − (serialize + build esterno) = **~90,75 ms** da attribuire;
-   - timer `build()` esterno 294,87 ms vs interno 275,09 ms: **~19,78 ms** di differenza.
-6. `ld_render` resta stabile a **~52 ms** in entrambi i percorsi: non è il collo di bottiglia del rebuild, ma diventa rilevante se l'obiettivo è scendere sotto i ~100 ms totali per edit.
+5. **Il blocco mancante di ~90 ms è la distruzione del vecchio documento**: a `litedocx_c.cpp:2574` (`h->container->doc = new_doc`) viene rilasciato l'ultimo riferimento al documento precedente; ~66k nodi DOM/render, liste e stringhe vengono deallocati dentro il timer `total` ma fuori da ogni sotto-timer. Durante il rebuild i due alberi coesistono (`h->doc` e `container->doc`): questo spiega il rallentamento ~1,6x delle fasi dominate dalle allocazioni (`build_body`, `create_render_item`, `init`).
+6. **I ~20 ms di scarto tra timer `build()`** (294,87 esterno vs 275,09 interno) sono costruttore `DocxBuilder`, `QueryPerformanceFrequency` e i dump `dump_css_timing`/`dump_html_tag_timing` + `fprintf(stderr)`, esclusi dal timer interno: per quantità di lavoro dovrebbero essere ≪1 ms, quindi la causa più plausibile è I/O su console/scheduler. Restano da spiegare i 11,87/33,55 ms di `finalize` e i 6,89/14,62 ms di `build()` non coperti dai sotto-timer.
+7. **Il `CSS font` in edit non è una regressione della cache testo**: ogni documento nuovo ha `m_fonts` vuoto (`document.cpp:527-537`) e la cache font del viewer è una lista lineare (`viewer_fonts.c:8-21`): i +3,9 ms sono risoluzione delle proprietà font, non `text_width`.
+8. **Dopo ogni edit la cache testo viene svuotata**: `handle_edit_applied` (`maind2dv.c:208`) chiama `ld_invalidate_font_cache`; il `ld_render` successivo (`litedocx_c.cpp:1617-1620`) esegue `text_width_cache.clear()` anche se salta `clear_font_cache`/`rebuild_render_tree` perché `m_full_layout_done=false`. Il log con 63.361 hit è quindi solo il **primo edit dopo l'apertura**; gli edit successivi ripartono con cache fredda.
+9. `ld_render` resta stabile a **~52 ms** in entrambi i percorsi: non è il collo di bottiglia del rebuild, ma diventa rilevante se l'obiettivo è scendere sotto i ~100 ms totali per edit.
 
 > I numeri della vecchia tabella in questa pagina (es. `build()` 235,22 ms in apertura, 249,90 ms per l'edit) erano di una misurazione precedente e non sono confrontabili direttamente con quelli qui sopra, perché il build diagnostico usa ora `Timing` = `-O2` su entrambe le DLL e il viewer.
 
@@ -78,7 +77,7 @@ Le misure seguenti provengono da `build_timing.bat` → `d2dview_timing.exe`: `l
 
 I ~63k nodi testo/spazio nascono in `litedocx/src/docx_builder.cpp:1273-1324` (`append_text` crea un `el_text` per parola e un `el_space` per ogni spazio singolo). Ogni nodo passa da `el_text::compute_styles` (`litehtml/src/el_text.cpp:28-104`) che arriva a `text_width` (riga 100-101), il quale consulta la `TextWidthCache` (`litedocx/src/litedocx_c.cpp:320-414,732-784`) e il callback `cb_text_width` (`viewer_includes/viewer_fonts.c:221-305`).
 
-In apertura `open_impl` crea un **nuovo container** e quindi una cache vuota: i 10.344 miss sono il first-touch delle coppie `(parola, font)` uniche. In edit il container e la cache vengono riutilizzati (`reset_stats()` ma non `clear()`), per questo i miss crollano a 33. I miss in apertura non possono arrivare a zero senza preriscaldare la cache; si possono però rendere più economici.
+In apertura `open_impl` crea un **nuovo container** e quindi una cache vuota: i 10.344 miss sono il first-touch delle coppie `(parola, font)` uniche. Nel primo edit dopo l'apertura il container e la cache vengono riutilizzati (`reset_stats()` ma non `clear()`), per questo i miss crollano a 33 — ma il render successivo svuota la cache (punto 8 qui sopra), quindi gli edit seguenti ripartono freddi. I miss in apertura non possono arrivare a zero senza preriscaldare la cache; si possono però rendere più economici.
 
 | Possibile intervento | Dove | Guadagno stimato | Rischio |
 |---|---|---:|---|
@@ -95,13 +94,34 @@ Nota: azzerare completamente il `CSS timing` darebbe al massimo 8,74 ms (16% dei
 
 ---
 
+## Serbatoio lato rebuild/edit
+
+`create_render_item` (~0,74 µs/nodo in edit) e `init` (~0,41 µs/nodo) sono lineari sul numero di nodi (~66k, non 3k): il costo è fatto di `make_shared`, `std::list` e copie di stringhe per nodo, non di un algoritmo nascosto. In `init` i render item di blocco vengono però creati **due volte**: `render_item_block::init()` (`litehtml/src/render_block.cpp:124,177-186`) crea un nuovo contesto e copia la lista dei figli, sostituendo quello costruito da `create_render_item` — ~1.200 `make_shared` aggiuntivi e ~14.400 chiamate a `to_pixels()`.
+
+| Possibile intervento | Dove | Guadagno stimato | Rischio |
+|---|---|---:|---|
+| Differire la distruzione del vecchio documento fuori dal critical path dell'edit (retire-list su `ld_doc`, liberata in un job sul worker) | `litedocx_c.cpp:2573-2574`, `viewer_jobs.c:65-73,286-288` | **80–90 ms/edit (~23% del totale)** | Medio (mantenere affinità worker per COM/D2D) |
+| Evitare la doppia creazione dei render item di blocco in `init` scegliendo il contesto già in `create_render_item` | `render_block.cpp:124,177-186`, `render_item.cpp:8-28` | 5–8 ms | Medio |
+| Indicizzare i selettori CSS per tag/classe invece di scandirli tutti per ogni elemento | `html_tag.cpp:211-311`, `master_css.h` (~67 selettori) | 5–8 ms | Medio (cascade/specificità) |
+| `m_renders` da `std::list<weak_ptr>` a vettore/singolo slot inline | `element.h:35`, `element.cpp:192-215` | 3–6 ms | Medio |
+| `XmlNode::attr_view()` (`string_view`) nei parse che usano il valore solo per `atoi`/confronti | `xml_dom.h:26-30`, `docx_style.cpp:217-374` | 3–6 ms su `build_body` | Basso/medio |
+| Sostituire `std::ostringstream` con `std::string` + `to_chars` nelle chiavi di `StyleCache` | `docx_builder.h:142-167` | 2–4 ms | Basso |
+| Bufferizzare i `TLOG` in modalità timing (una sola flush a fine build) | `debug_log.h:34-38`, `docx_builder.cpp:277-332` | 1–5 ms | Basso |
+| Evitare il `vector` in `apply_style_chain` (buffer stack) | `docx_style.cpp:89-116` | 1–2 ms | Basso |
+| Passare le mappe di attributi per `move` in `make_element` | `docx_builder.cpp:1348` | 1–2 ms | Basso |
+| `reserve()` su `blocks`/`lists`/`StyleCache`; riutilizzo `StyleCache` tra edit | `docx_builder.cpp:393,443`, `docx_builder.h:233-238`, `docx_builder.cpp:275` | < 1 ms | Basso (ultimo non conveniente) |
+
+---
+
 ## Prossime priorità (aggiornate, in ordine di impatto)
 
-1. **Spiegare i ~90 ms fuori timer in `ld_paragraph_set_ooxml`** e i ~20 ms di scarto tra timer `build()` esterno/intero; poi instrumentare i ~33 ms non coperti da `finalize` in edit. Senza questo non si sa quanto del ritardo sia rebuild e quanto gestione del documento/viewer.
-2. **`DocxBuilder build_body`**: 74,69 ms in edit (45,88 in apertura). È la singola fase più costosa del percorso edit insieme a `finalize`.
-3. **`finalize create_render_item` + `init`**: 49,13 + 27,11 ms in edit (29,65 + 16,93 in apertura). Verificare QUARTZ/allocazioni per nodo e eventuale duplicazione di strutture già presenti nel vecchio documento.
-4. **`CSS font` in edit**: 8,39 ms vs 4,52 ms in apertura con cache calda; capire cosa viene ricalcolato per-parameter (font description, metrics, lookup).
-5. **Rebuild incrementale per singolo paragrafo** *(strategico, alto rischio)*: da valutare **solo** dopo aver chiuso i punti 1–4 se la latenza fosse ancora percepibile. Il tentativo precedente (branch `lazy-cache`, eliminato) fallì per cache vuota su hit-test/caret e incoerenze DOM/render tree. Se ripreso, mantenere **sempre** il fallback al full-rebuild.
+1. **Distruzione del vecchio documento**: misurare con un TLOG dedicato attorno a `litedocx_c.cpp:2573-2574`, poi differirla fuori dal critical path dell'edit. È il singolo intervento più redditizio (~80–90 ms, 23% del totale) e spiega perché l'edit è ~1,6x più lento nelle fasi di allocazione.
+2. **Invalidazione della cache testo dopo ogni edit**: verificare con un secondo edit consecutivo (il log attuale copre solo il primo dopo l'apertura); se la cache riparte fredda a causa di `ld_invalidate_font_cache` (`maind2dv.c:208` → `litedocx_c.cpp:1619`), evitare l'invalidazione negli edit che cambiano solo testo.
+3. **Ridurre i nodi `el_text` per parola**: 15–25 ms su `build_body`, 10–15 su `create_render_item`, 5–8 su `init`, oltre al layout. Rischio alto: il word-wrapping si appoggia al nodo-parola (`render_inline_context.cpp:345-351`).
+4. **Eliminare la doppia creazione dei render item di blocco in `init`**: 5–8 ms, rischio medio.
+5. **Indicizzare i selettori CSS**: 5–8 ms su `apply_master_css` + `apply_stylesheets`, rischio medio per l'ordine di cascata.
+6. **Interventi a basso rischio**: bufferizzare i TLOG (1–5 ms, spiega anche parte del delta dei 20 ms), `attr_view` (3–6 ms), `to_chars` (2–4 ms), `move` delle mappe (1–2 ms); strumentare i ~33 ms ancora non coperti in `finalize`.
+7. **Rebuild incrementale per singolo paragrafo** *(strategico, alto rischio)*: da valutare **solo** dopo aver chiuso i punti 1–6 se la latenza fosse ancora percepibile. Il tentativo precedente (branch `lazy-cache`, eliminato) fallì per cache vuota su hit-test/caret e incoerenze DOM/render tree. Se ripreso, mantenere **sempre** il fallback al full-rebuild.
 
 ---
 
