@@ -317,64 +317,100 @@ namespace
         return ok;
     }
 
-    /* LRU Cache for text width measurements: key = text + '|' + font_handle */
+    /* Fixed-size 4-way set-associative cache for text width measurements.
+     * Keyed by (text, stable font_key) so entries survive document rebuilds
+     * where DwFontHandle* pointers are reallocated, with zero heap allocation
+     * on cache hits. */
     class TextWidthCache
     {
     public:
-        explicit TextWidthCache(size_t max_entries = 1024) : m_max_entries(max_entries) {}
+        static constexpr size_t TABLE_SIZE = 65536;
 
-        // Returns cached width or -1 if not cached
-        int get(const char* text, litehtml::uint_ptr hFont) const
+        TextWidthCache() : m_table(TABLE_SIZE) {}
+
+        int get(const char* text, uint64_t font_key) const
         {
             if (!text) return -1;
-            std::string key = make_key(text, hFont);
-            auto it = m_map.find(key);
-            if (it != m_map.end()) {
-                // Move to front (MRU)
-                m_list.splice(m_list.begin(), m_list, it->second);
-                return it->second->second;
+            const uint64_t h = compute_hash(text, font_key);
+            const size_t base = static_cast<size_t>(h) & (TABLE_SIZE - 4);
+            for (size_t i = 0; i < 4; ++i)
+            {
+                const Entry& e = m_table[base + i];
+                if (e.hash == 0) break;
+                if (e.hash == h && e.font_key == font_key && e.text == text)
+                {
+                    ++m_hits;
+                    return e.width;
+                }
             }
+            ++m_misses;
             return -1;
         }
 
-        void put(const char* text, litehtml::uint_ptr hFont, int width)
+        void put(const char* text, uint64_t font_key, int width)
         {
             if (!text) return;
-            std::string key = make_key(text, hFont);
-            auto it = m_map.find(key);
-            if (it != m_map.end()) {
-                // Update existing, move to front
-                it->second->second = width;
-                m_list.splice(m_list.begin(), m_list, it->second);
-                return;
+            const uint64_t h = compute_hash(text, font_key);
+            const size_t base = static_cast<size_t>(h) & (TABLE_SIZE - 4);
+            for (size_t i = 0; i < 4; ++i)
+            {
+                Entry& e = m_table[base + i];
+                if (e.hash == 0 || (e.hash == h && e.font_key == font_key && e.text == text))
+                {
+                    e.hash = h;
+                    e.font_key = font_key;
+                    e.width = width;
+                    e.text = text;
+                    return;
+                }
             }
-            // Evict if needed
-            if (m_list.size() >= m_max_entries) {
-                m_map.erase(m_list.back().first);
-                m_list.pop_back();
-            }
-            m_list.emplace_front(std::move(key), width);
-            m_map[m_list.front().first] = m_list.begin();
+            Entry& victim = m_table[base + ((h >> 16) & 3)];
+            victim.hash = h;
+            victim.font_key = font_key;
+            victim.width = width;
+            victim.text = text;
         }
 
         void clear()
         {
-            m_list.clear();
-            m_map.clear();
+            for (auto& e : m_table)
+            {
+                e.hash = 0;
+                e.text.clear();
+            }
+            reset_stats();
         }
+
+        void reset_stats() { m_hits = 0; m_misses = 0; }
+        size_t hits() const { return m_hits; }
+        size_t misses() const { return m_misses; }
 
     private:
-        static std::string make_key(const char* text, litehtml::uint_ptr hFont)
+        struct Entry
         {
-            std::string key(text);
-            key.push_back('|');
-            key.append(reinterpret_cast<const char*>(&hFont), sizeof(hFont));
-            return key;
+            uint64_t    hash = 0;
+            uint64_t    font_key = 0;
+            int         width = 0;
+            std::string text;
+        };
+
+        static uint64_t compute_hash(const char* text, uint64_t font_key)
+        {
+            uint64_t h = 14695981039346656037ULL ^ font_key;
+            for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p; ++p)
+            {
+                h ^= *p;
+                h *= 1099511628211ULL;
+            }
+            h ^= h >> 33;
+            h *= 0xff51afd7ed558ccdULL;
+            h ^= h >> 33;
+            return h == 0 ? 1 : h;
         }
 
-        size_t m_max_entries;
-        mutable std::list<std::pair<std::string, int>> m_list;
-        std::unordered_map<std::string, decltype(m_list)::iterator> m_map;
+        std::vector<Entry> m_table;
+        mutable size_t     m_hits = 0;
+        mutable size_t     m_misses = 0;
     };
 
     // Helper: log start pixel of each text line to startpix.txt (for justified text alignment debugging)
@@ -615,18 +651,52 @@ namespace
             return raw;
         }
 
+        std::unordered_map<litehtml::uint_ptr, uint64_t> font_key_map;
+
+        static uint64_t make_font_key(const char* family, int size, int bold, int italic)
+        {
+            uint64_t h = 14695981039346656037ULL;
+            if (family)
+            {
+                for (const unsigned char* p = reinterpret_cast<const unsigned char*>(family); *p; ++p)
+                {
+                    h ^= *p;
+                    h *= 1099511628211ULL;
+                }
+            }
+            h ^= static_cast<uint64_t>(size) * 0x9e3779b97f4a7c15ULL;
+            h ^= static_cast<uint64_t>((bold ? 1 : 0) | (italic ? 2 : 0)) << 32;
+            h ^= h >> 33;
+            h *= 0xff51afd7ed558ccdULL;
+            h ^= h >> 33;
+            return h == 0 ? 1 : h;
+        }
+
+        uint64_t resolve_font_key(litehtml::uint_ptr hFont) const
+        {
+            auto it = font_key_map.find(hFont);
+            return it != font_key_map.end() ? it->second : static_cast<uint64_t>(hFont);
+        }
+
         litehtml::uint_ptr create_font(const litehtml::font_description& descr, const litehtml::document*,
                                        litehtml::font_metrics* fm) override
         {
             lh_font_metrics m = {};
             void*           f = nullptr;
+            int             bold = 0;
+            int             italic = 0;
             if(cb.lh.create_font)
             {
-                const int bold      = descr.weight >= 700 ? 1 : 0;
-                const int italic    = descr.style == litehtml::font_style_italic ? 1 : 0;
+                bold                = descr.weight >= 700 ? 1 : 0;
+                italic              = descr.style == litehtml::font_style_italic ? 1 : 0;
                 const int underline = (descr.decoration_line & litehtml::text_decoration_line_underline) ? 1 : 0;
                 const int strike    = (descr.decoration_line & litehtml::text_decoration_line_line_through) ? 1 : 0;
                 f = cb.lh.create_font(descr.family.c_str(), static_cast<int>(descr.size), bold, italic, underline, strike, &m);
+            }
+            if(f)
+            {
+                font_key_map[reinterpret_cast<litehtml::uint_ptr>(f)] =
+                    make_font_key(descr.family.c_str(), static_cast<int>(descr.size), bold, italic);
             }
 
             if(fm)
@@ -649,6 +719,10 @@ namespace
 
         void delete_font(litehtml::uint_ptr hFont) override
         {
+            if(hFont)
+            {
+                font_key_map.erase(hFont);
+            }
             if(cb.lh.delete_font && hFont)
             {
                 cb.lh.delete_font(reinterpret_cast<void*>(hFont));
@@ -657,8 +731,9 @@ namespace
 
         litehtml::pixel_t text_width(const char* text, litehtml::uint_ptr hFont) override
         {
+            const uint64_t font_key = resolve_font_key(hFont);
             // Check cache first
-            int cached = text_width_cache.get(text, hFont);
+            int cached = text_width_cache.get(text, font_key);
             if (cached >= 0) {
                 return static_cast<litehtml::pixel_t>(cached);
             }
@@ -671,11 +746,11 @@ namespace
                 if(cb.lh.text_width)
                 {
                     int width = cb.lh.text_width(text ? text : "", reinterpret_cast<void*>(hFont));
-                    text_width_cache.put(text, hFont, width);
+                    text_width_cache.put(text, font_key, width);
                     return static_cast<litehtml::pixel_t>(width);
                 }
                 int fallback = static_cast<int>(std::strlen(text ? text : "") * 7 / 2);
-                text_width_cache.put(text, hFont, fallback);
+                text_width_cache.put(text, font_key, fallback);
                 return litehtml::pixel_t(fallback);
             }
 
@@ -698,13 +773,13 @@ namespace
                 GetTextExtentPoint32W(m_measure_dc, w, static_cast<int>(wlen), &sz);
                 SelectObject(m_measure_dc, old);
                 int width = static_cast<int>(sz.cx);
-                text_width_cache.put(text, hFont, width);
+                text_width_cache.put(text, font_key, width);
                 return static_cast<litehtml::pixel_t>(width);
             }
             // Rough fallback: 0.5 em per byte.  Only used when the host does
             // not provide text metrics.
             int fallback = static_cast<int>(std::strlen(text ? text : "") * 7 / 2);
-            text_width_cache.put(text, hFont, fallback);
+            text_width_cache.put(text, font_key, fallback);
             return litehtml::pixel_t(fallback);
         }
 
@@ -1403,8 +1478,11 @@ void* open_impl(const void* data, size_t size, const std::string& file_name, con
             }
 
             container->model = model.get();
+            container->text_width_cache.reset_stats();
             litedocx::DocxBuilder builder(*model, container);
             litehtml::document::ptr doc = builder.build();
+            TLOG("TextWidthCache (open): hits=%zu misses=%zu\n",
+                 container->text_width_cache.hits(), container->text_width_cache.misses());
             if(!doc)
             {
                 DLOG("[LITEDOCX_OPEN] build failed\n");
@@ -2466,11 +2544,14 @@ int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
             // 3. Rebuild litehtml document from updated XML
             LARGE_INTEGER tb0, tb1;
             QueryPerformanceCounter(&tb0);
+            h->container->text_width_cache.reset_stats();
             litedocx::DocxBuilder builder(*h->container->model, h->container);
             litehtml::document::ptr new_doc = builder.build();
             QueryPerformanceCounter(&tb1);
             double build_ms = (double)(tb1.QuadPart - tb0.QuadPart) * 1000.0 / (double)freq.QuadPart;
-            TLOG("ld_paragraph_set_ooxml build() took %.2f ms\\n", build_ms);
+            TLOG("ld_paragraph_set_ooxml build() took %.2f ms\n", build_ms);
+            TLOG("TextWidthCache (edit): hits=%zu misses=%zu\n",
+                 h->container->text_width_cache.hits(), h->container->text_width_cache.misses());
             if (!new_doc)
             {
                 DLOG("[ld_paragraph_set_ooxml] DocxBuilder::build() failed: %s\n", builder.error().c_str());
@@ -2492,7 +2573,7 @@ int ld_paragraph_set_ooxml(void* doc, int index, const char* ooxml)
             
             QueryPerformanceCounter(&t1);
             double total_ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
-            TLOG("ld_paragraph_set_ooxml total took %.2f ms\\n", total_ms);
+            TLOG("ld_paragraph_set_ooxml total took %.2f ms\n", total_ms);
             DLOG("[ld_paragraph_set_ooxml] Document rebuilt successfully for paragraph %d\n", index);
             return 1;
         }

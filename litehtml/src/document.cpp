@@ -32,10 +32,7 @@
 
 namespace litehtml
 {
-    int    g_compute_styles_calls  = 0;
-    int    g_el_text_compute_calls = 0;
-    double g_el_text_compute_ms    = 0.0;
-    double g_el_text_width_ms      = 0.0;
+    int g_compute_styles_calls = 0;
 
     document::document(document_container* container)
     {
@@ -181,10 +178,7 @@ namespace litehtml
             TLOG("finalize apply_stylesheets took %.2f ms\n", std::chrono::duration<double,std::milli>(ta1-ta0).count());
 
             // Initialize element::m_css
-            g_compute_styles_calls  = 0;
-            g_el_text_compute_calls = 0;
-            g_el_text_compute_ms    = 0.0;
-            g_el_text_width_ms      = 0.0;
+            g_compute_styles_calls = 0;
             auto tc0 = std::chrono::high_resolution_clock::now();
             m_root->compute_styles();
             auto tc1 = std::chrono::high_resolution_clock::now();
@@ -192,9 +186,6 @@ namespace litehtml
             TLOG("finalize compute_styles took %.2f ms (%d elements, %.3f ms/element)\n",
                  _cs_ms, g_compute_styles_calls,
                  g_compute_styles_calls > 0 ? _cs_ms / (double)g_compute_styles_calls : 0.0);
-            TLOG("finalize el_text::compute_styles: calls=%d total=%.2f ms (text_width=%.2f ms, other=%.2f ms)\n",
-                 g_el_text_compute_calls, g_el_text_compute_ms, g_el_text_width_ms,
-                 g_el_text_compute_ms - g_el_text_width_ms);
 
             // Create rendering tree
             auto tr0 = std::chrono::high_resolution_clock::now();

@@ -1,16 +1,7 @@
 #include "html.h"
-#include "debug_log.h"
-#include <chrono>
 #include "el_text.h"
 #include "render_item.h"
 #include "document_container.h"
-
-namespace litehtml
-{
-    extern int    g_el_text_compute_calls;
-    extern double g_el_text_compute_ms;
-    extern double g_el_text_width_ms;
-}
 
 litehtml::el_text::el_text(const char* text, const document::ptr& doc) :
     element(doc)
@@ -36,10 +27,6 @@ void litehtml::el_text::get_text(std::string& text) const
 
 void litehtml::el_text::compute_styles(bool /*recursive*/)
 {
-#if TIMING_LOGS
-    g_el_text_compute_calls++;
-    auto _et0 = std::chrono::high_resolution_clock::now();
-#endif
     element::ptr el_parent = parent();
     if(el_parent)
     {
@@ -110,21 +97,10 @@ void litehtml::el_text::compute_styles(bool /*recursive*/)
     } else
     {
         m_size.height = fm.height;
-#if TIMING_LOGS
-        auto _tw0 = std::chrono::high_resolution_clock::now();
-#endif
         m_size.width  = get_document()->container()->text_width(
             m_use_transformed ? m_transformed_text.c_str() : m_text.c_str(), font);
-#if TIMING_LOGS
-        auto _tw1 = std::chrono::high_resolution_clock::now();
-        g_el_text_width_ms += std::chrono::duration<double, std::milli>(_tw1 - _tw0).count();
-#endif
     }
     m_draw_spaces = fm.draw_spaces;
-#if TIMING_LOGS
-    auto _et1 = std::chrono::high_resolution_clock::now();
-    g_el_text_compute_ms += std::chrono::duration<double, std::milli>(_et1 - _et0).count();
-#endif
 }
 
 void litehtml::el_text::draw(uint_ptr hdc, pixel_t x, pixel_t y, const position* clip,
